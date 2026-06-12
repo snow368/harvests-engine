@@ -1,0 +1,96 @@
+{
+  "_description": "Style index maps competitor brands to their visual characteristics for IP-Adapter style transfer.",
+  "_usage": "image-processor.py uses this to select appropriate reference images and build prompts. Add new brands by copying the kwadron template.",
+
+  "brands": {
+    "kwadron": {
+      "name": "Kwadron",
+      "description": "Cool industrial aesthetic — blue+black, hard rim lighting, dark backgrounds, sharp metallic highlights",
+      "lighting": "hard light from upper left, sharp metallic highlights, rim light on edges",
+      "composition": "floating center, needle macro, 45-degree angle",
+      "background": "pure black to dark blue gradient, matte dark surfaces",
+      "color_palette": "blue accents, black base, silver metallic elements",
+      "mood": "precise, industrial, professional, cool tones",
+      "materials": "matte plastic, brushed metal, chrome accents",
+      "contrast": "high contrast, sharp directional shadows",
+      "avoid": "warm tones, soft lighting, white backgrounds",
+      "prompt_formula": "[Angle] + hard light upper-left + metallic highlights + black-blue gradient + matte-plastic chrome + industrial precision + shallow DOF",
+      "best_for": "主线粉绿 — replace blue with pink, keep industrial lighting",
+      "reference_folder": "kwadron"
+    },
+
+    "tatsoul": {
+      "name": "Tattoo Soul",
+      "description": "Dark textured, authentic tattoo culture — dark wood, leather, muted colors",
+      "lighting": "soft diffused lighting, no harsh shadows, even illumination",
+      "composition": "flat lay, product group, overhead",
+      "background": "dark wood grain, leather texture, charcoal surfaces",
+      "color_palette": "muted low saturation, green accent on charcoal",
+      "mood": "authentic, gritty, tattoo culture, vintage industrial",
+      "materials": "wood grain, leather, matte surfaces",
+      "contrast": "low-moderate contrast, muted tones",
+      "avoid": "bright colors, glossy finishes, clean white backgrounds",
+      "prompt_formula": "[Angle] + soft diffused light + wood/leather texture + charcoal base + muted greens + tattoo authenticity + medium DOF",
+      "best_for": "Men灰白 — fits cool grey aesthetic perfectly",
+      "reference_folder": "tatsoul"
+    },
+
+    "world_famous": {
+      "name": "World Famous Ink",
+      "description": "Bold luxury commercial — gold accents, saturated colors, maximum contrast",
+      "lighting": "intense commercial hard lighting, sharp highlights, advertising-ready",
+      "composition": "low angle eye-level, bold center composition",
+      "background": "pure matte black, maximum contrast surface",
+      "color_palette": "ultra-saturated ink colors, gold luxury accents",
+      "mood": "premium, bold, high-end, advertising-ready",
+      "materials": "glossy glass, gold chrome, vibrant ink",
+      "contrast": "maximum luminance contrast, deep blacks, bright highlights",
+      "avoid": "muted tones, soft lighting, casual aesthetics",
+      "prompt_formula": "[Angle] + intense commercial hard light + matte black + saturated ink + gold accents + premium luxury + sharp directional shadows",
+      "best_for": "PMU粉透明 — softens with pink instead of gold, keeps premium feel",
+      "reference_folder": "world_famous"
+    }
+  },
+
+  "peach_product_lines": {
+    "main": {
+      "name": "主线粉绿",
+      "palette": "pink and green color scheme",
+      "features": "pink silicone ring with PEACH logo, green collar, white frosted translucent housing",
+      "bg_gradient": "soft pink to white gradient",
+      "mood": "fresh, premium, feminine",
+      "recommended_style": "kwadron",
+      "modification": "same composition as Kwadron, swap blue->pink, keep industrial lighting"
+    },
+    "men": {
+      "name": "Men灰白",
+      "palette": "grey and white color scheme, cool tones",
+      "features": "grey silicone ring with PEACH logo, white housing, black metal accents",
+      "bg_gradient": "dark grey gradient",
+      "mood": "masculine, modern, bold",
+      "recommended_style": "tatsoul",
+      "modification": "same composition as Tatsoul, swap green->grey, keep dark textured feel"
+    },
+    "pmu": {
+      "name": "PMU粉透明",
+      "palette": "pink and transparent color scheme",
+      "features": "pink translucent housing, clear connector showing needle, soft pink accents",
+      "bg_gradient": "soft white to light pink gradient",
+      "mood": "professional, delicate, clinical-chic",
+      "recommended_style": "world_famous",
+      "modification": "same premium feel as World Famous, swap gold->pink, soften to translucent"
+    }
+  },
+
+  "reference_image_rules": {
+    "requirements": [
+      "High resolution only — minimum 1024x1024px",
+      "Clean product shot with clear visibility of product details",
+      "Good lighting that shows texture and material clearly",
+      "One product per image — no crowded scenes",
+      "No text overlays or watermarks preferred"
+    ],
+    "directory_structure": "style_rules/reference_images/<brand>/<filename>.jpg",
+    "recommended_count_per_brand": "5-10 reference images minimum"
+  }
+}

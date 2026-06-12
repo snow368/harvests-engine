@@ -1,0 +1,480 @@
+{
+  "protocol": "Cartridge Visual Rules v1",
+  "description": "Visual identification rules for tattoo needles and cartridges — what details can be detected from product photography. Bridges needle.json knowledge base with vision pipeline detection capabilities.",
+  "version": "1.0",
+
+  "needle_type_visual_cues": {
+    "description": "How to distinguish needle types (RL/RS/M1/CM/F) from visual inspection of the tip",
+    "RL": {
+      "name": "Round Liner",
+      "visual_cues": [
+        "needle tips arranged in a tight circle when viewed head-on",
+        "tips converge to a single point (like a pencil tip)",
+        "crisp circular arrangement with no gap between needles",
+        "very tight pinch — needles almost touching each other"
+      ],
+      "distinguish_from": {
+        "RS": "RL = no gap between needles (tight circle). RS = small visible gap between needles (loose circle).",
+        "M1": "RL = single circular dot. M1 = two parallel rows (flat/oval shape)."
+      },
+      "tip_appearance": "single sharp point",
+      "best_for": ["lining", "outline work", "precise detail"]
+    },
+    "RS": {
+      "name": "Round Shader",
+      "visual_cues": [
+        "needle tips arranged in a circle but with small gaps between them",
+        "circle diameter larger than RL of same count",
+        "loose pinch — needles spread slightly apart"
+      ],
+      "distinguish_from": {
+        "RL": "RS has visible gaps between needles (loose), RL has no gaps (tight). RS deposits more ink.",
+        "CM": "RS = round arrangement. CM = curved arc (not full circle)."
+      },
+      "tip_appearance": "round with gaps",
+      "best_for": ["shading", "gradients", "color packing"]
+    },
+    "M1_MAG": {
+      "name": "Magnum / M1",
+      "visual_cues": [
+        "needle tips visible as two parallel rows (flat configuration)",
+        "oval or rectangular tip shape when viewed head-on",
+        "broader and flatter than RL/RS round tips",
+        "needles arranged in staggered or straight rows"
+      ],
+      "distinguish_from": {
+        "CM": "M1 = straight flat rows. CM = curved/arched rows.",
+        "F": "M1 = two rows (double). F = single row (flat)."
+      },
+      "tip_appearance": "flat oval / rectangular",
+      "subtypes": {
+        "magnum_flat": "standard flat magnum, straight rows",
+        "magnum_stacked": "stacked (tight packed) magnum, needles very close",
+        "magnum_weaved": "weaved magnum, needles at slight angle"
+      },
+      "best_for": ["color packing", "large area fill", "solid blackwork"]
+    },
+    "CM": {
+      "name": "Curved Magnum",
+      "visual_cues": [
+        "needle tips arranged in a curved/arched pattern",
+        "rows curve gently (not straight like M1)",
+        "arc shape visible when viewed from the side",
+        "less skin trauma than flat M1"
+      ],
+      "distinguish_from": {
+        "M1": "CM = curved rows. M1 = straight rows. CM = smoother shading, less skin trauma.",
+        "RS": "CM = two curved rows (larger area). RS = single circle (smaller area)."
+      },
+      "tip_appearance": "curved arc / smile shape",
+      "best_for": ["smooth shading", "gradients", "black and grey realism"]
+    },
+    "F": {
+      "name": "Flat",
+      "visual_cues": [
+        "needle tips arranged in a single straight line",
+        "flat narrow tip profile (thin line vs round)",
+        "single row only (not double like M1)"
+      ],
+      "distinguish_from": {
+        "M1": "F = single row. M1 = two rows (double).",
+        "RL": "F = straight line profile. RL = round profile."
+      },
+      "tip_appearance": "single thin line",
+      "best_for": ["precise lines", "geometric", "fine details"]
+    },
+    "Bugpin": {
+      "name": "Bugpin",
+      "visual_cues": [
+        "needles visibly thinner than standard (comparison context needed)",
+        "finer gauge than surrounding reference objects",
+        "often used in CM configuration (bugpin curved magnum)"
+      ],
+      "detection_note": "Bugpin is defined by wire diameter (<0.30mm), not by arrangement. Any type (RL/RS/CM/M1) can be bugpin if gauge is small enough.",
+      "gauge_threshold": "<= #8 (0.25mm) or #6 (0.20mm)",
+      "best_for": ["realism detail", "portrait", "fine shading"]
+    }
+  },
+
+  "brand_visual_signature": {
+    "description": "Brand-specific visual fingerprints for identifying needle/cartridge manufacturers from product photos",
+    "kwadron": {
+      "name": "Kwadron",
+      "country": "Poland",
+      "housingColor": "black with metallic (gold/silver) label ring",
+      "labelStyle": "metallic ring around cartridge body with embossed logo",
+      "membraneColor": "clear/transparent thin membrane",
+      "tipDesign": "tapered standard",
+      "connectionType": "screw_long",
+      "packagingStyle": "individual blister in branded display box",
+      "distinctiveFeatures": ["gold ring on signature series", "black body is signature color", "transparent membrane visible at base"],
+      "productLines": {
+        "hybrid_system": "standard line, black body + gold ring",
+        "hybrid_bugpin": "same visual but labeled for bugpin gauge"
+      },
+      "certaintyCues": ["black + gold = high confidence Kwadron", "if not black+gold, check label ring for embossed K logo"]
+    },
+    "cheyenne": {
+      "name": "Cheyenne",
+      "country": "Germany",
+      "housingColor": "semi-transparent colored (blue/pink/purple)",
+      "labelStyle": "laser-etched or printed on translucent body",
+      "membraneColor": "white standard or silicone high-performance",
+      "tipDesign": "tapered standard",
+      "connectionType": "screw_long (proprietary thread)",
+      "packagingStyle": "individual sterile blister, color-coded by line",
+      "distinctiveFeatures": ["translucent colored body is signature", "visible silicone membrane (white) on Safety series"],
+      "productLines": {
+        "safety": "translucent blue — most common, ISO 13485, visible white silicone membrane",
+        "craft": "translucent pink — budget line, fewer configurations",
+        "capillary": "translucent purple — 10x longer ink flow"
+      },
+      "certaintyCues": ["translucent blue = high confidence Safety series", "pink = Craft, purple = Capillary"]
+    },
+    "bigwasp": {
+      "name": "BigWasp",
+      "country": "China",
+      "housingColor": "clear/transparent",
+      "labelStyle": "printed label on clear body or packaging",
+      "membraneColor": "white standard",
+      "tipDesign": "tapered standard",
+      "connectionType": "screw_long",
+      "packagingStyle": "Gen 3 branding on box, color-coded label bands",
+      "distinctiveFeatures": ["transparent body is signature", "generation number (Gen 3) on packaging", "affordable positioning"],
+      "certaintyCues": ["clear body + affordable pricing context = BigWasp", "look for 'Gen 3' label"]
+    },
+    "blackclaw": {
+      "name": "BlackClaw",
+      "country": "USA",
+      "housingColor": "metal (aluminum) / black metal / rainbow PVD",
+      "labelStyle": "laser-etched on metal body",
+      "membraneColor": "varies",
+      "tipDesign": "precision machined",
+      "connectionType": "screw_long",
+      "packagingStyle": "premium box with foam insert",
+      "distinctiveFeatures": ["metal body is signature (unique among cartridge brands)", "rainbow PVD finish is distinctive", "high-end positioning"],
+      "certaintyCues": ["metal housing = almost certainly BlackClaw", "rainbow metallic = BlackClaw signature finish"]
+    },
+    "dragonhawk": {
+      "name": "Dragonhawk",
+      "country": "China",
+      "housingColor": "rainbow anodized / colored (multi-color options)",
+      "labelStyle": "printed label on body",
+      "membraneColor": "white standard",
+      "tipDesign": "standard tapered",
+      "connectionType": "screw_long",
+      "packagingStyle": "color-coded boxes, budget packaging",
+      "distinctiveFeatures": ["rainbow colored bodies", "multiple color options per pack", "budget pricing context"],
+      "certaintyCues": ["rainbow/colored body + budget = Dragonhawk"]
+    },
+    "tatsoul": {
+      "name": "TATSoul",
+      "housingColor": "clear/transparent",
+      "labelStyle": "colored label ring (vibrant colors)",
+      "distinctiveFeatures": ["clear body + vibrant colored label ring"],
+      "certaintyCues": ["clear + colored ring = TATSoul"]
+    },
+    "cnc": {
+      "name": "CNC Tattoo",
+      "housingColor": "black (solid, non-transparent)",
+      "packagingStyle": "black box, medical-style presentation",
+      "distinctiveFeatures": ["solid black body (not transparent like most brands)"],
+      "certaintyCues": ["solid black housing (check not Kwadron — no gold ring)"]
+    },
+    "magicmoon": {
+      "name": "MagicMoon",
+      "housingColor": "frosted (translucent matte)",
+      "distinctiveFeatures": ["frosted/matte translucent body is signature"],
+      "certaintyCues": ["frosted finish = MagicMoon"]
+    },
+    "fkirons": {
+      "name": "FK Irons",
+      "note": "Mainly a machine brand; does not make own cartridges at scale",
+      "cartridgeSource": "rebrands Cheyenne Craft cartridges or Elite Three 5 Magnum (USA-made)",
+      "housingVisual": "white (rebranded Craft line)",
+      "certaintyCues": ["white cartridge + FK Irons machine in frame = FK Irons cartridge"]
+    },
+    "bishop_rotary": {
+      "name": "Bishop Rotary",
+      "note": "Machine brand, not cartridge manufacturer",
+      "cartridgeSource": "recommends Cheyenne or other compatible cartridges",
+      "housingVisual": "any compatible brand visible"
+    },
+    "stigma": {
+      "name": "Stigma",
+      "housingColor": "clear/transparent",
+      "distinctiveFeatures": ["clear body, mid-range positioning"],
+      "certaintyCues": ["clear body, no distinctive brand marks = check packaging for Stigma logo"]
+    }
+  },
+
+  "gauge_visual_estimation": {
+    "description": "Rules for estimating needle gauge from visual cues (without magnification). Gauge is difficult to determine precisely from standard product photos and is best inferred from context.",
+    "difficulty": "hard — requires macro shot or label legibility",
+    "methods": [
+      {
+        "name": "label_direct",
+        "accuracy": "high",
+        "condition": "label text legible (e.g. 1003RL on cartridge body or packaging)",
+        "method": "read gauge digits from printed label"
+      },
+      {
+        "name": "relative_comparison",
+        "accuracy": "medium",
+        "condition": "multiple cartridges visible together for size comparison",
+        "method": "compare needle thickness relative to known reference (coin, hand, ruler in frame)"
+      },
+      {
+        "name": "use_case_inference",
+        "accuracy": "low",
+        "condition": "no direct gauge visibility, but usage context available",
+        "method": "infer gauge from needle type and intended use (e.g. 3RL for fine line = likely #10 or #8; 14M1 for packing = likely #12)"
+      }
+    ],
+    "common_gauge_by_type": {
+      "lining_1RL_3RL": ["#8 (0.25mm) bugpin", "#10 (0.30mm) standard"],
+      "lining_5RL_7RL": ["#10 (0.30mm)", "#12 (0.35mm)"],
+      "lining_9RL_11RL": ["#12 (0.35mm)"],
+      "shading_RS_CM": ["#10 (0.30mm)", "#12 (0.35mm)"],
+      "magnum_packing": ["#12 (0.35mm)", "#14 (0.40mm)"],
+      "bugpin_any": ["#6 (0.20mm)", "#8 (0.25mm)"]
+    }
+  },
+
+  "productDetail_granularity": {
+    "description": "Structured breakdown of what productDetail fields can be detected from product photography, at what confidence level",
+    "detectable_fields": {
+      "needle_type": {
+        "detectability": "high",
+        "method": "tip shape visible in macro/close-up — distinguish RL/RS/M1/CM/F by arrangement",
+        "confidence_when_visible": ">80% in macro, <40% in wide shot"
+      },
+      "needle_count": {
+        "detectability": "medium",
+        "method": "count needle tips visible at cartridge opening — easier for RL (few needles), harder for M1 (many needles)",
+        "confidence_when_visible": "60-80% for <=14 count, <30% for >14 count"
+      },
+      "needle_gauge": {
+        "detectability": "low",
+        "method": "requires label legibility or macro with reference object",
+        "confidence_when_visible": ">90% if label text legible, <20% otherwise"
+      },
+      "taper": {
+        "detectability": "low",
+        "method": "requires side profile of needle tip to see taper length — rarely visible in standard product shots",
+        "confidence_when_visible": "60% from side profile, <10% from top-down"
+      },
+      "cartridge_housing_color": {
+        "detectability": "high",
+        "method": "directly visible — black/clear/translucent_blue/metal etc.",
+        "confidence_when_visible": ">95%"
+      },
+      "cartridge_membrane": {
+        "detectability": "medium",
+        "method": "visible at cartridge base — need side/angled view",
+        "confidence_when_visible": "70% from base view, <20% from top view",
+        "subtypes": {
+          "white_standard": "white opaque rubber — most common",
+          "clear_thin": "transparent silicone — Kwadron signature",
+          "silicone_high_perf": "white translucent silicone — Cheyenne Safety"
+        }
+      },
+      "cartridge_connection": {
+        "detectability": "low",
+        "method": "visible at cartridge base in side profile — screw thread vs smooth (bayonet) vs magnetic",
+        "confidence_when_visible": "50% from side profile, <10% otherwise"
+      },
+      "packaging_format": {
+        "detectability": "high",
+        "method": "directly visible — blister/box/tray/display",
+        "confidence_when_visible": ">90%"
+      },
+      "brand_identification": {
+        "detectability": "medium",
+        "method": "best cue = housing color + label style combination",
+        "confidence_when_visible": "80% with color+label, 60% with color only, <30% from shape alone",
+        "color_brand_map": {
+          "black_gold": "Kwadron (high confidence)",
+          "translucent_blue": "Cheyenne Safety (high confidence)",
+          "translucent_pink": "Cheyenne Craft (high confidence)",
+          "translucent_purple": "Cheyenne Capillary (high confidence)",
+          "clear_transparent": "BigWasp / TATSoul / Stigma (medium — need label)",
+          "metal_rainbow": "BlackClaw (high confidence)",
+          "metal_black": "BlackClaw (medium)",
+          "rainbow_colored": "Dragonhawk (high confidence)",
+          "solid_black": "CNC / maybe Kwadron (low — need label check)",
+          "frosted": "MagicMoon (medium)",
+          "white": "FK Irons rebrand / Bishop (low)"
+        }
+      }
+    },
+
+    "extraction_strategy": {
+      "from_label_text": {
+        "priority": "highest accuracy",
+        "format": "parse gauge+count+type+taper from printed text on cartridge or packaging",
+        "pattern": "XXYYZZ or XXYYZZ_Taper, e.g. '1003RL LT' or '1207M1'"
+      },
+      "from_visual_tip": {
+        "priority": "medium accuracy",
+        "format": "infer type+count from tip shape, type from arrangement",
+        "fallback": "estimate type only (RL/RS/M1/CM/F), leave gauge and taper unknown"
+      },
+      "from_brand_context": {
+        "priority": "low accuracy but useful",
+        "format": "if brand is identified from housing color but no detail level visible, output brand + most common format for that brand",
+        "example": "kwadron -> 'likely 1003RL (common Kwadron config)'"
+      }
+    },
+
+    "output_format_precedence": {
+      "1_label_text": "1003RL_LT (exact from label)",
+      "2_visual_inference": "10RL (gauge+type inferred from tip, count estimated)",
+      "3_type_only": "CM (only type identifiable, no gauge/count)",
+      "4_brand_generic": "kwadron_hybrid (brand identified, no needle detail)",
+      "5_unknown": "unknown_needle (nothing identifiable)"
+    }
+  },
+
+  "needle_detection_pipeline": {
+    "description": "Decision flow for needle/cartridge detail extraction from product photos",
+    "steps": [
+      {
+        "step": 1,
+        "action": "classify contentType = product_shot",
+        "condition": "image is a product photo, not a tattoo"
+      },
+      {
+        "step": 2,
+        "action": "Identify productCategory = needle or cartridge",
+        "condition": "needle tip or cartridge body visible in frame"
+      },
+      {
+        "step": 3,
+        "action": "Check for legible label text",
+        "notes": "Zoom into cartridge body or packaging text. If legible gauge+type format found, use as primary source."
+      },
+      {
+        "step": 4,
+        "action": "If no legible label, identify housing color + label style for brand inference",
+        "notes": "Use color_brand_map to narrow brand candidates"
+      },
+      {
+        "step": 5,
+        "action": "Examine needle tip (if visible in macro/close-up)",
+        "notes": "Classify arrangement: circle tight (RL) / circle loose (RS) / double row flat (M1) / double row curved (CM) / single row (F)"
+      },
+      {
+        "step": 6,
+        "action": "Estimate needle count",
+        "notes": "Count tips at opening. For M1/CM >14, count is approximate."
+      },
+      {
+        "step": 7,
+        "action": "Check cartridge base for membrane type + connection type (if side/angled view)",
+        "notes": "White opaque = standard, clear = Kwadron, translucent white = Cheyenne Safety"
+      },
+      {
+        "step": 8,
+        "action": "Check packaging format for additional clues",
+        "notes": "Individual blister vs tray vs box can hint at brand position (blister = premium, tray = bulk)"
+      },
+      {
+        "step": 9,
+        "action": "Assemble best-guess productDetail using output_format_precedence",
+        "notes": "Use highest available accuracy level"
+      }
+    ]
+  },
+
+  "flow_channel_visual_cues": {
+    "description": "流道 visual identification — inner diameter clearance and internal taper angle that determine ink flow characteristics",
+    "detectability": "medium — requires transparent or semi-transparent cartridge housing to observe",
+    "restrictions": {
+      "opaque_housing": "metal (BlackClaw), solid black (CNC/Kwadron) — cannot observe flow channel directly; set flowChannelVisible='no_opaque_housing'",
+      "transparent_housing": "clear (BigWasp/TATSoul), translucent (Cheyenne), frosted (MagicMoon) — flow channel potentially visible"
+    },
+    "inner_diameter_clearance": {
+      "description": "针束与壳壁之间的间隙 — determines ink flow speed and volume",
+      "wide_gap": {
+        "visual_cues": [
+          "needle bundle visibly loose inside housing tube",
+          "noticeable space between needle tips and inner wall",
+          "ink flows freely around needles without resistance"
+        ],
+        "flow_characteristic": "high flow rate — suited for M1/CM large area color packing",
+        "drawback": "potential ink splatter (飞墨) at high machine speed",
+        "typical_brands": ["some BigWasp Gen 3", "budget/value cartridges"]
+      },
+      "tight_gap": {
+        "visual_cues": [
+          "needle bundle snug inside housing tube",
+          "minimal visible space around needle bundle",
+          "ink channel appears narrow and precise"
+        ],
+        "flow_characteristic": "precise controlled flow — suited for RL fine lining, zero splatter",
+        "drawback": "potential ink starvation (供墨不足) at high speed",
+        "typical_brands": ["Cheyenne Safety", "Kwadron Hybrid"]
+      },
+      "moderate_gap": {
+        "visual_cues": [
+          "balanced clearance between needle and wall",
+          "some space visible but not excessive",
+          "even ink distribution around needles"
+        ],
+        "flow_characteristic": "balanced flow — versatile for most techniques",
+        "typical_brands": ["standard BigWasp", "generic/white-label cartridges"]
+      },
+      "detection_method": "observe needle bundle inside housing through transparent/translucent wall and compare gap width relative to needle diameter"
+    },
+    "internal_taper_angle": {
+      "description": "内锥角度 — internal convergence angle at housing tip, determines ink concentration at needle exit",
+      "steep_angle": {
+        "visual_cues": [
+          "housing tip tapers sharply inward",
+          "short convergence zone at tip (funnel-like)",
+          "narrow opening at needle exit point"
+        ],
+        "flow_characteristic": "ink concentrates at needle tip — precise deposition, good for RL/RS fine control",
+        "typical_brands": ["Cheyenne Safety", "Kwadron Hybrid"]
+      },
+      "shallow_angle": {
+        "visual_cues": [
+          "gentle gradual taper at housing tip",
+          "long convergence zone maintaining width",
+          "wide opening persists most of tip length"
+        ],
+        "flow_characteristic": "ink disperses wider — good for M1/CM large area fill and smooth shading",
+        "typical_brands": ["BigWasp Gen 3", "Dragonhawk"]
+      },
+      "multi_stage": {
+        "visual_cues": [
+          "visible step or inflection in taper profile",
+          "two distinct angle zones (steep→shallow or reverse)",
+          "complex internal geometry — not a simple cone"
+        ],
+        "flow_characteristic": "front-end concentration + rear-end acceleration — hybrid compound design, premium feature",
+        "typical_brands": ["Kwadron Hybrid (signature multi-stage taper)", "high-end BlackClaw custom grinds"]
+      },
+      "detection_method": "examine side profile of housing tip and observe internal taper shape through transparent housing; metal housings block observation entirely"
+    },
+    "membrane_flow_relationship": {
+      "description": "膜类型与流道表现的关联 — membrane stiffness affects flow resistance at cartridge base",
+      "white_standard": "moderate flow resistance, universal compatibility — most common",
+      "clear_thin": "low resistance, faster ink delivery — Kwadron's design for high-speed lining without drag",
+      "silicone_high_perf": "higher resistance, more controlled delivery — Cheyenne Safety design for precision work",
+      "flow_implication": "softer/thinner membrane = less dampening (faster flow but more splatter risk); stiffer/thicker membrane = more controlled flow (less splatter but may starve at speed)"
+    },
+    "output_fields": {
+      "description": "Fields output by Hook Vision AI for flow channel detection",
+      "flowChannelVisible": {
+        "values": ["yes_wide_gap", "yes_tight_gap", "yes_moderate_gap", "no_opaque_housing", "unknown"],
+        "condition": "transparent/translucent housing must be present for 'yes_*' values"
+      },
+      "internalTaperVisible": {
+        "values": ["steep_angle", "shallow_angle", "multi_stage", "not_visible", "unknown"],
+        "condition": "side profile of tip needed, plus transparent housing"
+      }
+    }
+  }
+}

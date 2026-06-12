@@ -1,0 +1,79 @@
+{
+  "background_type": [
+    "black studio background",
+    "industrial workstation",
+    "clinical clean setup",
+    "dark tattoo studio",
+    "white backdrop",
+    "brick wall",
+    "neon-lit wall",
+    "natural room",
+    "blurred background",
+    "convention booth"
+  ],
+  "surface_type": [
+    "metal workstation",
+    "black matte table",
+    "paper towel surface",
+    "leather chair arm",
+    "vinyl couch",
+    "wooden desk",
+    "plastic tray",
+    "sterile wrap surface"
+  ],
+  "subject_position": [
+    "45 degree angle",
+    "floating centered product",
+    "held in glove hand",
+    "resting on surface",
+    "mounted on machine",
+    "side profile",
+    "direct front view",
+    "overhead flat lay"
+  ],
+  "hand_interaction": [
+    "bare hand holding",
+    "gloved hand holding",
+    "machine grip",
+    "pinch grip",
+    "palm support",
+    "finger positioning",
+    "no hand visible"
+  ],
+  "environment_style": [
+    "dark tattoo studio",
+    "industrial workstation",
+    "clean clinical setup",
+    "underground studio",
+    "black background",
+    "LED workstation",
+    "natural studio",
+    "convention booth",
+    "home studio"
+  ],
+  "visual_priority": [
+    "product focus",
+    "texture focus",
+    "detail macro",
+    "full composition",
+    "action shot",
+    "mood atmosphere"
+  ],
+  "texture_priority": [
+    "skin texture",
+    "metal texture",
+    "plastic texture",
+    "ink texture",
+    "glove texture",
+    "paper texture",
+    "mixed materials"
+  ],
+  "reflection_priority": [
+    "ink shine",
+    "metal chrome",
+    "plastic gloss",
+    "skin moisture",
+    "matte surface",
+    "glass reflection"
+  ]
+}

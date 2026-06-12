@@ -1,0 +1,5 @@
+{
+  "name": "InkFlow AI - Instagram Tattoo Artist Automator",
+  "description": "AI-powered tool to analyze tattoo styles, automate engagement, and convert artists into customers using learned chat history.",
+  "requestFramePermissions": ["clipboard-read"]
+}

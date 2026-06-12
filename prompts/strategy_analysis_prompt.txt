@@ -1,0 +1,29 @@
+You are a tattoo industry brand strategist with 10 years of experience. Look at this Instagram image and analyze it deeply. Don't just label it — think about WHY the brand made this choice and WHAT it communicates.
+
+Output ONLY valid JSON. No markdown, no backticks, no explanation.
+
+Fields:
+1. "post_purpose": string. Pick the MOST specific fit: product_showcase (纯产品展示,没有皮肤), process_demo (针在皮肤上操作中), macro_detail (微距特写针头/色料细节), tech_education (技术教学/对比测评), finished_tattoo (纹身成品), brand_lifestyle (工作室/团队/文化), promo_meme (促销梗图互动), repost_artist (转发作品)
+
+2. "content_format": string. single_image | carousel | reel_video
+
+3. "text_presence": string. brand_logo_only | with_caption_text | with_price | promo_banner | no_text
+
+4. "product_visibility": string. hero (产品是绝对主角) | in_context (产品在画面中但不是焦点) | invisible (产品不可见但品牌被提到) | none (没有产品)
+
+5. "target_audience": string. tattoo_artist_pro | studio_owner | aspiring_artist | general_audience | brand_partner
+
+6. "visual_technique": object with keys:
+   - camera: macro | close_up | medium | wide | POV | handheld
+   - lighting: studio (棚拍) | natural | dramatic (明暗对比强) | clinical (医用级均匀光) | moody (氛围光)
+   - composition: center (居中对称) | rule_of_thirds | symmetrical | dynamic (对角线) | minimalist (留白)
+   - background: clean_desk | skin | studio | outdoor | blurred | dark | gradient
+   Be specific — don't just describe the technique, explain what the visual choice communicates about the brand.
+
+7. "emotional_tone": string. premium_trust | technical_expertise | hardcore_industrial | friendly_approachable | humorous | aspirational | educational
+
+8. "marketing_goal": This image's primary strategic purpose. direct_sales (直接卖货) | brand_building (建立形象) | tech_authority (展示技术实力) | community_building (涨粉/互动) | education_market (教育市场/降低购买门槛)
+
+9. "brand_positioning": array of 2-4 strings. Based on what you SEE in this image (not brand reputation), what brand values does it communicate? Be specific and evidence-based. E.g. not just "premium" but evidence like "surgical_precision, german_engineering" if the image feels clinical. Or "artisan_quality, heritage, handcrafted" if it feels traditional. Support your choice with visual evidence.
+
+10. "effectiveness": string. A concrete 2-3 sentence assessment. Be specific about what works and what doesn't. Reference elements in the image. Include a constructive suggestion for improvement if relevant. Don't give generic praise — think like a critical consultant.

@@ -1,0 +1,104 @@
+{
+  "needle_stage": [
+    "pre-contact",
+    "surface touch",
+    "micro penetration",
+    "mid penetration",
+    "full working depth",
+    "wipe transition",
+    "needle retracting"
+  ],
+  "skin_reaction": [
+    "clean skin",
+    "freshly stretched skin",
+    "slight redness",
+    "heavy irritation",
+    "wet ink residue",
+    "fresh stencil remains",
+    "skin shine",
+    "vaseline reflection",
+    "bloody micro texture"
+  ],
+  "ink_behavior": [
+    "micro splash",
+    "radial splash",
+    "wipe smear",
+    "dripping ink",
+    "ink mist",
+    "needle flick splash",
+    "surface pooling"
+  ],
+  "glove_behavior": [
+    "black nitrile glove",
+    "wrinkled glove",
+    "powder-free glove",
+    "ink-stained glove",
+    "tight grip",
+    "precision grip",
+    "relaxed grip",
+    "machine stabilization grip"
+  ],
+  "machine_operation_state": [
+    "OLED active",
+    "voltage visible",
+    "battery indicator on",
+    "standby mode",
+    "power LED active",
+    "needle operation glow",
+    "indicator pulse"
+  ],
+  "workstation_realism": [
+    "paper towel nearby",
+    "ink caps in background",
+    "used glove texture",
+    "machine cable tension",
+    "surface contamination realism"
+  ],
+  "workflow_phase": [
+    "setup",
+    "tattooing",
+    "wipe",
+    "finish",
+    "photography"
+  ],
+  "machine_wrap_state": [
+    "full black wrap",
+    "partial grip wrap",
+    "transparent barrier film",
+    "medical tape wrap",
+    "no wrap"
+  ],
+
+  "ergonomics": {
+    "hand_grip_style": [
+      "tight grip",
+      "precision grip",
+      "relaxed grip",
+      "machine stabilization grip"
+    ],
+    "machine_hold_angle": [
+      "vertical",
+      "45 degree angle",
+      "horizontal",
+      "angled down"
+    ],
+    "wrist_rotation": [
+      "neutral",
+      "pronated",
+      "supinated",
+      "flexed"
+    ],
+    "needle_entry_angle": [
+      "perpendicular",
+      "shallow angle",
+      "steep angle",
+      "curved entry"
+    ],
+    "skin_stretch_direction": [
+      "downward",
+      "outward",
+      "toward anchor point",
+      "away from incision"
+    ]
+  }
+}

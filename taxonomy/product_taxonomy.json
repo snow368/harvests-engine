@@ -1,0 +1,329 @@
+{
+  "protocol": "Product Visual Taxonomy v2",
+  "description": "Visual identification rules for all 14 tattoo supply product categories. Each entry defines primary visual indicators and disambiguation rules for distinguishing similar products.",
+  "tattoo_machine": {
+    "visual_indicators": [
+      "cylindrical pen-like body 12-16cm",
+      "textured grip section (rubberized or knurled)",
+      "RCA connector or USB port at base",
+      "RCA clip cord cable attached",
+      "OLED/LED screen on body (wireless models)",
+      "battery indicator or voltage display",
+      "colored anodized aluminum body",
+      "button controls on body",
+      "cartridge attached at front with needle tip",
+      "metal tip with visible needle bar movement"
+    ],
+    "distinguish_from": {
+      "grip": "machines have electronic components (screen, buttons, cable port). Grips are purely mechanical hollow tubes without electronics.",
+      "wireless_battery": "machines have visible needle bar/cartridge attachment at front. Batteries have contact pins at both ends and no moving parts.",
+      "power_supply": "machines are handheld pen-sized. Power supplies are desktop units or tube batteries with display."
+    },
+    "photography_context": [
+      "often shown with clip cord plugged in",
+      "may be disassembled into grip + body + battery sections",
+      "cartridge mounted at tip for context",
+      "commonly shot at 45-degree angle to show screen and grip"
+    ]
+  },
+  "tattoo_cartridges": {
+    "visual_indicators": [
+      "small transparent/translucent cylinder 2-3cm",
+      "metal needle tip protruding from one end",
+      "colored O-ring at base (brand color coding system)",
+      "transparent membrane visible at bottom",
+      "arranged in tray with individual slots",
+      "metal tip with visible bevel/grind marks",
+      "color-coded housing by needle type or gauge",
+      "individual sterile packaging or bulk tray",
+      "visible needle count at tip (single vs multiple pins)"
+    ],
+    "distinguish_from": {
+      "needle_pack": "cartridges have 3D plastic housing + O-ring + colored base. Needle packs are flat paper/plastic peel pouches containing bare needle bars.",
+      "grip": "cartridges are much smaller (2-3cm). Grips are 8-12cm hollow tubes for holding.",
+      "machine_part": "cartridges are disposable tips that attach to machine front. They are not part of the machine body."
+    },
+    "photography_context": [
+      "commonly displayed in tray configurations",
+      "often shot macro to show needle tip detail",
+      "brands emphasize color coding system in photos",
+      "frequently grouped by type (RL/RS/M1/CM) in rows"
+    ]
+  },
+  "tattoo_ink": {
+    "visual_indicators": [
+      "glass or plastic bottle 15-120ml",
+      "colored liquid visible inside (black, white, colored pigments)",
+      "label with brand name and color/pigment name",
+      "dropper top, twist cap, or needle-tip dispenser",
+      "ink cap or ink cup nearby (small disposable cups)",
+      "multiple bottles arranged together as set",
+      "pigment settled at bottom (visible separation in some colors)",
+      "boxed set presentation (e.g. 6/12/24 color sets)"
+    ],
+    "distinguish_from": {
+      "aftercare_product": "ink bottles contain colored liquid, labeled with pigment/color names. Aftercare products are opaque tubes or jars with cream, labeled 'healing' or 'ointment'.",
+      "cleaning_supply": "inks are labeled with color names and pigment codes. Cleaning products have disinfectant/sterilization labeling.",
+      "accessory": "ink bottles are liquid containers. Accessories are solid parts/tools."
+    },
+    "photography_context": [
+      "often shot in sets or color arrays",
+      "dropper detail frequently featured macro",
+      "ink caps with ink used as scale context",
+      "branding/label front-facing in commercial shots"
+    ]
+  },
+  "wireless_battery": {
+    "visual_indicators": [
+      "cylindrical tube shorter than machine",
+      "OLED display showing battery level percentage or voltage number",
+      "single button on body (power or +/- adjustment)",
+      "metal contact pins at one or both ends",
+      "charging port (USB-C) on side or bottom",
+      "anodized aluminum or matte black finish",
+      "brand logo prominently on body",
+      "LED indicator light (charging or power status)"
+    ],
+    "distinguish_from": {
+      "tattoo_machine": "batteries have no cartridge holder, no needle bar mechanism. Purely a cylinder with contacts. No moving parts.",
+      "grip": "batteries have electronics (screen, button, charging port). Grips are passive mechanical tubes with no electronics.",
+      "power_supply": "batteries are compact and handheld. Power supplies are larger desktop units with multiple ports and wall power cord."
+    },
+    "photography_context": [
+      "often shown next to machine to demonstrate compatibility",
+      "OLED display frequently featured as premium signal",
+      "USB-C port detail highlighted in macro shots",
+      "commercial product lighting to emphasize anodized finish"
+    ]
+  },
+  "needle_pack": {
+    "visual_indicators": [
+      "flat paper-plastic peel pouch with sterile seal",
+      "multiple pouches bundled together in pack",
+      "thin flat profile (contrast with cartridge 3D shape)",
+      "sterile indicator dot or stripe on pouch",
+      "label text: gauge-number-type format (e.g. 1003RL)",
+      "arranged in fan or row patterns for display",
+      "transparent window showing needle bar inside",
+      "peel-open edge visible",
+      "paper backing with printed specifications"
+    ],
+    "distinguish_from": {
+      "tattoo_cartridges": "needle packs are flat peel pouches (single-use sterile wrap). Cartridges are rigid 3D plastic housings. If it stands up, it's a cartridge. If it lies flat, it's a needle pack.",
+      "stencil_paper": "needle packs are small individual pouches (~2x5cm). Stencil paper is larger flat sheets (~A4 size). Very different scale.",
+      "glove": "needle packs are paper/plastic pouches. Gloves are in boxes with visible glove cuffs."
+    },
+    "photography_context": [
+      "often displayed fan-spread to show label text",
+      "bundles shown with sterile seal intact",
+      "macro shot of label text for gauge/type legibility",
+      "brand emphasizes peel-open ease in demonstration"
+    ]
+  },
+  "grip": {
+    "visual_indicators": [
+      "hollow tube 8-12cm length",
+      "visible hollow interior channel (see-through when held up)",
+      "textured exterior (diamond knurling, groove pattern, or silicone sleeve)",
+      "aluminum, stainless steel, or titanium construction",
+      "O-rings at top and bottom ends",
+      "sold individually or in sets with different textures/colors",
+      "can have rubber/silicone cover sleeve over metal core",
+      "threaded ends for machine attachment"
+    ],
+    "distinguish_from": {
+      "tattoo_machine": "grips are simple textured tubes with no electronics, no screen, no cable port, no needle mechanism.",
+      "cartridge": "grips are much larger (fits in full hand, 8-12cm). Cartridges are tiny (2-3cm).",
+      "wireless_battery": "grips have no electronics. No screen, no button, no charging port. Pure mechanical tube."
+    },
+    "photography_context": [
+      "often shown disassembled from machine",
+      "texture detail highlighted in macro",
+      "sets displayed in row to show color/texture variety",
+      "commonly shot on black background for metallic reflection"
+    ]
+  },
+  "power_supply": {
+    "visual_indicators": [
+      "desktop box form factor with display",
+      "digital voltage readout (LCD or LED digits)",
+      "control knob or +/- buttons",
+      "multiple output ports (RCA or binding posts)",
+      "RCA clip cord output cable connected",
+      "power cord connecting to wall outlet",
+      "foot pedal connected via cable",
+      "compact battery-style with screen (portable versions)"
+    ],
+    "distinguish_from": {
+      "wireless_battery": "power supplies are larger desktop units with wall power cord and multiple ports. Not handheld. Not pen-shaped.",
+      "machine": "power supplies are supply units, not tattooing tools. No grip, no needle, no cartridge.",
+      "accessory": "power supplies are active electronic devices. Accessories are passive replacement parts."
+    },
+    "photography_context": [
+      "often shown on desk with cables visible",
+      "display screen featured as primary detail",
+      "foot pedal included in frame for context",
+      "workstation setup context (part of broader desk photo)"
+    ]
+  },
+  "aftercare_product": {
+    "visual_indicators": [
+      "tube, jar, pump bottle, or box container",
+      "opaque white or colored container (not transparent)",
+      "cream, balm, or lotion format (not liquid)",
+      "medical or clinical-style labeling",
+      "labeled as 'healing', 'ointment', 'balm', 'moisturizer', 'aftercare'",
+      "pump bottle or squeeze tube format",
+      "second skin / protective film in flat box or on backing paper",
+      "branding emphasizes natural or medical ingredients"
+    ],
+    "distinguish_from": {
+      "tattoo_ink": "aftercare containers are opaque with cream/lotion textures. Ink bottles are transparent/translucent with visible colored liquid.",
+      "cleaning_supply": "aftercare is for POST-tattoo healing (skin application). Cleaning is for PRE-tattoo disinfection (surface/equipment).",
+      "stencil_paper": "aftercare is in tubes/jars/bottles. Stencil paper is flat paper sheets or rolls."
+    },
+    "photography_context": [
+      "often lifestyle photography rather than studio",
+      "tube squeezed with product coming out (demonstration)",
+      "natural soft lighting for 'gentle/healing' association",
+      "often alongside other studio items for context"
+    ]
+  },
+  "stencil_paper": {
+    "visual_indicators": [
+      "stack of paper sheets or roll format",
+      "purple, blue, or gold tinted surface (hectograph coating)",
+      "multi-layer construction (carbon paper-like)",
+      "packaged in reams, stacks, or rolls",
+      "characteristic hectograph purple color on transfer surface",
+      "cover sheet interleaving between coated sheets",
+      "purple residue on fingers or surfaces (tell-tale sign)",
+      "printed grid or design outlines possible on used sheets"
+    ],
+    "distinguish_from": {
+      "needle_pack": "stencil paper is A4/A5 flat sheets. Needle packs are tiny individual pouches. Size difference is dramatic.",
+      "paper_towel": "stencil paper has smooth coated surface (not absorbent like towel) and distinct purple/blue color.",
+      "packaging": "stencil paper is the consumable itself, not its container."
+    },
+    "photography_context": [
+      "usually flat lay or stacked presentation",
+      "purple color is the key identifying feature",
+      "often shown with stencil printer (thermal) for context",
+      "corner of sheet lifted to show multi-layer construction"
+    ]
+  },
+  "glove": {
+    "visual_indicators": [
+      "box of disposable gloves",
+      "black or blue nitrile material (black = tattoo industry typical)",
+      "glove cuffs visible at box opening (pop-up dispensing)",
+      "textured fingertips visible on individual gloves",
+      "powder-free label on box front",
+      "examination glove-style packaging box",
+      "individual gloves partially pulled from box opening",
+      "size label (S/M/L/XL) on box front"
+    ],
+    "distinguish_from": {
+      "medical_supply": "tattoo gloves are typically BLACK nitrile (industry standard for blood-borne pathogen protection). Medical gloves are blue or white.",
+      "packaging": "a glove box with gloves visible is a glove product. Empty box would be packaging.",
+      "cleaning_supply": "glove boxes contain the gloves themselves. Cleaning supplies are sprays, solutions, or sterilization items."
+    },
+    "photography_context": [
+      "box front label featured prominently",
+      "single glove pulled out showing texture",
+      "glove on hand with machine (workplace context)",
+      "often lifestyle context (held, worn) rather than pure product shot"
+    ]
+  },
+  "cleaning_supply": {
+    "visual_indicators": [
+      "spray bottle format (most common)",
+      "green soap (characteristic translucent green color in clear bottle)",
+      "disinfectant labeling ('kills 99.9%', 'hospital grade')",
+      "sterilization pouches (paper + plastic front)",
+      "autoclave indicator tape (striped pattern that changes color)",
+      "barrier film rolls (plastic wrap for equipment)",
+      "sterilization wrap sheets (blue or white medical wrap)",
+      "dispenser bottles or wall-mounted dispenser units"
+    ],
+    "distinguish_from": {
+      "aftercare_product": "cleaning is PRE-tattoo surface/equipment/tool disinfection. Aftercare is POST-tattoo skin healing.",
+      "tattoo_ink": "cleaning supplies are clear or green soaps, sprays, not pigmented like ink. Labels focus on sterilization not color.",
+      "glove": "cleaning supplies are liquids/sprays/wipes. Gloves are wearable disposables in boxes."
+    },
+    "photography_context": [
+      "often grouped as 'studio care' bundle",
+      "spray bottle is the most recognizable format",
+      "green soap in clear bottle is a tattoo industry icon",
+      "clinical clean lighting to reinforce sterile positioning"
+    ]
+  },
+  "accessory": {
+    "visual_indicators": [
+      "small part or replacement component",
+      "cables and clip cords (RCA cable with connectors)",
+      "O-rings and gaskets (tiny rubber rings)",
+      "membranes (small transparent discs for cartridge base)",
+      "screws, wrenches, and small tools",
+      "tips and nozzles (replacement machine parts)",
+      "connectors and adapters (RCA, USB, threaded)",
+      "mouthpieces (for coil machines)",
+      "spare parts organized in small bags or boxes"
+    ],
+    "distinguish_from": {
+      "machine_part": "accessories are replacement/spare parts for maintenance. Machine implies the complete functional tool.",
+      "bundle_kit": "accessories are individual spare parts. A bundle/kit is multiple items sold together as a package.",
+      "packaging": "accessories are the parts themselves. Packaging is the container/display."
+    },
+    "photography_context": [
+      "often macro detail shots",
+      "organized display (small parts in rows)",
+      "shown alongside machine or cartridge for scale context",
+      "functional context (tool with screw, cable plugged in)"
+    ]
+  },
+  "bundle_kit": {
+    "visual_indicators": [
+      "multiple different product types together in one frame",
+      "kit packaging or box containing varied items",
+      "starter kit: machine + cartridges + ink + accessories grouped",
+      "matching aesthetic or brand color across items",
+      "value bundle presentation (items in case or tray)",
+      "labeled as 'starter kit', 'bundle', 'combo', 'complete set'",
+      "items arranged aesthetically as a set (not individual sales)"
+    ],
+    "distinguish_from": {
+      "individual_product": "kits contain 3+ different product types grouped together. Single product frame would show only one type of item.",
+      "packaging": "bundle/kit focuses on the CONTENTS (what's included). Packaging focuses on the CONTAINER (box, display case)."
+    },
+    "photography_context": [
+      "flat lay or spread layout to show all items",
+      "items arranged in branded case or tray",
+      "lifestyle photography staging",
+      "each item individually visible for 'what's included' clarity"
+    ]
+  },
+  "packaging": {
+    "visual_indicators": [
+      "box, case, or display container as main visual subject",
+      "foam insert with cutouts shaped for specific products",
+      "retail-ready packaging with brand graphics and logo",
+      "product clearly visible inside packaging (window or transparent)",
+      "exhibition or demo display stand",
+      "multiple items in organized case arrangement",
+      "retail shelf display unit with hanging tab",
+      "brand design/graphics dominate the visual"
+    ],
+    "distinguish_from": {
+      "bundle_kit": "packaging emphasizes the container/display itself. Bundle/kit emphasizes the contents being sold together.",
+      "accessory": "packaging is the outer container. Accessories are the inner contents/parts.",
+      "glove": "a box with gloves visible inside would be 'glove' category. Packaging category is about the display/container as product."
+    },
+    "photography_context": [
+      "commercial product photography style most common",
+      "brand design and logo front and center",
+      "white or gradient background typical",
+      "box angled to show front and side panels"
+    ]
+  }
+}

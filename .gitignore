@@ -1,0 +1,15 @@
+node_modules/
+.env
+.env.local
+*.log
+__pycache__/
+*.pyc
+.chrome_profile/
+.cloakbrowser_cache/
+venv/
+logs/
+backups/
+output/
+products/
+Thumbs.db
+.DS_Store

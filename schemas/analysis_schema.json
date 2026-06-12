@@ -1,0 +1,98 @@
+{
+  "content_id": "",
+  "platform": "",
+  "content_type": "",
+  "visual_style": "",
+  "product_category": "",
+
+  "camera": {
+    "shot_type": "",
+    "camera_angle": "",
+    "camera_movement": "",
+    "focus_style": "",
+    "lens_feeling": "",
+    "depth_of_field": ""
+  },
+
+  "lighting": {
+    "lighting_style": "",
+    "contrast_level": "",
+    "shadow_density": "",
+    "lighting_direction": "",
+    "temperature_feeling": ""
+  },
+
+  "composition": {
+    "framing_style": "",
+    "subject_focus": "",
+    "negative_space": "",
+    "balance_style": ""
+  },
+
+  "materials": {
+    "skin_texture": "",
+    "glove_texture": "",
+    "ink_reflection": "",
+    "plastic_reflection": "",
+    "metal_reflection": ""
+  },
+
+  "motion": {
+    "motion_type": [],
+    "camera_motion": "",
+    "speed_feeling": "",
+    "vibration_feeling": ""
+  },
+
+  "generation_scene": {
+    "subject_position": "",
+    "hand_interaction": "",
+    "background_type": "",
+    "surface_type": "",
+    "environment_style": "",
+    "visual_priority": "",
+    "texture_priority": "",
+    "reflection_priority": ""
+  },
+
+  "physical_realism": {
+    "needle_stage": "",
+    "skin_reaction": "",
+    "ink_behavior": "",
+    "glove_behavior": "",
+    "machine_operation_state": "",
+    "machine_wrap_state": "",
+    "workstation_realism": "",
+    "workflow_phase": "",
+    "surface_contamination": "",
+
+    "ergonomics": {
+      "hand_grip_style": "",
+      "machine_hold_angle": "",
+      "wrist_rotation": "",
+      "needle_entry_angle": "",
+      "skin_stretch_direction": ""
+    }
+  },
+
+  "tattoo_authenticity": {
+    "realism_score": 0,
+    "documentary_feeling_score": 0,
+    "commercial_feeling_score": 0,
+    "studio_authenticity_score": 0
+  },
+
+  "social_media": {
+    "hook_strength": 0,
+    "retention_potential": 0,
+    "viral_potential": 0,
+    "conversion_potential": 0
+  },
+
+  "style_keywords": [],
+
+  "generation_ready": {
+    "image_prompt_keywords": [],
+    "video_prompt_keywords": []
+  }
+}

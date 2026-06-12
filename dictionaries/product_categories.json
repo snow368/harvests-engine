@@ -1,0 +1,44 @@
+{
+  "tattoo_machine": {
+    "keywords": ["machine", "tattoo machine", "tattoo pen", "pen machine", "rotary machine", "coil machine", "tattoo gun", "pen style", "wireless pen", "machine body", "machine grip", "machine frame", "tattoo instrument", "tattoo tool", "cartridge machine", "direct drive", "stylus pen"]
+  },
+  "tattoo_cartridges": {
+    "keywords": ["cartridge", "needle cartridge", "cartridge pack", "cartridge set", "disposable cartridge", "sterile cartridge", "round liner", "round shader", "magnum", "flat shader", "bugpin", "cartridge box", "mixed cartridge", "needle bar", "cartridge membrane", "pre-sterilized cartridge", "cartridge system", "compatible cartridge"]
+  },
+  "tattoo_ink": {
+    "keywords": ["ink", "ink bottle", "ink cap", "ink cup", "pigment", "ink set", "ink pack", "tattoo ink", "colored ink", "black ink", "white ink", "ink pot", "ink well", "ink container", "ink sample", "ink vial", "ink kit", "pigment bottle"]
+  },
+  "wireless_battery": {
+    "keywords": ["battery", "wireless pen", "battery pack", "power unit", "battery grip", "battery cap", "power supply", "rechargeable", "battery tube", "battery case", "pen battery", "wireless system", "power cartridge", "battery indicator"]
+  },
+  "needle_pack": {
+    "keywords": ["needle", "needle pack", "sterile needle", "needle wrapper", "needle set", "needle box", "needle bundle", "sterile pack", "needle bag", "needle roll", "needle tube", "needle pouch", "needle sterilized", "mixed needles"]
+  },
+  "grip": {
+    "keywords": ["grip", "cartridge grip", "pen grip", "handle", "grip set", "grip cover", "silicone grip", "rubber grip", "grip tube", "grip pack", "universal grip", "ergonomic grip", "disposable grip", "grip adapter", "aluminum grip", "grip case"]
+  },
+  "power_supply": {
+    "keywords": ["power supply", "power unit", "foot pedal", "remote control", "power adapter", "power cord", "power station", "power box", "clip cord", "machine cable", "connection wire", "RCA cable", "power cable", "power control", "voltage regulator"]
+  },
+  "aftercare_product": {
+    "keywords": ["aftercare", "ointment", "cream", "lotion", "balm", "healing cream", "moisturizer", "tattoo aftercare", "protective film", "second skin", "saniderm", "tattoo salve", "tattoo lotion", "tattoo butter", "healing balm", "aftercare spray", "tattoo care", "recovery cream", "cleanser", "wash"]
+  },
+  "stencil_paper": {
+    "keywords": ["stencil", "stencil paper", "transfer paper", "stencil roll", "carbon paper", "stencil sheet", "thermal paper", "hectograph paper", "spirit paper", "stencil pack", "stencil set", "transfer sheet", "tracing paper", "blue stencil"]
+  },
+  "glove": {
+    "keywords": ["glove", "gloves", "nitrile glove", "examination glove", "black nitrile", "blue nitrile", "glove pack", "glove box", "sterile glove", "powder free glove", "medical glove", "disposable glove", "tattoo glove", "surgical glove"]
+  },
+  "cleaning_supply": {
+    "keywords": ["cleaning", "disinfectant", "green soap", "sterilizer", "cleaning spray", "antibacterial", "cleaning solution", "sterilization pouch", "autoclave", "cleaning wipe", "barrier film", "plastic wrap", "wrap roll", "cleaning brush", "sterilization bag", "indicator tape", "surface cleaner"]
+  },
+  "accessory": {
+    "keywords": ["cable", "clip cord", "RCA cable", "replacement part", "gasket", "O-ring", "membrane", "screw", "tool", "wrench", "adapter", "tip", "nozzle", "connector", "plug", "spare part", "component", "mouthpiece"]
+  },
+  "bundle_kit": {
+    "keywords": ["bundle", "kit", "starter kit", "set", "combo", "package", "value set", "complete kit", "starter set", "gift set", "collection", "toolkit", "box set", "starter bundle", "beginner kit"]
+  },
+  "packaging": {
+    "keywords": ["box", "packaging", "display", "case", "package", "container", "holder", "storage box", "case insert", "foam insert", "gift box", "retail box", "display case", "exhibition case", "demo board", "stand", "merchandise display"]
+  }
+}

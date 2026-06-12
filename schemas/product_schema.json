@@ -1,0 +1,113 @@
+{
+  "content_id": "",
+  "platform": "",
+  "content_type": "",
+  "visual_style": "",
+  "product_category": "",
+  "camera": {
+    "shot_type": "",
+    "camera_angle": "",
+    "focus_style": "",
+    "lens_feeling": "",
+    "depth_of_field": ""
+  },
+  "lighting": {
+    "lighting_style": "",
+    "contrast_level": "",
+    "shadow_density": "",
+    "lighting_direction": "",
+    "temperature_feeling": ""
+  },
+  "composition": {
+    "framing_style": "",
+    "subject_focus": "",
+    "negative_space": "",
+    "balance_style": ""
+  },
+  "materials": {
+    "skin_texture": "",
+    "glove_texture": "",
+    "ink_reflection": "",
+    "plastic_reflection": "",
+    "metal_reflection": ""
+  },
+  "product_scene": {
+    "product_position": "",
+    "background_style": "",
+    "surface_type": "",
+    "material_behavior": "",
+    "camera_style": "",
+    "composition_style": "",
+    "desk_surface": "",
+    "desk_cover": "",
+    "tool_layout": "",
+    "contamination_level": "",
+    "workflow_state": ""
+  },
+  "lighting_fine": {
+    "light_direction": "",
+    "light_hardness": "",
+    "light_count": "",
+    "contrast_level": "",
+    "temperature_feeling": ""
+  },
+  "position_fine": {
+    "product_angle": "",
+    "distance": "",
+    "framing": "",
+    "perspective": ""
+  },
+  "material_fine": {
+    "specular_intensity": "",
+    "surface_roughness": "",
+    "material_category": ""
+  },
+  "camera_fine": {
+    "focal_length_equivalent": "",
+    "aperture_feeling": "",
+    "camera_movement_style": ""
+  },
+  "composition_fine": {
+    "visual_weight_distribution": "",
+    "depth_construction": "",
+    "negative_space_ratio": ""
+  },
+  "background_fine": {
+    "background_material": "",
+    "background_depth": ""
+  },
+  "spatial_realism": {
+    "foreground_obstruction": "",
+    "partial_visibility": "",
+    "cropped_objects": "",
+    "depth_layering": "",
+    "focus_falloff": ""
+  },
+  "tattoo_authenticity": {
+    "commercial_feeling_score": 0,
+    "studio_authenticity_score": 0
+  },
+  "social_media": {
+    "hook_strength": 0,
+    "retention_potential": 0,
+    "viral_potential": 0,
+    "conversion_potential": 0
+  },
+  "needle_detail": {
+    "needle_type": "",
+    "needle_gauge": "",
+    "needle_count": "",
+    "needle_taper": "",
+    "cartridge_color": "",
+    "membrane_type": "",
+    "connection_type": "",
+    "packaging_format": "",
+    "brand_prediction": "",
+    "flow_channel_visible": "",
+    "internal_taper_visible": ""
+  },
+  "style_keywords": [],
+  "generation_ready": {
+    "image_prompt_keywords": []
+  }
+}

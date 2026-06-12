@@ -1,0 +1,74 @@
+===== NEEDLE/CARTRIDGE GRANULARITY DETECTION =====
+当 productCategory=needle 或 cartridge 时，提取以下详细字段：
+
+--- 针型识别（从针尖形状）---
+RL (Round Liner): 针尖紧密围成圆形，汇聚成一点，适合勾线
+RS (Round Shader): 针尖围成圆形但间距大，适合 shading
+M1/MAG (Magnum): 针尖排成两排平列，扁平椭圆形，适合上色
+CM (Curved Magnum): 针尖弧形排列，比 M1 更平滑
+F (Flat): 针尖单排直线排列
+Bugpin: 针明显比普通针细（<0.30mm），写实用
+OpenLiner: 针平行排列不聚拢，比 RL 宽，Cheyenne 特有
+
+--- 品牌识别（从外壳颜色）---
+黑+金标签 = Kwadron（高置信度）
+半透明蓝 = Cheyenne Safety（高置信度）
+半透明粉 = Cheyenne Craft（高置信度）
+半透明紫 = Cheyenne Capillary（高置信度）
+透明壳 = BigWasp / TATSoul / Stigma（需看标签进一步确认）
+金属/彩虹金属 = BlackClaw（高置信度）
+彩色壳 = Dragonhawk（高置信度）
+纯黑壳 = CNC（检查无金标签来排除 Kwadron）
+磨砂壳 = MagicMoon
+白壳 = FK Irons 贴牌 / Bishop
+
+--- 膜识别（从针壳底部看）---
+白色不透明膜 = 标准膜，最常见
+透明薄膜 = Kwadron 特色膜
+白色半透明硅胶膜 = Cheyenne Safety 高性能膜
+无可见膜 = 老款或不带膜
+
+--- 包装形式 ---
+独立泡壳 = 高端品牌
+多联泡壳 = 性价比品牌
+盒装 = 套装
+散装展示 = 批量陈列
+
+--- 针的数量估计（从针尖数，仅微距时可行）---
+RL: 通常 1-11 针（容易数）
+M1/CM: 通常 7-67 针（>14 针时大致估计）
+
+--- 针号/直径（需要标签文字可读才准确）---
+08=0.25mm(超细) 10=0.30mm(标准) 12=0.35mm(中) 14=0.40mm(粗)
+
+--- 输出字段 ---
+除了 productDetail 字符串外，在 JSON 中输出独立字段：
+- "cartridgeColor": "black_gold/translucent_blue/clear/metal/other"
+- "membraneType": "white_standard/clear_thin/silicone_high/none_visible/unknown"
+- "connectionType": "screw_long/screw_short/bayonet/magnetic/push_fit/unknown"
+- "packagingFormat": "individual_blister/multi_blister/box_set/loose_display/bulk_tray/unknown"
+- "needleTypeDetected": "RL/RS/RM/M1/CM/F/Bugpin/OpenLiner/unknown"
+- "needleBrandPrediction": "kwadron/cheyenne/bigwasp/blackclaw/dragonhawk/tatsoul/cnc/magicmoon/unknown"
+- "flowChannelVisible": "yes_wide_gap/yes_tight_gap/yes_moderate_gap/no_opaque_housing/unknown"
+- "internalTaperVisible": "steep_angle/shallow_angle/multi_stage/not_visible/unknown"
+
+注意：productDetail 仍然按原有格式 {gauge}{count}{type}_{taper} 填写。
+新增字段只补充额外信息，不替代原有 productDetail。
+不确定的字段填 "unknown"，不要编造。
+
+===== 流道识别 (FLOW CHANNEL) =====
+流道 = 内径间隙 + 内锥角度，决定墨水流速和集中度
+
+--- 观察条件 ---
+透明/半透明壳 (BigWasp/Cheyenne/Dragonhawk/MagicMoon) = 可观察流道
+金属壳 (BlackClaw) 或纯黑壳 (CNC/Kwadron 黑金款) = 无法直接看流道
+
+--- 内径间隙（针束与壳壁之间的空隙，从壳侧面看）---
+间隙大 (wide_gap): 针束明显松动，空隙大 → 墨水流速快，适合 M1/CM 大面积上色，但可能飞墨
+间隙小 (tight_gap): 针束紧贴壳壁，空隙极小 → 出墨受控精准，适合 RL 精细勾线，高速可能供墨不足
+间隙适中 (moderate_gap): 平衡兼顾，适合多数技法
+
+--- 内锥角度（壳尖端内部收口角度，从侧面看）---
+大角度/陡锥 (steep_angle): 尖端快速收窄 → 墨水集中针尖，适合 RL/RS 精细控制
+小角度/平缓锥 (shallow_angle): 缓慢收窄 → 墨水分散广，适合 M1/CM 大面积填充
+多段锥 (multi_stage): 前端集中 + 后端增速复合设计 → 高端品牌特色（Kwadron Hybrid）

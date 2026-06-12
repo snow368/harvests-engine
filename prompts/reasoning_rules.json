@@ -1,0 +1,673 @@
+{
+  "protocol": "Prompt Reasoning Rules v1",
+  "description": "Visual inference rules that map observable image features to structured parameters. Each domain defines: (1) what visual cues to look for, (2) how to infer parameter values, and (3) the mapping from coarse category to fine-grained parameters for image generation.",
+  "version": "1.0",
+  "rules": {
+
+    "lighting_inference": {
+      "description": "Infer fine-grained lighting parameters from shadow/highlight evidence",
+      "visual_cues_priority": [
+        "shadow direction relative to product",
+        "shadow edge hardness (sharp vs soft transition)",
+        "shadow density (dark vs faint)",
+        "highlight count and position",
+        "color cast on white/neutral areas",
+        "reflection sharpness on glossy surfaces"
+      ],
+      "rules": [
+        {
+          "field": "light_direction",
+          "description": "Position of primary light source inferred from shadow cast",
+          "cues": "Observe where shadows fall relative to the product. Shadow opposite side = light source direction.",
+          "inference": [
+            {"condition": "shadow cast directly below, minimal side shadow", "value": "overhead"},
+            {"condition": "shadow falls to one side, opposite side bright", "value": "side (left or right)"},
+            {"condition": "shadow soft and under product, secondary highlight opposite", "value": "overhead + front fill"},
+            {"condition": "shadow behind product, edges bright", "value": "backlight"},
+            {"condition": "shadow very faint in multiple directions", "value": "multi-direction diffused"},
+            {"condition": "product brightly lit from below", "value": "underside fill"},
+            {"condition": "shadow diagonally behind and to one side", "value": "top-side diagonal"},
+            {"condition": "circular highlight in product center", "value": "ring light (axial)"}
+          ]
+        },
+        {
+          "field": "light_hardness",
+          "description": "Hardness/softness of light inferred from shadow edge quality",
+          "cues": "Examine the transition zone between shadow and light on the product or surface.",
+          "inference": [
+            {"condition": "crisp, sharp shadow edge with clear boundary", "value": "hard (direct, small source)"},
+            {"condition": "slightly soft edge, still identifiable shadow boundary", "value": "semi-hard (medium diffuser)"},
+            {"condition": "gradual, smooth shadow transition, no clear edge", "value": "soft (diffused, large source)"},
+            {"condition": "almost no visible shadow, even illumination", "value": "very soft (multi-diffused)"},
+            {"condition": "mixed: sharp on near surface, soft cast shadow", "value": "key hard + fill soft"}
+          ]
+        },
+        {
+          "field": "light_count",
+          "description": "Number of light sources inferred from highlight/shadow complexity",
+          "cues": "Count distinct highlight reflections and shadow sets. Multiple shadow directions = multi-light.",
+          "inference": [
+            {"condition": "single highlight, one shadow direction", "value": "single light"},
+            {"condition": "one strong highlight + one fill reflection opposite", "value": "key + fill (2 lights)"},
+            {"condition": "highlights on both sides + top rim", "value": "three-point (key + fill + rim)"},
+            {"condition": "even illumination with soft shadows from multiple angles", "value": "multi-light studio (4+)"},
+            {"condition": "circular highlight ring", "value": "ring light only"},
+            {"condition": "main highlight + background accent color", "value": "key + background accent"}
+          ]
+        },
+        {
+          "field": "temperature_feeling",
+          "description": "Color temperature inferred from white balance and color cast",
+          "cues": "Look at neutral areas (white background, silver metal, paper) for color tint.",
+          "inference": [
+            {"condition": "white areas appear blue/cool, shadows blue-tinted", "value": "cool (5500K+)"},
+            {"condition": "white appears neutral grey, no visible tint", "value": "neutral (5000K)"},
+            {"condition": "white appears slightly yellow/orange", "value": "warm (3200-4000K)"},
+            {"condition": "mixed: one side cool, other side warm", "value": "mixed temperature"},
+            {"condition": "very warm, almost amber shadows", "value": "very warm (tungsten, 2700K)"},
+            {"condition": "clinical blue-white, shadows slightly cyan", "value": "clinical cool (6000K+)"}
+          ]
+        },
+        {
+          "field": "shadow_density",
+          "description": "How dark and prominent shadows are",
+          "cues": "Compare shadow area brightness to lit area brightness.",
+          "inference": [
+            {"condition": "shadows nearly black, high luminance ratio", "value": "dense"},
+            {"condition": "shadows clearly visible but not pure black", "value": "moderate"},
+            {"condition": "shadows faint, shadow area still detailed", "value": "light"},
+            {"condition": "shadows barely detectable", "value": "minimal"},
+            {"condition": "shadows completely absent", "value": "shadowless"}
+          ]
+        },
+        {
+          "field": "contrast_level",
+          "description": "Overall luminance range inferred from highlight-to-shadow ratio",
+          "cues": "Look at the brightest highlight vs darkest shadow in frame.",
+          "inference": [
+            {"condition": "bright white highlights and near-black shadows coexist", "value": "high contrast"},
+            {"condition": "highlights bright, shadows dark but textured", "value": "medium-high contrast"},
+            {"condition": "moderate range, both ends visible", "value": "medium contrast"},
+            {"condition": "low range, no pure white or black", "value": "low contrast"},
+            {"condition": "everything in mid-tones, very flat", "value": "flat (very low contrast)"}
+          ]
+        }
+      ],
+      "coarse_to_fine_mapping": {
+        "commercial studio lighting": {"light_direction": "overhead + front fill", "light_hardness": "soft (diffused)", "light_count": "multi-light studio (4+)", "temperature_feeling": "neutral (5000K)", "shadow_density": "light", "contrast_level": "medium contrast"},
+        "clinical clean lighting": {"light_direction": "multi-direction diffused", "light_hardness": "very soft (multi-diffused)", "light_count": "multi-light studio (4+)", "temperature_feeling": "clinical cool (6000K+)", "shadow_density": "minimal", "contrast_level": "flat (very low contrast)"},
+        "dramatic shadow lighting": {"light_direction": "side (left or right)", "light_hardness": "hard (direct, small source)", "light_count": "single light", "temperature_feeling": "neutral (5000K)", "shadow_density": "dense", "contrast_level": "high contrast"},
+        "low key studio": {"light_direction": "top-side diagonal", "light_hardness": "semi-hard (medium diffuser)", "light_count": "key + fill (2 lights)", "temperature_feeling": "neutral (5000K)", "shadow_density": "dense", "contrast_level": "high contrast"},
+        "high key studio": {"light_direction": "overhead + front fill", "light_hardness": "soft (diffused)", "light_count": "multi-light studio (4+)", "temperature_feeling": "neutral (5000K)", "shadow_density": "light", "contrast_level": "low contrast"},
+        "hard side lighting": {"light_direction": "side (left or right)", "light_hardness": "hard (direct, small source)", "light_count": "single light", "temperature_feeling": "neutral (5000K)", "shadow_density": "dense", "contrast_level": "high contrast"},
+        "soft diffused lighting": {"light_direction": "multi-direction diffused", "light_hardness": "soft (diffused, large source)", "light_count": "key + fill (2 lights)", "temperature_feeling": "neutral (5000K)", "shadow_density": "light", "contrast_level": "medium contrast"},
+        "rim lighting": {"light_direction": "backlight", "light_hardness": "hard (direct, small source)", "light_count": "key + fill (2 lights)", "temperature_feeling": "cool (5500K+)", "shadow_density": "dense", "contrast_level": "high contrast"},
+        "ring light macro": {"light_direction": "ring light (axial)", "light_hardness": "soft (diffused, large source)", "light_count": "ring light only", "temperature_feeling": "neutral (5000K)", "shadow_density": "minimal", "contrast_level": "low contrast"},
+        "natural window light": {"light_direction": "side (left or right)", "light_hardness": "soft (diffused, large source)", "light_count": "single light", "temperature_feeling": "warm (3200-4000K)", "shadow_density": "moderate", "contrast_level": "medium contrast"},
+        "neon accent lighting": {"light_direction": "side (left or right)", "light_hardness": "semi-hard (medium diffuser)", "light_count": "key + background accent", "temperature_feeling": "mixed temperature", "shadow_density": "moderate", "contrast_level": "medium-high contrast"},
+        "LED cold lighting": {"light_direction": "overhead", "light_hardness": "semi-hard (medium diffuser)", "light_count": "single light", "temperature_feeling": "cool (5500K+)", "shadow_density": "moderate", "contrast_level": "medium contrast"},
+        "black background spotlight": {"light_direction": "top-side diagonal", "light_hardness": "semi-hard (medium diffuser)", "light_count": "key + fill (2 lights)", "temperature_feeling": "neutral (5000K)", "shadow_density": "dense", "contrast_level": "high contrast"},
+        "metallic reflection lighting": {"light_direction": "overhead + front fill", "light_hardness": "soft (diffused)", "light_count": "multi-light studio (4+)", "temperature_feeling": "cool (5500K+)", "shadow_density": "light", "contrast_level": "medium-high contrast"},
+        "cross lighting": {"light_direction": "multi-direction diffused", "light_hardness": "semi-hard (medium diffuser)", "light_count": "key + fill (2 lights)", "temperature_feeling": "neutral (5000K)", "shadow_density": "light", "contrast_level": "medium contrast"},
+        "overhead studio lighting": {"light_direction": "overhead", "light_hardness": "soft (diffused)", "light_count": "overhead + front fill", "temperature_feeling": "neutral (5000K)", "shadow_density": "moderate", "contrast_level": "medium contrast"},
+        "warm tungsten lighting": {"light_direction": "side (left or right)", "light_hardness": "soft (diffused)", "light_count": "single light", "temperature_feeling": "very warm (tungsten, 2700K)", "shadow_density": "moderate", "contrast_level": "medium contrast"},
+        "matte flat lighting": {"light_direction": "multi-direction diffused", "light_hardness": "very soft (multi-diffused)", "light_count": "multi-light studio (4+)", "temperature_feeling": "neutral (5000K)", "shadow_density": "minimal", "contrast_level": "flat (very low contrast)"},
+        "glossy accent lighting": {"light_direction": "side (left or right)", "light_hardness": "hard (direct, small source)", "light_count": "key + fill (2 lights)", "temperature_feeling": "cool (5500K+)", "shadow_density": "light", "contrast_level": "medium-high contrast"},
+        "white background infinity": {"light_direction": "multi-direction diffused", "light_hardness": "very soft (multi-diffused)", "light_count": "multi-light studio (4+)", "temperature_feeling": "neutral (5000K)", "shadow_density": "minimal", "contrast_level": "low contrast"},
+        "backlight silhouette": {"light_direction": "backlight", "light_hardness": "hard (direct, small source)", "light_count": "single light", "temperature_feeling": "neutral (5000K)", "shadow_density": "dense", "contrast_level": "high contrast"}
+      }
+    },
+
+    "position_inference": {
+      "description": "Infer product position, angle, distance, framing, and perspective from spatial layout",
+      "visual_cues_priority": [
+        "product orientation relative to camera",
+        "amount of visible product surface (front/side/top)",
+        "distance between product and frame edge",
+        "camera height relative to product",
+        "product-to-background distance cues (shadow falloff, blur)"
+      ],
+      "rules": [
+        {
+          "field": "product_angle",
+          "description": "Product rotation relative to camera's optical axis",
+          "cues": "Which surfaces of the product are visible? Front face + one side = angled. Only front = straight-on.",
+          "inference": [
+            {"condition": "only front face visible, product parallel to sensor", "value": "0° (straight-on)"},
+            {"condition": "front + one side visible, slight rotation", "value": "15-30° slight angle"},
+            {"condition": "front + side equally visible, clear 3D depth", "value": "45° three-quarter"},
+            {"condition": "side profile, front barely visible", "value": "60-75° near profile"},
+            {"condition": "product seen from side, no front visible", "value": "90° side profile"},
+            {"condition": "product top visible (overhead or flat lay)", "value": "90° top-down"},
+            {"condition": "product bottom partially visible (camera below)", "value": "low angle looking up"},
+            {"condition": "product tipped toward camera, top face visible", "value": "tilted forward 30-45°"}
+          ]
+        },
+        {
+          "field": "distance",
+          "description": "Camera-to-subject distance inferred from context and magnification",
+          "cues": "How much of the product fills the frame. How much background context is visible.",
+          "inference": [
+            {"condition": "product fills >80% of frame, edges of product cropped", "value": "close (10-20cm)"},
+            {"condition": "product fills 50-80% of frame, some background visible", "value": "medium (30-50cm)"},
+            {"condition": "product fills 30-50%, clear background around product", "value": "medium-wide (50-80cm)"},
+            {"condition": "product <30% of frame, lots of environment visible", "value": "wide (80cm+)"},
+            {"condition": "needle tip or cartridge membrane fills entire frame", "value": "macro (5-10cm)"},
+            {"condition": "product held in hand fills 60-80% of frame", "value": "handheld arm's-length (~40cm)"}
+          ]
+        },
+        {
+          "field": "framing",
+          "description": "How tightly the subject is framed within the image bounds",
+          "cues": "Distance from product edges to frame edges.",
+          "inference": [
+            {"condition": "product extends to or beyond frame edge", "value": "extreme tight (cropped)"},
+            {"condition": "minimal space (<10% of product width) around product", "value": "tight"},
+            {"condition": "moderate space (10-30% product width) around product", "value": "medium"},
+            {"condition": "generous space (>30% product width) around product", "value": "loose"},
+            {"condition": "product small within vast background", "value": "very loose (environmental)"}
+          ]
+        },
+        {
+          "field": "perspective",
+          "description": "Camera height relative to product, affecting perceived scale and drama",
+          "cues": "Is the camera looking down, straight-on, or up at the product?",
+          "inference": [
+            {"condition": "camera directly above product, surface as backdrop", "value": "top-down (90°)"},
+            {"condition": "camera slightly above, product top visible", "value": "high angle (45-60° above)"},
+            {"condition": "camera at product height, no vertical angle distortion", "value": "eye-level (0°)"},
+            {"condition": "camera slightly below, product appears taller", "value": "low angle (15-30° below)"},
+            {"condition": "camera far below, dramatic upward view", "value": "hero low angle (45°+ below)"}
+          ]
+        }
+      ],
+      "coarse_to_fine_mapping": {
+        "floating centered": {"product_angle": "45° three-quarter", "distance": "medium (30-50cm)", "framing": "medium", "perspective": "eye-level (0°)"},
+        "floating 45 degree": {"product_angle": "45° three-quarter", "distance": "medium (30-50cm)", "framing": "medium", "perspective": "high angle (45-60° above)"},
+        "overhead flat lay": {"product_angle": "90° top-down", "distance": "medium (30-50cm)", "framing": "medium", "perspective": "top-down (90°)"},
+        "angled flat lay": {"product_angle": "45° three-quarter", "distance": "medium (30-50cm)", "framing": "loose", "perspective": "high angle (45-60° above)"},
+        "upright standing": {"product_angle": "0° (straight-on)", "distance": "medium (30-50cm)", "framing": "medium", "perspective": "eye-level (0°)"},
+        "horizontal layout": {"product_angle": "0° (straight-on)", "distance": "medium-wide (50-80cm)", "framing": "loose", "perspective": "high angle (45-60° above)"},
+        "hero single": {"product_angle": "45° three-quarter", "distance": "medium (30-50cm)", "framing": "tight", "perspective": "eye-level (0°)"},
+        "three-quarter view": {"product_angle": "45° three-quarter", "distance": "medium (30-50cm)", "framing": "medium", "perspective": "eye-level (0°)"},
+        "side profile": {"product_angle": "90° side profile", "distance": "medium (30-50cm)", "framing": "tight", "perspective": "eye-level (0°)"},
+        "low angle looking up": {"product_angle": "low angle looking up", "distance": "close (10-20cm)", "framing": "tight", "perspective": "hero low angle (45°+ below)"},
+        "mounted on machine": {"product_angle": "45° three-quarter", "distance": "close (10-20cm)", "framing": "tight", "perspective": "eye-level (0°)"},
+        "held in gloved hand": {"product_angle": "15-30° slight angle", "distance": "handheld arm's-length (~40cm)", "framing": "tight", "perspective": "eye-level (0°)"},
+        "disassembled layout": {"product_angle": "45° three-quarter", "distance": "medium (30-50cm)", "framing": "loose", "perspective": "high angle (45-60° above)"},
+        "clustered arrangement": {"product_angle": "mixed angles", "distance": "medium-wide (50-80cm)", "framing": "loose", "perspective": "high angle (45-60° above)"},
+        "row layout": {"product_angle": "0° (straight-on)", "distance": "medium-wide (50-80cm)", "framing": "loose", "perspective": "eye-level (0°)"},
+        "tilted forward": {"product_angle": "tilted forward 30-45°", "distance": "close (10-20cm)", "framing": "tight", "perspective": "high angle (45-60° above)"},
+        "next-to-scale": {"product_angle": "0° (straight-on)", "distance": "medium (30-50cm)", "framing": "loose", "perspective": "eye-level (0°)"},
+        "finger grip display": {"product_angle": "45° three-quarter", "distance": "close (10-20cm)", "framing": "extreme tight (cropped)", "perspective": "eye-level (0°)"},
+        "palm display": {"product_angle": "45° three-quarter", "distance": "medium (30-50cm)", "framing": "tight", "perspective": "eye-level (0°)"}
+      }
+    },
+
+    "material_inference": {
+      "description": "Infer material properties from surface reflection, texture, and light interaction",
+      "visual_cues_priority": [
+        "highlight sharpness and size",
+        "reflection clarity (mirror vs blurry vs absent)",
+        "surface texture visible under direct light",
+        "edge behavior (sharp vs softened light absorption)",
+        "subsurface scattering (light passing through material)"
+      ],
+      "rules": [
+        {
+          "field": "specular_intensity",
+          "description": "How shiny/reflective the surface appears",
+          "cues": "Examine light reflection on the surface: sharp bright spot = high specular, diffuse spread = low specular.",
+          "inference": [
+            {"condition": "tiny bright pinpoint reflection, mirror-like", "value": "highly specular (chrome/gloss)"},
+            {"condition": "distinct but soft highlight, surface visible through it", "value": "moderately specular (semi-gloss)"},
+            {"condition": "broad soft reflection, no distinct bright spot", "value": "low specular (matte)"},
+            {"condition": "no reflection visible, surface appears flat", "value": "diffuse (flat matte)"},
+            {"condition": "light passes through material, glows from within", "value": "translucent (subsurface scatter)"}
+          ]
+        },
+        {
+          "field": "surface_roughness",
+          "description": "Texture granularity of the surface",
+          "cues": "Look at how light scatters across the surface. Rough = light scatters evenly. Smooth = sharp reflections.",
+          "inference": [
+            {"condition": "mirror-clear reflection, surface imperceptible", "value": "polished smooth"},
+            {"condition": "slight texture visible under raking light", "value": "fine matte"},
+            {"condition": "visible grain or pattern on surface", "value": "textured"},
+            {"condition": "coarse, irregular surface, light breaks up", "value": "rough"},
+            {"condition": "visible parallel scratches or brush marks", "value": "brushed / machined"}
+          ]
+        },
+        {
+          "field": "material_category",
+          "description": "Primary material class inferred from visual properties",
+          "cues": "Combine color, reflection, edge sharpness, and texture cues.",
+          "inference": [
+            {"condition": "sharp highlights, metallic color, high specularity", "value": "metal (uncoated)"},
+            {"condition": "colored surface with metallic sheen", "value": "metal (coated/anodized)"},
+            {"condition": "colored, moderate specular, smooth", "value": "plastic (hard)"},
+            {"condition": "colored, low specular, slightly soft appearance", "value": "plastic (soft-touch/rubberized)"},
+            {"condition": "transparent or translucent, see-through", "value": "plastic (transparent)"},
+            {"condition": "translucent, frosted, light diffuses through", "value": "plastic (frosted)"},
+            {"condition": "fibrous, matte, absorbent appearance", "value": "paper / cardboard"},
+            {"condition": "very dark, matte, with visible grain", "value": "rubber / silicone"},
+            {"condition": "soft, wrinkled, skin-like with texture", "value": "nitrile / latex (glove)"},
+            {"condition": "cushioned, textured, low specular", "value": "foam / padding"}
+          ]
+        }
+      ],
+      "coarse_to_fine_mapping": {
+        "glossy plastic reflection": {"specular_intensity": "moderately specular (semi-gloss)", "surface_roughness": "polished smooth", "material_category": "plastic (hard)"},
+        "matte plastic finish": {"specular_intensity": "diffuse (flat matte)", "surface_roughness": "fine matte", "material_category": "plastic (soft-touch/rubberized)"},
+        "transparent plastic clarity": {"specular_intensity": "moderately specular (semi-gloss)", "surface_roughness": "polished smooth", "material_category": "plastic (transparent)"},
+        "frosted plastic diffusion": {"specular_intensity": "diffuse (flat matte)", "surface_roughness": "fine matte", "material_category": "plastic (frosted)"},
+        "chrome metallic reflection": {"specular_intensity": "highly specular (chrome/gloss)", "surface_roughness": "polished smooth", "material_category": "metal (uncoated)"},
+        "brushed metal texture": {"specular_intensity": "moderately specular (semi-gloss)", "surface_roughness": "brushed / machined", "material_category": "metal (uncoated)"},
+        "anodized metal finish": {"specular_intensity": "low specular (matte)", "surface_roughness": "fine matte", "material_category": "metal (coated/anodized)"},
+        "rubberized grip texture": {"specular_intensity": "diffuse (flat matte)", "surface_roughness": "textured", "material_category": "rubber / silicone"},
+        "black nitrile glove grip": {"specular_intensity": "low specular (matte)", "surface_roughness": "textured", "material_category": "nitrile / latex (glove)"},
+        "paper texture": {"specular_intensity": "diffuse (flat matte)", "surface_roughness": "rough", "material_category": "paper / cardboard"},
+        "foam insert texture": {"specular_intensity": "diffuse (flat matte)", "surface_roughness": "textured", "material_category": "foam / padding"},
+        "carbon fiber pattern": {"specular_intensity": "low specular (matte)", "surface_roughness": "textured", "material_category": "plastic (hard)"},
+        "silicone soft texture": {"specular_intensity": "low specular (matte)", "surface_roughness": "fine matte", "material_category": "rubber / silicone"},
+        "stainless steel gloss": {"specular_intensity": "moderately specular (semi-gloss)", "surface_roughness": "polished smooth", "material_category": "metal (uncoated)"},
+        "gold plating reflection": {"specular_intensity": "highly specular (chrome/gloss)", "surface_roughness": "polished smooth", "material_category": "metal (coated/anodized)"}
+      }
+    },
+
+    "camera_inference": {
+      "description": "Infer lens type, focal length, and camera technique from optical properties",
+      "visual_cues_priority": [
+        "depth of field (how much is in focus front-to-back)",
+        "perspective distortion (barrel/pincushion, foreshortening)",
+        "background blur quality (bokeh shape, smoothness)",
+        "edge sharpness (center vs corner resolution)",
+        "magnification ratio (how large small objects appear)"
+      ],
+      "rules": [
+        {
+          "field": "focal_length_equivalent",
+          "description": "Inferred 35mm equivalent focal length from perspective and distortion",
+          "cues": "Wide angle = visible perspective distortion, background appears far. Telephoto = compressed perspective, background appears close.",
+          "inference": [
+            {"condition": "visible barrel distortion, foreground exaggerated, wide field", "value": "wide-angle (<35mm)"},
+            {"condition": "natural perspective, moderate field of view, minimal distortion", "value": "standard (35-70mm)"},
+            {"condition": "slight compression, background moderately blurred", "value": "short telephoto (70-105mm)"},
+            {"condition": "strong compression, background very close, distinct bokeh", "value": "telephoto (105-200mm)"},
+            {"condition": "extreme compression, very narrow angle, flat perspective", "value": "long telephoto (200mm+)"},
+            {"condition": "extreme close-up with high magnification, tiny object fills frame", "value": "macro (1:1+ magnification)"}
+          ]
+        },
+        {
+          "field": "aperture_feeling",
+          "description": "Inferred aperture from depth of field and background blur",
+          "cues": "Narrow band of focus = wide aperture. Everything sharp = narrow aperture.",
+          "inference": [
+            {"condition": "very narrow focus band, only small slice of product sharp", "value": "wide open (f/1.2-2.0)"},
+            {"condition": "product sharp, background softly blurred", "value": "moderate wide (f/2.8-4.0)"},
+            {"condition": "product sharp, background slightly blurred", "value": "medium (f/5.6-8.0)"},
+            {"condition": "product and close background sharp", "value": "narrow (f/8-11)"},
+            {"condition": "everything sharp front to back", "value": "very narrow (f/16+)"},
+            {"condition": "product sharp on black bg, no depth cues", "value": "unknown (black bg masks DoF)"}
+          ]
+        },
+        {
+          "field": "camera_movement_style",
+          "description": "Camera stability and movement (for video, infer from still if possible)",
+          "cues": "For still images: look for tripod-steady = locked down, slight imperfection = handheld.",
+          "inference": [
+            {"condition": "perfectly level, no rotation, consistent framing", "value": "locked down (tripod)"},
+            {"condition": "slightly imperfect leveling, natural crop", "value": "handheld steady"},
+            {"condition": "visible slight tilt or rotation variation", "value": "handheld natural"},
+            {"condition": "extreme angle or dynamic tilt", "value": "dynamic handheld"},
+            {"condition": "phone-captured, square crop typical", "value": "phone camera"}
+          ]
+        }
+      ],
+      "coarse_to_fine_mapping": {
+        "macro close-up": {"focal_length_equivalent": "macro (1:1+ magnification)", "aperture_feeling": "moderate wide (f/2.8-4.0)", "camera_movement_style": "locked down (tripod)"},
+        "extreme macro": {"focal_length_equivalent": "macro (1:1+ magnification)", "aperture_feeling": "moderate wide (f/2.8-4.0)", "camera_movement_style": "locked down (tripod)"},
+        "medium close-up": {"focal_length_equivalent": "standard (35-70mm)", "aperture_feeling": "medium (f/5.6-8.0)", "camera_movement_style": "locked down (tripod)"},
+        "commercial product shot": {"focal_length_equivalent": "standard (35-70mm)", "aperture_feeling": "narrow (f/8-11)", "camera_movement_style": "locked down (tripod)"},
+        "flat lay overhead": {"focal_length_equivalent": "standard (35-70mm)", "aperture_feeling": "narrow (f/8-11)", "camera_movement_style": "locked down (tripod)"},
+        "45 degree angle shot": {"focal_length_equivalent": "standard (35-70mm)", "aperture_feeling": "medium (f/5.6-8.0)", "camera_movement_style": "locked down (tripod)"},
+        "eye-level shot": {"focal_length_equivalent": "standard (35-70mm)", "aperture_feeling": "medium (f/5.6-8.0)", "camera_movement_style": "locked down (tripod)"},
+        "detail macro": {"focal_length_equivalent": "macro (1:1+ magnification)", "aperture_feeling": "moderate wide (f/2.8-4.0)", "camera_movement_style": "locked down (tripod)"},
+        "selective focus macro": {"focal_length_equivalent": "macro (1:1+ magnification)", "aperture_feeling": "wide open (f/1.2-2.0)", "camera_movement_style": "locked down (tripod)"},
+        "sharp focus full": {"focal_length_equivalent": "standard (35-70mm)", "aperture_feeling": "very narrow (f/16+)", "camera_movement_style": "locked down (tripod)"},
+        "handheld natural": {"focal_length_equivalent": "standard (35-70mm)", "aperture_feeling": "medium (f/5.6-8.0)", "camera_movement_style": "handheld natural"},
+        "low angle product": {"focal_length_equivalent": "wide-angle (<35mm)", "aperture_feeling": "medium (f/5.6-8.0)", "camera_movement_style": "handheld steady"}
+      }
+    },
+
+    "composition_inference": {
+      "description": "Infer composition rules and visual weight distribution from frame layout",
+      "rules": [
+        {
+          "field": "visual_weight_distribution",
+          "description": "Where the visual attention is concentrated in the frame",
+          "cues": "Which quadrant draws the eye first? Product size vs background ratio.",
+          "inference": [
+            {"condition": "product at exact center, equal space all sides", "value": "center-weighted"},
+            {"condition": "product on left third, negative space on right", "value": "left-weighted"},
+            {"condition": "product on right third, negative space on left", "value": "right-weighted"},
+            {"condition": "product at top of frame, lower empty", "value": "top-weighted"},
+            {"condition": "product at bottom, upper area empty", "value": "bottom-weighted"},
+            {"condition": "multiple products spread across frame", "value": "distributed"},
+            {"condition": "product diagonal across frame corner to corner", "value": "diagonal flow"}
+          ]
+        },
+        {
+          "field": "depth_construction",
+          "description": "How depth is constructed in the frame",
+          "cues": "How many visual planes exist? Foreground obstruction, mid-ground subject, background?",
+          "inference": [
+            {"condition": "only one plane visible (product on flat bg)", "value": "single-plane (flat)"},
+            {"condition": "product + surface visible, no background", "value": "two-plane (product + surface)"},
+            {"condition": "product + surface + wall/background visible", "value": "three-plane (product + surface + bg)"},
+            {"condition": "obstruction in foreground + product + background", "value": "multi-plane with foreground layer"},
+            {"condition": "hand/glove in mid-ground between camera and product", "value": "multi-plane with mid-ground hand"}
+          ]
+        },
+        {
+          "field": "negative_space_ratio",
+          "description": "Approximate ratio of empty space to subject",
+          "cues": "Estimate visual area of background vs product.",
+          "inference": [
+            {"condition": "product fills >80% of frame", "value": "minimal (<20% empty)"},
+            {"condition": "product fills 50-80% of frame", "value": "moderate (20-50% empty)"},
+            {"condition": "product fills 30-50% of frame", "value": "generous (50-70% empty)"},
+            {"condition": "product fills <30% of frame", "value": "dominant (>70% empty)"}
+          ]
+        }
+      ],
+      "coarse_to_fine_mapping": {
+        "center composition": {"visual_weight_distribution": "center-weighted", "depth_construction": "single-plane (flat)", "negative_space_ratio": "moderate (20-50% empty)"},
+        "rule of thirds": {"visual_weight_distribution": "left-weighted", "depth_construction": "two-plane (product + surface)", "negative_space_ratio": "generous (50-70% empty)"},
+        "tight framing": {"visual_weight_distribution": "center-weighted", "depth_construction": "single-plane (flat)", "negative_space_ratio": "minimal (<20% empty)"},
+        "negative space dominant": {"visual_weight_distribution": "center-weighted", "depth_construction": "single-plane (flat)", "negative_space_ratio": "dominant (>70% empty)"},
+        "asymmetrical balance": {"visual_weight_distribution": "left-weighted", "depth_construction": "two-plane (product + surface)", "negative_space_ratio": "generous (50-70% empty)"},
+        "symmetrical balance": {"visual_weight_distribution": "center-weighted", "depth_construction": "single-plane (flat)", "negative_space_ratio": "moderate (20-50% empty)"},
+        "layered depth": {"visual_weight_distribution": "distributed", "depth_construction": "multi-plane with foreground layer", "negative_space_ratio": "moderate (20-50% empty)"},
+        "isolated subject": {"visual_weight_distribution": "center-weighted", "depth_construction": "single-plane (flat)", "negative_space_ratio": "generous (50-70% empty)"},
+        "diagonal leading line": {"visual_weight_distribution": "diagonal flow", "depth_construction": "two-plane (product + surface)", "negative_space_ratio": "moderate (20-50% empty)"},
+        "minimalist composition": {"visual_weight_distribution": "center-weighted", "depth_construction": "single-plane (flat)", "negative_space_ratio": "dominant (>70% empty)"}
+      }
+    },
+
+    "background_inference": {
+      "description": "Infer background material, depth, and treatment from visual cues",
+      "rules": [
+        {
+          "field": "background_material",
+          "description": "Material or surface type of the background",
+          "cues": "Texture, reflectivity, and pattern of the background surface.",
+          "inference": [
+            {"condition": "no texture visible, pure black, no depth", "value": "seamless black (paper/vinyl)"},
+            {"condition": "no texture visible, pure white, bright", "value": "seamless white (paper/vinyl)"},
+            {"condition": "subtle linear texture, slight paper grain", "value": "seamless paper (textured)"},
+            {"condition": "hard surface with faint reflection, scratchable", "value": "acrylic / plexiglass sheet"},
+            {"condition": "visible wood grain, warm brown tones", "value": "wooden surface"},
+            {"condition": "cold surface, metallic sheen, parallel grain", "value": "brushed metal surface"},
+            {"condition": "soft fabric texture, no reflection", "value": "fabric / muslin backdrop"},
+            {"condition": "hard surface, visible reflection of product", "value": "glossy painted surface"},
+            {"condition": "irregular texture, small bumps", "value": "textured wall / concrete"},
+            {"condition": "blurred shapes, no identifiable surface", "value": "deep background (out of focus)"}
+          ]
+        },
+        {
+          "field": "background_depth",
+          "description": "Distance from product to background surface",
+          "cues": "Shadow sharpness on background, blur level, parallax.",
+          "inference": [
+            {"condition": "product shadow falls directly on bg, bg in focus", "value": "close (product near bg)"},
+            {"condition": "product shadow soft on bg, bg slightly soft", "value": "medium distance"},
+            {"condition": "bg completely out of focus, no shadow visible", "value": "far (bg distant)"},
+            {"condition": "no bg visible (black/white seamless, product floating)", "value": "infinite (seamless)"}
+          ]
+        }
+      ],
+      "coarse_to_fine_mapping": {
+        "pure black seamless": {"background_material": "seamless black (paper/vinyl)", "background_depth": "infinite (seamless)"},
+        "pure white seamless": {"background_material": "seamless white (paper/vinyl)", "background_depth": "infinite (seamless)"},
+        "black matte acrylic": {"background_material": "acrylic / plexiglass sheet", "background_depth": "close (product near bg)"},
+        "white marble texture": {"background_material": "glossy painted surface", "background_depth": "close (product near bg)"},
+        "wooden desk surface": {"background_material": "wooden surface", "background_depth": "close (product near bg)"},
+        "industrial metal surface": {"background_material": "brushed metal surface", "background_depth": "close (product near bg)"},
+        "blurred studio background": {"background_material": "deep background (out of focus)", "background_depth": "far (bg distant)"},
+        "natural room background": {"background_material": "textured wall / concrete", "background_depth": "far (bg distant)"},
+        "black acrylic reflection": {"background_material": "acrylic / plexiglass sheet", "background_depth": "close (product near bg)"}
+      }
+    },
+
+    "product_identification_rules": {
+      "description": "Visual rules to identify tattoo supply products from image features alone — fills gaps where keywords are insufficient",
+      "rules": [
+        {
+          "product": "tattoo_cartridges",
+          "primary_visual_indicators": [
+            "small transparent/translucent cylinder with metal tip",
+            "visible needle point protruding from one end",
+            "colored O-ring at base (brand color coding)",
+            "transparent membrane visible at bottom",
+            "arranged in tray or packaging with individual slots",
+            "metal tip with visible bevel/grind marks"
+          ],
+          "distinguish_from": {
+            "needle_pack": "cartridges have colored plastic housing + O-ring + membrane. Needle packs are just needles in paper/plastic wrap.",
+            "grip": "cartridges are smaller (2-3cm), have exposed needle tip. Grips are longer hollow tubes (8-12cm).",
+            "machine_part": "cartridges attach to machine. They are the disposable tip, not the main body."
+          }
+        },
+        {
+          "product": "tattoo_machine",
+          "primary_visual_indicators": [
+            "cylindrical pen-like body, 12-16cm length",
+            "visible grip section (textured or rubberized)",
+            "RCA connector or USB port at bottom",
+            "RCA cable attached (clip cord)",
+            "OLED/LED screen on body (wireless models)",
+            "battery indicator or voltage display",
+            "colored anodized aluminum body",
+            "button controls on body",
+            "cartridge attached at front"
+          ],
+          "distinguish_from": {
+            "grip": "machines are complete units with electronics, grips are just handle attachments without electronics",
+            "battery": "machines have needle bars/cartridge attachment. Batteries are purely cylindrical with contacts.",
+            "power_supply": "machines are handheld. Power supplies are desktop units with cables and displays."
+          }
+        },
+        {
+          "product": "wireless_battery",
+          "primary_visual_indicators": [
+            "cylindrical tube, slightly shorter than machine",
+            "OLED display showing battery level or voltage",
+            "button on body (single power or +/- adjustment)",
+            "metal contact pins at one or both ends",
+            "charging port (USB-C) on side",
+            "anodized aluminum or black finish",
+            "brand logo on body"
+          ],
+          "distinguish_from": {
+            "tattoo_machine": "batteries have no cartridge holder, no needle bar movement. Pure cylinder with contacts.",
+            "machine_grip": "batteries have electronics (screen/button). Grips are passive mechanical tubes."
+          }
+        },
+        {
+          "product": "tattoo_ink",
+          "primary_visual_indicators": [
+            "glass or plastic bottle, 15-120ml",
+            "colored liquid visible (black most common, also white, colored)",
+            "label with brand and color name",
+            "dropper top or twist-cap closure",
+            "ink cap or ink cup nearby (small plastic cups)",
+            "multiple bottles arranged together",
+            "pigment settled at bottom (for some colors)"
+          ],
+          "distinguish_from": {
+            "aftercare_product": "ink bottles are smaller, have colored liquid. Aftercare is opaque cream in tubes/jars.",
+            "cleaning_supply": "ink bottles concentrate on pigment color names. Cleaning supplies have disinfectant labels."
+          }
+        },
+        {
+          "product": "grip",
+          "primary_visual_indicators": [
+            "hollow tube, 8-12cm length",
+            "visible interior hollow channel",
+            "textured exterior surface (diamond, groove, or knurling)",
+            "aluminum or stainless steel construction",
+            "O-rings at top and bottom",
+            "sold individually or in grip sets with different textures/colors",
+            "can have rubber/silicone cover sleeve"
+          ],
+          "distinguish_from": {
+            "tattoo_machine": "grips are simple hollow tubes with no electronics, no cable port",
+            "cartridge": "grips are much larger (fits in hand), no needle point"
+          }
+        },
+        {
+          "product": "power_supply",
+          "primary_visual_indicators": [
+            "desktop box with display screen",
+            "digital voltage readout (LCD or LED)",
+            "knob or button controls",
+            "multiple output ports",
+            "RCA or clip cord output cable",
+            "power cord connecting to wall",
+            "foot pedal connected via cable",
+            "compact battery-style with screen (wireless versions)"
+          ],
+          "distinguish_from": {
+            "wireless_battery": "power supplies are larger, sit on desk, have wall power cord. Batteries are handheld, attach to machine."
+          }
+        },
+        {
+          "product": "aftercare_product",
+          "primary_visual_indicators": [
+            "tube, jar, or bottle with cream/lotion",
+            "opaque white or colored container",
+            "medical-style labeling with instructions",
+            "pump bottle or squeeze tube format",
+            "branded as 'healing', 'ointment', 'balm', 'moisturizer'",
+            "second skin / protective film in box or on backing paper"
+          ],
+          "distinguish_from": {
+            "tattoo_ink": "aftercare containers are opaque, hold cream not liquid. Labels say 'healing' not color names.",
+            "cleaning_supply": "aftercare is for healing (post-tattoo). Cleaning is for prep (pre-tattoo)."
+          }
+        },
+        {
+          "product": "stencil_paper",
+          "primary_visual_indicators": [
+            "stack of paper sheets",
+            "purple/blue/gold tinted surface",
+            "multi-layer construction (carbon paper feel)",
+            "packaged in reams or rolls",
+            "hectograph purple color on transfer surface",
+            "paper sheets with cover sheet interleaving"
+          ],
+          "distinguish_from": {
+            "needle_pack": "stencil paper is flat sheets, not needle packaging",
+            "paper_towel": "stencil paper has carbon coating and specific purple/blue color"
+          }
+        },
+        {
+          "product": "glove",
+          "primary_visual_indicators": [
+            "box of disposable gloves",
+            "black or blue nitrile material",
+            "glove cuff visible at box opening",
+            "textured fingertips visible",
+            "powder-free label on box",
+            "examination glove-style packaging",
+            "individual gloves pulled from box opening"
+          ],
+          "distinguish_from": {
+            "medical_supply": "tattoo gloves are typically black nitrile, not blue/white examination gloves"
+          }
+        },
+        {
+          "product": "cleaning_supply",
+          "primary_visual_indicators": [
+            "spray bottle format",
+            "green soap (characteristic green color)",
+            "disinfectant labeling",
+            "sterilization pouches (paper + plastic)",
+            "autoclave indicator tape",
+            "barrier film rolls",
+            "sterilization wrap sheets"
+          ],
+          "distinguish_from": {
+            "aftercare_product": "cleaning products are for surface/tool disinfection, not skin healing",
+            "tattoo_ink": "cleaning products are clear or green soap, not tattoo pigments"
+          }
+        },
+        {
+          "product": "bundle_kit",
+          "primary_visual_indicators": [
+            "multiple items arranged together in one frame",
+            "kit packaging or box containing varied items",
+            "starter kit with machine + cartridges + ink + accessories",
+            "matching aesthetic across items",
+            "value bundle presentation"
+          ],
+          "distinguish_from": {
+            "individual_product": "kits have 3+ different product types visibly grouped together"
+          }
+        },
+        {
+          "product": "packaging",
+          "primary_visual_indicators": [
+            "box or display case as main subject",
+            "foam insert with cutouts for products",
+            "retail-ready packaging with branding",
+            "product clearly inside packaging",
+            "exhibition or demo display stand",
+            "multiple items in organized case"
+          ],
+          "distinguish_from": {
+            "bundle_kit": "packaging focuses on the container/display. Kit focuses on the contents."
+          }
+        },
+        {
+          "product": "needle_pack",
+          "primary_visual_indicators": [
+            "paper-plastic peel pack with sterile seal",
+            "multiple packs in a bundle",
+            "thin flat profile",
+            "sterile indicator dot or stripe",
+            "label with gauge-number-type (e.g. 1003RL)",
+            "arranged in fan or row for display",
+            "transparent window showing needle inside"
+          ],
+          "distinguish_from": {
+            "tattoo_cartridges": "needle packs are flat peel pouches. Cartridges have 3D plastic housing.",
+            "stencil_paper": "needle packs are individual pouches. Stencil paper is larger flat sheets."
+          }
+        }
+      ]
+    },
+
+    "generation_prompt_assembly": {
+      "description": "Rules for assembling the fine-grained analysis into actual image generation prompt keywords",
+      "prompt_structure_order": [
+        "subject specification (product type + key features)",
+        "position and angle (product_angle + distance + framing + perspective)",
+        "lighting (light_direction + light_hardness + light_count + temperature_feeling)",
+        "camera (focal_length_equivalent + aperture_feeling + camera_movement_style)",
+        "composition (framing + depth_construction + negative_space_ratio)",
+        "background and surface (background_material + surface_type)",
+        "material properties (material_category + specular_intensity + surface_roughness)",
+        "style modifiers (commercial/documentary/cinematic precision level)"
+      ],
+      "quality_modifiers": [
+        {"level": "commercial polished", "prefix": "professional studio photography, high-end product shoot, "},
+        {"level": "clinical clean", "prefix": "medical-grade clean presentation, sterile aesthetic, "},
+        {"level": "documentary realism", "prefix": "authentic workshop documentation, natural imperfection, "},
+        {"level": "dark cinematic", "prefix": "dramatic editorial lighting, moody atmosphere, "},
+        {"level": "raw handheld", "prefix": "behind-the-scenes authenticity, natural movement, "}
+      ]
+    }
+  }
+}

@@ -1,0 +1,182 @@
+{
+  "protocol": "Scene Construction Protocol v1",
+  "description": "Modular scene assembly system for tattoo industry imagery — workspace, spatial depth, tool layout, contamination, and obstruction logic",
+  "version": "1.0",
+  "modules": {
+    "desk_surface": {
+      "description": "Primary worktable material and finish",
+      "terms": [
+        "black matte workstation",
+        "stainless steel table",
+        "carbon texture surface",
+        "clinical white laminate",
+        "rubber anti-slip mat",
+        "wooden desk surface",
+        "metal utility cart",
+        "black acrylic sheet",
+        "glass top table",
+        "plastic foldable table",
+        "leather tool mat",
+        "adjustable clinic bed surface",
+        "armrest vinyl cushion",
+        "paper-covered workbench",
+        "industrial steel surface"
+      ]
+    },
+    "desk_cover": {
+      "description": "Disposable or reusable cover layer on workspace — extremely high industry signal value",
+      "terms": [
+        "black dental bib — single-use paper bib, standard in tattoo studios",
+        "plastic barrier wrap — transparent cling film covering surface",
+        "paper towel layering — multiple paper towels spread as work surface",
+        "medical protective sheet — blue or white disposable medical sheet",
+        "wrinkled workstation cover — used, creased cover showing prior work",
+        "used disposable cover — visibly contaminated single-use cover",
+        "clean clinical drape — fresh, unwrinkled medical drape",
+        "stencil paper scatter — torn stencil paper pieces on surface",
+        "ink-stained paper towel — paper towel with absorbed ink residue",
+        "gauze pad layer — sterile gauze padding on work area",
+        "plastic-backed absorbent pad — blue absorbent puppy pad style",
+        "no cover — bare surface, no protective layer"
+      ]
+    },
+    "table_obstruction": {
+      "description": "Spatial occlusion of worktable structure — real photos rarely show full table",
+      "terms": [
+        "partial table visibility — only portion of table visible in frame",
+        "foreground obstruction — object in foreground blocking table edge",
+        "cropped workstation edge — table edge cut by frame boundary",
+        "hidden support structure — table legs/undercarriage not visible",
+        "shallow framing obstruction — tight crop hides table boundaries",
+        "overhead flat lay — full table visible from above, no edge crop",
+        "workstation corner visible — just the corner of table in frame",
+        "table edge entering frame — table edge enters from one side",
+        "full table in frame — entire table surface visible",
+        "no table visible — product suspended, no surface context"
+      ]
+    },
+    "tool_layout": {
+      "description": "Arrangement of tools and equipment on the workspace",
+      "terms": [
+        "ink caps scattered naturally — multiple ink caps spread across surface",
+        "machine cable crossing frame — cable of machine diagonally across image",
+        "paper towel partially folded — folded or crumpled paper towel",
+        "gloves resting beside machine — used or unused gloves adjacent to machine",
+        "clip cord entering frame edge — clip cord comes from outside frame",
+        "organized tool row — tools arranged in neat line",
+        "machine resting on surface — tattoo machine placed flat on table",
+        "bottle in background — ink or spray bottle visible behind main subject",
+        "power supply visible — battery pack or power supply in frame",
+        "cartridge box nearby — opened cartridge packaging visible",
+        "multi-ink-cap arrangement — several ink caps arranged in row or cluster",
+        "single ink cap focus — single ink cap as main subject element",
+        "needle wrapper present — sterile needle packaging in frame",
+        "remote control visible — machine remote or foot pedal visible",
+        "phone in frame — phone or camera as work documentation tool"
+      ]
+    },
+    "contamination_level": {
+      "description": "Visible wear, residue, and workflow state of the workspace",
+      "terms": [
+        "clean organized setup — pristine, freshly arranged workspace",
+        "slightly messy workflow — natural light disorganization during work",
+        "ink residue marks — visible ink stains on surface or cover",
+        "paper towel contamination — used paper towel with ink/blood",
+        "used workstation realism — realistic post-work state",
+        "freshly cleaned setup — disinfected, reset workspace",
+        "heavy ink splatter — significant ink marks on surface",
+        "blood trace visible — tiny blood spots on towel or surface",
+        "vaseline smear — vaseline residue reflecting light",
+        "stencil residue — purple/green stencil ink marks remaining",
+        "glove powder residue — white powder dust on surface"
+      ]
+    },
+    "spatial_depth": {
+      "description": "Depth layering and spatial arrangement within the frame",
+      "terms": [
+        "single layer flat lay — all elements in one depth plane, top-down",
+        "two-layer depth — foreground subject + background context",
+        "multi-layer workspace — 3+ depth layers visible",
+        "deep table perspective — table receding into distance",
+        "shallow table crop — tight on surface, minimal depth",
+        "product suspended — no surface contact, floating depth",
+        "hand in mid-ground — hand or glove between camera and product",
+        "wall background depth — wall visible behind table surface",
+        "tool barrier depth — tools creating visual depth layers",
+        "machine hovering above surface — machine held, not resting"
+      ]
+    },
+    "realism_behavior": {
+      "description": "Visual realism signals specific to tattoo workspaces",
+      "terms": [
+        "surface contamination texture — visible dirt/residue on surface",
+        "fingerprint on wrap — smudges on barrier film",
+        "cable tension visible — stretched cable indicating real setup",
+        "uneven table covering — cover not perfectly flat, real wrinkle",
+        "asymmetrical tool placement — tools not perfectly arranged",
+        "reflection on metal surface — ambient reflection on machine",
+        "shadow from overhead — real cast shadow from above lighting",
+        "glove crinkle texture — visible wrinkles in glove material",
+        "moisture on surface — dampness or liquid on table",
+        "lint or dust particles — tiny particles visible in macro"
+      ]
+    },
+    "workflow_state": {
+      "description": "Phase of the tattooing workflow implied by the scene",
+      "terms": [
+        "preparation setup — tools being arranged before work",
+        "mid-workflow — active tattooing in progress",
+        "wipe stage — wiping excess ink during work",
+        "post-work documentation — photographing finished work",
+        "cleanup phase — removing used materials",
+        "maintenance — cleaning machine, changing grips",
+        "product photography — staged product shot, not active work",
+        "teaching / demonstration — multiple tools arranged for demo"
+      ]
+    },
+    "spatial_realism": {
+      "description": "Advanced spatial occlusion and framing realism signals",
+      "subfields": {
+        "foreground_obstruction": [
+          "paper towel covering table edge",
+          "glove entering frame from bottom",
+          "machine cable crossing lower frame",
+          "ink cap in extreme foreground",
+          "arm or hand partially blocking view",
+          "tool handle protruding into frame",
+          "clip cord loop in foreground"
+        ],
+        "partial_visibility": [
+          "machine only partially in frame",
+          "tool edge cropped by frame",
+          "ink cap half visible at edge",
+          "background object partially obscured",
+          "hand only partially visible",
+          "product cut by frame boundary"
+        ],
+        "cropped_objects": [
+          "machine grip cropped at bottom",
+          "cartridge tip extending beyond frame",
+          "bottle top cut off",
+          "glove fingers extending past edge",
+          "cable disappearing outside frame"
+        ],
+        "depth_layering": [
+          "extreme foreground blur layer",
+          "mid-ground product focus",
+          "background table surface",
+          "background wall depth",
+          "out-of-focus background tool",
+          "foreground obstruction creating depth"
+        ],
+        "focus_falloff": [
+          "sharp center with radial blur",
+          "front-to-back focus gradient",
+          "selective focus on product only",
+          "soft edges from shallow depth of field",
+          "center sharpness fading outward"
+        ]
+      }
+    }
+  }
+}

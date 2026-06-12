@@ -1,0 +1,223 @@
+{
+  "description": "Tattoo Visual Intelligence Engine — Field Logic Protocol",
+  "version": "1.0",
+  "last_updated": "2026-05-27",
+
+  "rules": {
+
+    "content_type": {
+      "allow_unknown": false,
+      "penalty": "high",
+      "reason": "Core identifier — every piece of content has a type"
+    },
+    "visual_style": {
+      "allow_unknown": false,
+      "penalty": "high",
+      "reason": "Core identifier — the dominant visual aesthetic is always present"
+    },
+    "product_category": {
+      "allow_unknown": true,
+      "allow_unknown_when": [
+        "no product visible in frame",
+        "content_type is not product_showcase",
+        "lifestyle or process content with no branded product"
+      ],
+      "penalty": "low",
+      "reason": "Only meaningful when a physical product is being shown"
+    },
+
+    "camera.shot_type": {
+      "allow_unknown": false,
+      "penalty": "medium",
+      "reason": "Every image has a shot type"
+    },
+    "camera.camera_angle": {
+      "allow_unknown": false,
+      "penalty": "medium",
+      "reason": "Every image has a camera angle"
+    },
+    "camera.camera_movement": {
+      "allow_unknown": true,
+      "allow_unknown_when": [
+        "single static product shot with no camera motion",
+        "tripod-mounted studio photography",
+        "top-down flat lay product image"
+      ],
+      "penalty": "low",
+      "reason": "Static images have no camera movement; unknown is correct here"
+    },
+    "camera.focus_style": {
+      "allow_unknown": false,
+      "penalty": "medium",
+      "reason": "Focus style is always observable"
+    },
+    "camera.lens_feeling": {
+      "allow_unknown": false,
+      "penalty": "medium",
+      "reason": "Lens characteristics are visible in the image quality"
+    },
+    "camera.depth_of_field": {
+      "allow_unknown": false,
+      "penalty": "medium",
+      "reason": "Depth of field is always observable"
+
+    },
+
+    "lighting.lighting_style": {
+      "allow_unknown": false,
+      "penalty": "medium",
+      "reason": "Lighting style is always observable in any image"
+    },
+    "lighting.contrast_level": {
+      "allow_unknown": false,
+      "penalty": "medium",
+      "reason": "Contrast is a basic observable quality"
+    },
+    "lighting.shadow_density": {
+      "allow_unknown": true,
+      "allow_unknown_when": [
+        "flat evenly lit scene with no visible shadows",
+        "high key lighting that washes out shadows",
+        "product shot on lightbox with diffused lighting"
+      ],
+      "penalty": "low",
+      "reason": "Some lighting setups intentionally eliminate shadows"
+    },
+    "lighting.lighting_direction": {
+      "allow_unknown": true,
+      "allow_unknown_when": [
+        "diffused or softbox lighting with no clear direction",
+        "ambient or natural overcast light",
+        "multi-light setup cancelling directional cues"
+      ],
+      "penalty": "low",
+      "reason": "Diffused and multi-light setups lack a single directional source"
+    },
+    "lighting.temperature_feeling": {
+      "allow_unknown": false,
+      "penalty": "medium",
+      "reason": "Color temperature is always visible in the image tone"
+
+    },
+
+    "composition.framing_style": {
+      "allow_unknown": false,
+      "penalty": "medium",
+      "reason": "Framing is always present in how the subject is positioned"
+    },
+    "composition.subject_focus": {
+      "allow_unknown": false,
+      "penalty": "medium",
+      "reason": "What the image focuses on is always discernible"
+    },
+    "composition.negative_space": {
+      "allow_unknown": false,
+      "penalty": "medium",
+      "reason": "Negative space usage is always visible"
+    },
+    "composition.balance_style": {
+      "allow_unknown": false,
+      "penalty": "medium",
+      "reason": "Compositional balance is always observable"
+
+    },
+
+    "materials.skin_texture": {
+      "allow_unknown": true,
+      "allow_unknown_when": [
+        "no skin visible in the frame",
+        "product-only shot with no human subject",
+        "packaging or tool close-up"
+      ],
+      "penalty": "low"
+    },
+    "materials.glove_texture": {
+      "allow_unknown": true,
+      "allow_unknown_when": [
+        "no gloves visible in the frame",
+        "product showcase or finished tattoo only",
+        "lifestyle content without tattooing in progress"
+      ],
+      "penalty": "low"
+    },
+    "materials.ink_reflection": {
+      "allow_unknown": true,
+      "allow_unknown_when": [
+        "no wet ink visible",
+        "packaging or product shot without ink",
+        "finished healed tattoo"
+      ],
+      "penalty": "low"
+    },
+    "materials.plastic_reflection": {
+      "allow_unknown": true,
+      "allow_unknown_when": [
+        "no plastic or cartridge visible",
+        "lifestyle or finished tattoo content"
+      ],
+      "penalty": "low"
+    },
+    "materials.metal_reflection": {
+      "allow_unknown": true,
+      "allow_unknown_when": [
+        "no metal surfaces visible",
+        "non-machine content",
+        "lifestyle or finished tattoo content"
+      ],
+      "penalty": "low"
+
+    },
+
+    "motion.motion_type": {
+      "allow_unknown": true,
+      "allow_unknown_when": [
+        "static image with no motion",
+        "product showcase still photography",
+        "finished tattoo portrait"
+      ],
+      "penalty": "low",
+      "fallback": []
+    },
+    "motion.camera_motion": {
+      "allow_unknown": true,
+      "allow_unknown_when": [
+        "static photography with no camera movement",
+        "tripod product shot",
+        "single frame from still camera"
+      ],
+      "penalty": "low"
+    },
+    "motion.speed_feeling": {
+      "allow_unknown": true,
+      "allow_unknown_when": [
+        "static image with no sense of speed or motion",
+        "still product photography",
+        "portrait or studio shot"
+      ],
+      "penalty": "low",
+      "fallback": "still"
+    },
+    "vibration_feeling": {
+      "allow_unknown": true,
+      "allow_unknown_when": [
+        "no visible vibration in the image",
+        "static product or portrait",
+        "not a tattooing-in-progress shot"
+      ],
+      "penalty": "low",
+      "fallback": "none"
+
+    },
+
+    "tattoo_authenticity": {
+      "score_allow_zero": true,
+      "penalty": "low",
+      "reason": "Zero scores mean the attribute is not present — this is valid data"
+    },
+    "social_media": {
+      "score_allow_zero": true,
+      "penalty": "low",
+      "reason": "Zero scores mean low potential — this is valid data"
+    }
+  }
+}

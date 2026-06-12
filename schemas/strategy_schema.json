@@ -1,0 +1,49 @@
+{
+  "type": "object",
+  "properties": {
+    "post_purpose": {
+      "type": "string",
+      "enum": ["product_showcase", "process_demo", "macro_detail", "tech_education", "finished_tattoo", "brand_lifestyle", "promo_meme", "repost_artist"]
+    },
+    "content_format": {
+      "type": "string",
+      "enum": ["single_image", "carousel", "reel_video"]
+    },
+    "text_presence": {
+      "type": "string",
+      "enum": ["brand_logo_only", "with_caption_text", "with_price", "promo_banner", "no_text"]
+    },
+    "product_visibility": {
+      "type": "string",
+      "enum": ["hero", "in_context", "invisible", "none"]
+    },
+    "target_audience": {
+      "type": "string",
+      "enum": ["tattoo_artist_pro", "studio_owner", "aspiring_artist", "general_audience", "brand_partner"]
+    },
+    "visual_technique": {
+      "type": "object",
+      "properties": {
+        "camera": {"type": "string", "enum": ["macro", "close_up", "medium", "wide", "POV", "handheld"]},
+        "lighting": {"type": "string", "enum": ["studio", "natural", "dramatic", "clinical", "moody"]},
+        "composition": {"type": "string", "enum": ["center", "rule_of_thirds", "symmetrical", "dynamic", "minimalist"]},
+        "background": {"type": "string", "enum": ["clean_desk", "skin", "studio", "outdoor", "blurred", "dark", "gradient"]}
+      }
+    },
+    "emotional_tone": {
+      "type": "string",
+      "enum": ["premium_trust", "technical_expertise", "hardcore_industrial", "friendly_approachable", "humorous", "aspirational", "educational"]
+    },
+    "marketing_goal": {
+      "type": "string",
+      "enum": ["direct_sales", "brand_building", "tech_authority", "community_building", "education_market"]
+    },
+    "brand_positioning": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "effectiveness": {
+      "type": "string"
+    }
+  }
+}

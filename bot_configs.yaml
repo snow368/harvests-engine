@@ -1,0 +1,133 @@
+# bot_configs.yaml — Bot 农场全局配置
+# 支持多台 VPS，每台 VPS 多个 Chrome 实例
+# VPS 到手后只需要改 proxy 和 IG 账号信息
+
+vps:
+  # ========== VPS-1 (主服务器) ==========
+  - host: "vps1.example.com"
+    label: "香港-1"
+    location: "Hong Kong"
+    specs:
+      cpu: 8
+      ram_gb: 32
+      storage_gb: 200
+    bots:
+      # bot_supply 系列 — 扒同行帖子 + 内容分析
+      - id: bot_supply_01
+        archetype: social_butterfly
+        proxy: "socks5://user:pass@ip1:1080"
+        ig_account: "supply_01@email.com"
+        ig_username: "@supply_01"
+        profile_dir: "bot_supply_01_chrome_data"
+        viewport: "1536x864"
+        timezone: "America/New_York"
+        tasks: [supply_analysis]
+
+      # bot_content 系列 — 发帖专用 (各号不同品类)
+      - id: bot_content_01
+        archetype: professional
+        proxy: "socks5://user:pass@ip2:1080"
+        ig_account: "content_01@email.com"
+        ig_username: "@content_01"
+        profile_dir: "bot_content_01_chrome_data"
+        viewport: "1440x900"
+        timezone: "America/New_York"
+        tasks: [publish]
+        content_focus: "cartridge"     # 主发 COG 产品
+
+      - id: bot_content_02
+        archetype: professional
+        proxy: "socks5://user:pass@ip3:1080"
+        ig_account: "content_02@email.com"
+        ig_username: "@content_02"
+        profile_dir: "bot_content_02_chrome_data"
+        viewport: "1440x900"
+        timezone: "America/New_York"
+        tasks: [publish]
+        content_focus: "needle"        # 主发 AES 针头
+
+      - id: bot_content_03
+        archetype: professional
+        proxy: "socks5://user:pass@ip4:1080"
+        ig_account: "content_03@email.com"
+        ig_username: "@content_03"
+        profile_dir: "bot_content_03_chrome_data"
+        viewport: "1440x900"
+        timezone: "America/New_York"
+        tasks: [publish]
+        content_focus: "machine"       # 主发稳定机/设备
+
+      - id: bot_content_04
+        archetype: professional
+        proxy: "socks5://user:pass@ip5:1080"
+        ig_account: "content_04@email.com"
+        ig_username: "@content_04"
+        profile_dir: "bot_content_04_chrome_data"
+        viewport: "1440x900"
+        timezone: "America/New_York"
+        tasks: [publish]
+        content_focus: "education"     # 主发教育/科普
+
+      - id: bot_content_05
+        archetype: professional
+        proxy: "socks5://user:pass@ip6:1080"
+        ig_account: "content_05@email.com"
+        ig_username: "@content_05"
+        profile_dir: "bot_content_05_chrome_data"
+        viewport: "1440x900"
+        timezone: "America/New_York"
+        tasks: [publish]
+        content_focus: "brand_story"   # 品牌幕后/QC/生产
+
+      # bot_growth 系列 — 养号互动 (互关/点赞/评论)
+      - id: bot_growth_01
+        archetype: night_owl
+        proxy: "socks5://user:pass@ip7:1080"
+        ig_account: "growth_01@email.com"
+        ig_username: "@growth_01"
+        profile_dir: "bot_growth_01_chrome_data"
+        viewport: "1366x768"
+        timezone: "America/Chicago"
+        tasks: [browse, like, comment, follow]
+
+      - id: bot_growth_02
+        archetype: scroller
+        proxy: "socks5://user:pass@ip8:1080"
+        ig_account: "growth_02@email.com"
+        ig_username: "@growth_02"
+        profile_dir: "bot_growth_02_chrome_data"
+        viewport: "1366x768"
+        timezone: "America/Chicago"
+        tasks: [browse, like, comment, follow]
+
+      - id: bot_growth_03
+        archetype: weekend_warrior
+        proxy: "socks5://user:pass@ip9:1080"
+        ig_account: "growth_03@email.com"
+        ig_username: "@growth_03"
+        profile_dir: "bot_growth_03_chrome_data"
+        viewport: "1366x768"
+        timezone: "America/Denver"
+        tasks: [browse, like, comment, follow]
+
+      # ... 更多 growth bots ...
+
+    # ========== VPS-2 (扩容) ==========
+  - host: "vps2.example.com"
+    label: "美国-西"
+    location: "US West"
+    specs:
+      cpu: 8
+      ram_gb: 32
+      storage_gb: 200
+    bots:
+      - id: bot_growth_04
+        archetype: growth_hacker
+        proxy: "socks5://user:pass@ip10:1080"
+        ig_account: "growth_04@email.com"
+        ig_username: "@growth_04"
+        profile_dir: "bot_growth_04_chrome_data"
+        viewport: "1920x1080"
+        timezone: "America/Los_Angeles"
+        tasks: [browse, like, comment, follow, dm]
+      # ... 更多 ...
