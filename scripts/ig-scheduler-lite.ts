@@ -1,100 +1,112 @@
 /**
- * IG Scheduler Lite — 轻量任务分配器
- * 按每日配额分批创建任务，不依赖 bot_registry.json
+ * IG Scheduler Lite — Neon 版
+ * 从 artists 表读取，创建 automation_tasks 到 Neon
  * 用法: npx tsx scripts/ig-scheduler-lite.ts
  */
 
-import Database from 'better-sqlite3';
-import { randomUUID } from 'node:crypto';
-import fs from 'node:fs';
-import path from 'node:path';
+import { neon } from '@neondatabase/serverless';
+import fs from 'fs';
+import path from 'path';
 
-const DB_PATH = './data/deep_scan_tasks.db';
-const OBS_PATH = './data/bot_observations.jsonl';
+// 加载 .env
+const envPath = path.join(process.cwd(), '.env');
+if (fs.existsSync(envPath)) {
+  for (const line of fs.readFileSync(envPath, 'utf-8').split('\n')) {
+    const t = line.trim();
+    if (!t || t.startsWith('#')) continue;
+    const i = t.indexOf('=');
+    if (i > 0) process.env[t.slice(0, i).trim()] = t.slice(i + 1).trim();
+  }
+}
 
-// 每日配额
-const DAILY_LIMITS = {
-  browse: 30,    // 每天最多浏览
-  like: 20,      // 每天最多点赞
-  comment: 3,    // 每天最多评论
-  follow: 2,     // 每天最多关注
-};
+const sql = neon(process.env.NEON_DATABASE_URL || process.env.VITE_NEON_DATABASE_URL || '');
 
 const BOT_ID = 'bot_ig_01';
+const DAILY_LIMIT = 50;
 
-function getTodayKey(): string {
-  return new Date().toISOString().slice(0, 10);
+async function ensureTables() {
+  await sql`
+    CREATE TABLE IF NOT EXISTS automation_tasks (
+      id TEXT PRIMARY KEY,
+      payload JSONB NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      run_at BIGINT,
+      lease_until BIGINT,
+      leased_by TEXT,
+      attempts INTEGER DEFAULT 0,
+      max_attempts INTEGER DEFAULT 3,
+      error_reason TEXT,
+      created_at BIGINT NOT NULL,
+      updated_at BIGINT NOT NULL
+    )
+  `;
 }
 
-function getTodayCount(db: Database.Database): number {
-  const today = getTodayKey();
+async function main() {
+  await ensureTables();
+
+  const today = new Date().toISOString().slice(0, 10);
   const startOfDay = new Date(today).getTime();
   const endOfDay = startOfDay + 86400000;
-  const row = db.prepare(`
+
+  // 今天已完成的任务数
+  const [{ c: todayCount }] = await sql`
     SELECT COUNT(*) as c FROM automation_tasks
-    WHERE created_at >= ? AND created_at < ?
+    WHERE created_at >= ${startOfDay} AND created_at < ${endOfDay}
     AND status = 'done'
-  `).get(startOfDay, endOfDay) as any;
-  return row?.c ?? 0;
-}
-
-function main() {
-  const db = new Database(DB_PATH);
-
-  const todayCount = getTodayCount(db);
-  const remaining = DAILY_LIMITS.browse + DAILY_LIMITS.like - todayCount;
-
+  `;
+  const remaining = DAILY_LIMIT - (todayCount as number);
   if (remaining <= 0) {
-    console.log(`[ig-scheduler] Today's quota used up (${todayCount}/${DAILY_LIMITS.browse + DAILY_LIMITS.like})`);
-    db.close();
+    console.log(`[ig-scheduler] Quota used (${todayCount}/${DAILY_LIMIT})`);
     return;
   }
 
-  // Get artists that haven't been processed recently
-  const artists = db.prepare(`
-    SELECT DISTINCT artist_handle FROM bot_observations
-    WHERE artist_handle IS NOT NULL
+  // 从 artists 表找未处理过的 OR 州店铺（有 IG 的）
+  const artists = await sql`
+    SELECT ig_handle FROM artists
+    WHERE state = 'OR'
+    AND ig_handle IS NOT NULL AND ig_handle != ''
+    AND id NOT IN (
+      SELECT DISTINCT payload->>'handle' FROM automation_tasks
+      WHERE payload->>'handle' IS NOT NULL
+    )
     ORDER BY RANDOM()
-    LIMIT ?
-  `).all(Math.min(remaining, 10)) as any[];
+    LIMIT ${Math.min(remaining, 10)}
+  `;
 
   if (!artists.length) {
-    console.log('[ig-scheduler] No artists available');
-    db.close();
+    console.log('[ig-scheduler] No new artists available');
     return;
   }
 
   const now = Date.now();
   let created = 0;
 
-  const insert = db.prepare(`
-    INSERT OR IGNORE INTO automation_tasks
-    (id, payload, status, run_at, attempts, max_attempts, created_at, updated_at)
-    VALUES (?, ?, 'pending', ?, 0, 3, ?, ?)
-  `);
-
-  for (const { artist_handle: handle } of artists) {
+  for (const { ig_handle } of artists) {
+    const handle = ig_handle.trim();
+    if (!handle) continue;
     const taskId = `ig_scheduled_${handle}_${now}`;
     const payload = JSON.stringify({
-      id: taskId,
-      taskType: 'ig_outreach',
-      botId: BOT_ID,
-      artistHandle: handle,
-      handle,
-      mode: 'browse_only',
-      suggestedExecMode: 'browse_like',
-      desiredOpenCount: 3,
+      id: taskId, taskType: 'ig_outreach', botId: BOT_ID,
+      artistHandle: handle, handle, mode: 'browse_only',
+      suggestedExecMode: 'browse_like', desiredOpenCount: 3,
       scheduledAt: new Date().toISOString(),
     });
-    insert.run(taskId, payload, now, now, now);
-    created++;
+    try {
+      await sql`
+        INSERT INTO automation_tasks (id, payload, status, run_at, attempts, max_attempts, created_at, updated_at)
+        VALUES (${taskId}, ${payload}::jsonb, 'pending', ${now}, 0, 3, ${now}, ${now})
+        ON CONFLICT (id) DO NOTHING
+      `;
+      created++;
+    } catch (e: any) {
+      console.error(`  [ERROR] ${handle}: ${e?.message?.slice(0, 80)}`);
+    }
   }
 
-  console.log(`[ig-scheduler] Created ${created} tasks (${todayCount}/${DAILY_LIMITS.browse + DAILY_LIMITS.like} today)`);
-  db.close();
+  console.log(`[ig-scheduler] Created ${created} tasks (${todayCount}/${DAILY_LIMIT} today)`);
 }
 
-// 每 5 分钟跑一次，持续补任务
-console.log('[ig-scheduler] Running every 5 minutes...');
-main();
-setInterval(main, 5 * 60 * 1000);
+console.log('[ig-scheduler] Running every 5 minutes (Neon)...');
+main().catch(e => console.error(e));
+setInterval(() => main().catch(e => console.error(e)), 5 * 60 * 1000);
