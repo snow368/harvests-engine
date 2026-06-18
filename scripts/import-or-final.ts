@@ -22,7 +22,7 @@ async function main() {
     try {
       await sql`INSERT INTO artists (id, uid, shop_name, ig_handle, address, city, state, phone, website, email, rating, reviews, import_region, last_updated)
         VALUES (${id}, ${id}, ${name}, ${ig}, ${ai!=null?c[ai]:''}, ${ci!=null?c[ci]:''}, 'OR', ${pi!=null?c[pi]:''}, ${wi!=null?c[wi]||null:null}, ${ei!=null?c[ei]||null:null}, ${ri!=null?parseFloat(c[ri])||0:0}, ${rvi!=null?parseInt(c[rvi])||0:0}, 'OR', NOW())
-        ON CONFLICT (id) DO UPDATE SET ig_handle = COALESCE(NULLIF(EXCLUDED.ig_handle,''), artists.ig_handle)`;
+        ON CONFLICT (id) DO UPDATE SET ig_handle = COALESCE(NULLIF(EXCLUDED.ig_handle,''), artists.ig_handle), state = 'OR'`;
       ok++;
     } catch(e: any) { err++; if (err <= 3) console.error('ERR:', (e.message||'').slice(0,80)); }
   }
