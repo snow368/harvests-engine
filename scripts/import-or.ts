@@ -31,8 +31,8 @@ async function main() {
 
     const id = name ? `${name.replace(/[^a-z0-9]/gi,'_').toLowerCase()}_${addr.replace(/[^a-z0-9]/gi,'_').toLowerCase()}_${phone.replace(/\D/g,'')}`.slice(0,120) : `ig_${ig}`;
     try {
-      await sql`INSERT INTO artists (id, shop_name, ig_handle, address, city, state, phone, website, email, rating, reviews, import_region, last_updated)
-        VALUES (${id}, ${name}, ${ig}, ${addr}, ${city}, 'OR', ${phone}, ${web||null}, ${email||null}, ${rating}, ${reviews}, 'OR', NOW())
+      await sql`INSERT INTO artists (id, uid, shop_name, ig_handle, address, city, state, phone, website, email, rating, reviews, import_region, last_updated)
+        VALUES (${id}, ${id}, ${name}, ${ig}, ${addr}, ${city}, 'OR', ${phone}, ${web||null}, ${email||null}, ${rating}, ${reviews}, 'OR', NOW())
         ON CONFLICT (id) DO UPDATE SET ig_handle = COALESCE(NULLIF(EXCLUDED.ig_handle,''), artists.ig_handle)`;
       ok++;
     } catch(e: any) { err++; if (err <= 3) console.error('  ERR:', name||ig, e.message?.slice(0,80)); }
