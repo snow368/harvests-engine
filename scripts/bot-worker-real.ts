@@ -1676,8 +1676,10 @@ const executeCommand = async (command: CommandPayload) => {
   if (!handle) throw new Error('missing_artist_handle');
   const taskModeRaw = String(command?.suggestedExecMode || '').trim().toLowerCase();
   const execMode = (taskModeRaw === 'browse_only' || taskModeRaw === 'browse_like') ? taskModeRaw : BOT_EXEC_MODE;
-  console.log(`[bot-real] execute ${commandId} -> @${handle}`);
-  logBehavior('task_start', { commandId, handle, mode: execMode, suggestedExecMode: taskModeRaw || null });
+  const stage = String(command?.accountStage || '').trim().toLowerCase() || 'stable';
+  const age = Number(command?.accountAgeDays) ?? -1;
+  console.log(`[bot-real] execute ${commandId} -> @${handle} [stage=${stage}, age=${age}d, mode=${execMode}]`);
+  logBehavior('task_start', { commandId, handle, mode: execMode, suggestedExecMode: taskModeRaw || null, accountStage: stage, accountAgeDays: age });
   likeState.touches![handle] = Number(likeState.touches![handle] || 0) + 1;
   const dayKey = getDayKey();
   likeState.touchesByDay![dayKey] = Number(likeState.touchesByDay![dayKey] || 0) + 1;
