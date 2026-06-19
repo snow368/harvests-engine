@@ -1,5 +1,6 @@
 /**
  * 清理 OR 数据：删脏 + 去 URL 前缀
+ * 最后一步修复：处理 http://instagram.com/（无www）、单字母、城市名
  */
 import { neon } from '@neondatabase/serverless';
 
@@ -7,30 +8,29 @@ const DB_URL = 'postgresql://neondb_owner:npg_recAJm30vOWR@ep-patient-hill-antvz
 const sql = neon(DB_URL);
 
 async function main() {
-  // 1. 删 ZIP 码脏数据
-  const d1 = await sql`DELETE FROM artists WHERE import_region = 'OR' AND ig_handle LIKE 'OR %'`;
-  console.log('已删除 ZIP 脏数据:', d1.length);
+  // 1. 去所有形式的 IG URL 前缀
+  await sql`UPDATE artists SET ig_handle = replace(ig_handle, 'https://www.instagram.com/', '') WHERE import_region = 'OR' AND ig_handle LIKE '%instagram.com%'`;
+  await sql`UPDATE artists SET ig_handle = replace(ig_handle, 'http://www.instagram.com/', '') WHERE import_region = 'OR' AND ig_handle LIKE '%instagram.com%'`;
+  await sql`UPDATE artists SET ig_handle = replace(ig_handle, 'http://instagram.com/', '') WHERE import_region = 'OR' AND ig_handle LIKE '%instagram.com%'`;
+  await sql`UPDATE artists SET ig_handle = replace(ig_handle, 'https://instagram.com/', '') WHERE import_region = 'OR' AND ig_handle LIKE '%instagram.com%'`;
+  // 再去一次尾部斜杠
+  await sql`UPDATE artists SET ig_handle = regexp_replace(ig_handle, '/+$', '') WHERE import_region = 'OR'`;
+  console.log('✅ URL 前缀已清理');
 
-  // 2. 去 IG URL 前缀
-  let d2 = await sql`UPDATE artists SET ig_handle = replace(ig_handle, 'https://www.instagram.com/', '') WHERE import_region = 'OR' AND ig_handle LIKE 'https://www.instagram.com/%'`;
-  // 针对 http://www. 少个 s 的情况
-  d2 = await sql`UPDATE artists SET ig_handle = replace(ig_handle, 'http://www.instagram.com/', '') WHERE import_region = 'OR' AND ig_handle LIKE 'http://www.instagram.com/%'`;
-  console.log('已清理 URL 前缀:', d2.length);
+  // 2. 删明显不是 handle 的脏数据（单字母、城市名、地址、电话等）
+  const d1 = await sql`DELETE FROM artists WHERE import_region = 'OR' AND ig_handle IS NOT NULL AND (
+    ig_handle = 'p' OR ig_handle = 'N/A' OR ig_handle = ''
+    OR ig_handle ~ '^[0-9]+'                          -- 数字开头
+    OR ig_handle ~ '^[a-z]+ [a-z]+'                   -- 多个单词（城市名）
+    OR ig_handle ~ '\\(|\\)'                          -- 含括号（电话）
+    OR ig_handle ~ '^[0-9]{3,}'                       -- 纯数字
+  )`;
+  console.log('已删除明显脏数据:', d1.length, '条');
 
-  // 3. N/A 置空
-  await sql`UPDATE artists SET ig_handle = NULL WHERE import_region = 'OR' AND ig_handle = 'N/A'`;
-  console.log('已清理 N/A');
-
-  // 4. 统计
-  const c = await sql`SELECT COUNT(*) as cnt FROM artists WHERE import_region = 'OR' AND ig_handle IS NOT NULL AND ig_handle != ''`;
-  console.log('最终有效 handle:', c[0].cnt, '条');
-
-  // 5. 看看还有哪些问题 handle
-  const bad = await sql`SELECT ig_handle, shop_name FROM artists WHERE import_region = 'OR' AND ig_handle IS NOT NULL AND ig_handle != '' AND ig_handle !~ '^[a-zA-Z][a-zA-Z0-9._]{2,29}$'`;
-  if (bad.length > 0) {
-    console.log('还有', bad.length, '条问题 handle:');
-    for (const b of bad) console.log('  ', b.ig_handle, '→', b.shop_name);
-  }
+  // 3. 统计
+  const valid = await sql`SELECT COUNT(*) as cnt FROM artists WHERE import_region = 'OR' AND ig_handle IS NOT NULL AND ig_handle != ''`;
+  const total = await sql`SELECT COUNT(*) as cnt FROM artists WHERE import_region = 'OR'`;
+  console.log('OR 最终: 总数', total[0].cnt, '| 有效handle', valid[0].cnt);
 }
 
 main().catch(e => console.error('Error:', e.message));
