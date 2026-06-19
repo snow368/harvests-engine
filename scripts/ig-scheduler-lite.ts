@@ -78,16 +78,14 @@ async function main() {
     ? sql`1=1`
     : sql`state = ${TARGET_STATE}`;
 
-  // Valid IG handle regex: starts with letter, only a-z, 0-9, underscore, period, 2-30 chars
-  const VALID_HANDLE_RE = /^[a-zA-Z][a-zA-Z0-9._]{1,29}$/;
-
+  // SQL 只做基本过滤（IG handle 非空），handle 提取+校验在 JS 做
   const artists = await sql`
     SELECT ig_handle, shop_name, city, rating, reviews, followers
     FROM artists
     WHERE ${stateFilter}
       AND ig_handle IS NOT NULL AND ig_handle != ''
-      AND ig_handle ~ '^[a-zA-Z][a-zA-Z0-9._]+$'
-      AND LENGTH(ig_handle) >= 2 AND LENGTH(ig_handle) <= 30
+      AND ig_handle != 'N/A'
+      AND ig_handle != 'NA'
       AND id NOT IN (
         SELECT DISTINCT payload->>'artistHandle' FROM automation_tasks
         WHERE payload->>'artistHandle' IS NOT NULL AND status != 'failed'
@@ -106,7 +104,11 @@ async function main() {
 
   for (const artist of artists) {
     const handle = String(artist.ig_handle || '')
-      .replace(/^@/, '').replace(/https?:\/\/instagram\.com\//, '').replace(/\/$/, '')
+      // Strip @ prefix, full URL (with or without www.), and trailing slash
+      .replace(/^@/, '')
+      .replace(/^https?:\/\/(www\.)?instagram\.com\//, '')
+      .replace(/\/$/, '')
+      .replace(/\/$/, '')
       .trim().toLowerCase();
     // Second line of defense: verify valid IG handle format
     if (!handle || !/^[a-z][a-z0-9._]{1,29}$/.test(handle)) continue;
