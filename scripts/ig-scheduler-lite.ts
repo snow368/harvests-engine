@@ -78,20 +78,31 @@ async function main() {
     ? sql`1=1`
     : sql`state = ${TARGET_STATE}`;
 
-  // SQL 只做基本过滤（IG handle 非空），handle 提取+校验在 JS 做
+  // 从 ig_handle 或 website 列提取 Instagram 用户名
+  // OR 数据因为 CSV 映射问题，IG handle 可能在 website 列
+  const extractHandle = (ig_handle: string, website: string): string => {
+    const src = String(ig_handle || website || '');
+    return src
+      .replace(/^@/, '')
+      .replace(/^https?:\/\/(www\.)?instagram\.com\//, '')
+      .replace(/\/$/, '')
+      .trim().toLowerCase();
+  };
+  const isValidHandle = (h: string) => /^[a-z][a-z0-9._]{1,29}$/.test(h);
+
+  // SQL 只做基本过滤，handle 提取+校验在 JS 做
   const artists = await sql`
-    SELECT ig_handle, shop_name, city, rating, reviews, followers
+    SELECT ig_handle, website, shop_name, city, rating, reviews, followers
     FROM artists
     WHERE ${stateFilter}
-      AND ig_handle IS NOT NULL AND ig_handle != ''
-      AND ig_handle != 'N/A'
-      AND ig_handle != 'NA'
+      AND (ig_handle IS NOT NULL AND ig_handle != '' AND ig_handle != 'N/A' AND ig_handle != 'NA'
+           OR website IS NOT NULL AND website != '' AND website != 'N/A')
       AND id NOT IN (
         SELECT DISTINCT payload->>'artistHandle' FROM automation_tasks
         WHERE payload->>'artistHandle' IS NOT NULL AND status != 'failed'
       )
     ORDER BY RANDOM()
-    LIMIT ${Math.min(remaining, BATCH_SIZE)}
+    LIMIT ${Math.min(remaining * 3, 50)}
   `;
 
   if (!artists.length) {
@@ -103,15 +114,8 @@ async function main() {
   let created = 0;
 
   for (const artist of artists) {
-    const handle = String(artist.ig_handle || '')
-      // Strip @ prefix, full URL (with or without www.), and trailing slash
-      .replace(/^@/, '')
-      .replace(/^https?:\/\/(www\.)?instagram\.com\//, '')
-      .replace(/\/$/, '')
-      .replace(/\/$/, '')
-      .trim().toLowerCase();
-    // Second line of defense: verify valid IG handle format
-    if (!handle || !/^[a-z][a-z0-9._]{1,29}$/.test(handle)) continue;
+    const handle = extractHandle(artist.ig_handle, artist.website);
+    if (!handle || !isValidHandle(handle)) continue;
 
     const taskId = `ig_scheduled_${handle}_${now}_${Math.random().toString(36).slice(2, 6)}`;
     const payload = JSON.stringify({
