@@ -78,13 +78,16 @@ async function main() {
     ? sql`1=1`
     : sql`state = ${TARGET_STATE}`;
 
+  // Valid IG handle regex: starts with letter, only a-z, 0-9, underscore, period, 2-30 chars
+  const VALID_HANDLE_RE = /^[a-zA-Z][a-zA-Z0-9._]{1,29}$/;
+
   const artists = await sql`
     SELECT ig_handle, shop_name, city, rating, reviews, followers
     FROM artists
     WHERE ${stateFilter}
       AND ig_handle IS NOT NULL AND ig_handle != ''
-      AND ig_handle NOT LIKE '%@%'
-      AND ig_handle NOT LIKE '%.com%'
+      AND ig_handle ~ '^[a-zA-Z][a-zA-Z0-9._]+$'
+      AND LENGTH(ig_handle) >= 2 AND LENGTH(ig_handle) <= 30
       AND id NOT IN (
         SELECT DISTINCT payload->>'artistHandle' FROM automation_tasks
         WHERE payload->>'artistHandle' IS NOT NULL AND status != 'failed'
@@ -105,7 +108,8 @@ async function main() {
     const handle = String(artist.ig_handle || '')
       .replace(/^@/, '').replace(/https?:\/\/instagram\.com\//, '').replace(/\/$/, '')
       .trim().toLowerCase();
-    if (!handle) continue;
+    // Second line of defense: verify valid IG handle format
+    if (!handle || !/^[a-z][a-z0-9._]{1,29}$/.test(handle)) continue;
 
     const taskId = `ig_scheduled_${handle}_${now}_${Math.random().toString(36).slice(2, 6)}`;
     const payload = JSON.stringify({
