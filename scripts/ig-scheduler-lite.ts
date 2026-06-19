@@ -110,6 +110,18 @@ async function main() {
     return;
   }
 
+  // 查账号阶段（号龄控制用）
+  const accts = await sql`SELECT stage, daily_task_limit, speed_factor, first_used_at FROM bot_accounts WHERE bot_id = ${BOT_ID} LIMIT 1`;
+  let acctStage = 'new', acctLimit = 5, acctSpeed = 2.5, acctAgeDays = 0;
+  if (accts.length > 0) {
+    acctStage = accts[0].stage || 'new';
+    acctLimit = Number(accts[0].daily_task_limit) || 5;
+    acctSpeed = Number(accts[0].speed_factor) || 2.5;
+    if (accts[0].first_used_at) {
+      acctAgeDays = Math.floor((Date.now() - new Date(accts[0].first_used_at).getTime()) / 86400000);
+    }
+  }
+
   const now = Date.now();
   let created = 0;
 
@@ -118,6 +130,8 @@ async function main() {
     if (!handle || !isValidHandle(handle)) continue;
 
     const taskId = `ig_scheduled_${handle}_${now}_${Math.random().toString(36).slice(2, 6)}`;
+    // new 阶段的号只浏览不互动
+    const execMode = acctStage === 'new' ? 'browse_only' : (acctStage === 'transition' ? 'browse_like' : 'browse_like');
     const payload = JSON.stringify({
       id: taskId,
       taskType: 'ig_outreach',
@@ -128,8 +142,12 @@ async function main() {
       rating: artist.rating ? Number(artist.rating) : null,
       reviews: artist.reviews ? Number(artist.reviews) : null,
       followers: artist.followers ? Number(artist.followers) : null,
-      mode: 'browse_only',
-      suggestedExecMode: 'browse_like',
+      accountStage: acctStage,
+      accountAgeDays: acctAgeDays,
+      dailyTaskLimit: acctLimit,
+      speedFactor: acctSpeed,
+      mode: execMode,
+      suggestedExecMode: execMode,
       desiredOpenCount: 3,
       source: 'ig_scheduler_lite',
       state: TARGET_STATE,
