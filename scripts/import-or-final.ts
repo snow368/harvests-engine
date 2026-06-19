@@ -79,7 +79,7 @@ async function main() {
     const city = ci != null ? (c[ci] || '').trim() : '';
     const phone = pi != null ? (c[pi] || '').trim() : '';
     const email = ei != null ? (c[ei] || '').trim() : '';
-    const rating = ri != null ? parseFloat(c[ri]) || 0 : 0;
+    const rating = ri != null ? Math.round(parseFloat(c[ri])) || 0 : 0;
     const reviews = rvi != null ? parseInt(c[rvi]) || 0 : 0;
     const facebook = fi != null ? (c[fi] || '').trim() : '';
     const tiktok = ti != null ? (c[ti] || '').trim() : '';
