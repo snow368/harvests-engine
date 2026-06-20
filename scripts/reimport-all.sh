@@ -26,4 +26,8 @@ console.log('已清理脏任务');
 "
 
 echo ""
+echo "========== 4. 清理残留脏 handle（popular/tiktok/单字母等） =========="
+npx tsx scripts/fix-or-data.ts
+
+echo ""
 echo "========== DONE =========="

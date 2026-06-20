@@ -17,9 +17,12 @@ async function main() {
   await sql`UPDATE artists SET ig_handle = regexp_replace(ig_handle, '/+$', '') WHERE import_region = 'OR'`;
   console.log('✅ URL 前缀已清理');
 
-  // 2. 删明显不是 handle 的脏数据（单字母、城市名、地址、电话等）
+  // 2. 删明显不是 handle 的脏数据（单字母、城市名、地址、电话、假 IG 路径等）
   const d1 = await sql`DELETE FROM artists WHERE import_region = 'OR' AND ig_handle IS NOT NULL AND (
     ig_handle = 'p' OR ig_handle = 'N/A' OR ig_handle = ''
+    OR ig_handle = 'popular'                          -- instagram.com/popular
+    OR ig_handle = 'tiktok'                           -- instagram.com/tiktok
+    OR ig_handle = 'explore'                          -- instagram.com/explore
     OR ig_handle ~ '^[0-9]+'                          -- 数字开头
     OR ig_handle ~ '^[a-z]+ [a-z]+'                   -- 多个单词（城市名）
     OR ig_handle ~ '\\(|\\)'                          -- 含括号（电话）
