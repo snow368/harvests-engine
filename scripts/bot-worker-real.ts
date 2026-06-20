@@ -6,6 +6,7 @@ import os from 'node:os';
 import { createWorker } from 'tesseract.js';
 import { generateComment, getFromPool, refillPool, clearRecentHistory } from './comment-generator';
 import { detectPostType } from './tattoo-voice';
+import { runHumanMimicry } from './human-mimicry';
 
 type CommandPayload = {
   id: string;
@@ -80,6 +81,7 @@ const BOT_EXEC_MODE = (process.env.BOT_EXEC_MODE || 'browse_only').trim().toLowe
 const BOT_HUMAN_BREAK_MIN_MS = Math.max(60_000, Number(process.env.BOT_HUMAN_BREAK_MIN_MS || 5 * 60_000)); // min break 5 min
 const BOT_HUMAN_BREAK_MAX_MS = Math.max(BOT_HUMAN_BREAK_MIN_MS, Number(process.env.BOT_HUMAN_BREAK_MAX_MS || 15 * 60_000)); // max break 15 min
 const BOT_BREAK_EVERY_N = Math.max(2, Math.min(10, Number(process.env.BOT_BREAK_EVERY_N || 4))); // break every ~4 profiles
+const HUMAN_MIMICRY_ENABLED = String(process.env.HUMAN_MIMICRY_ENABLED || 'true').toLowerCase() === 'true';
 const BOT_SPEED_FACTOR = Math.max(0.8, Number(process.env.BOT_SPEED_FACTOR || 1.0)); // 1.0 baseline, higher = slower
 const BOT_VARIANCE = Math.min(0.8, Math.max(0, Number(process.env.BOT_VARIANCE || 0.25))); // per-bot elastic variance
 const BOT_BROWSE_ORDER = (process.env.BOT_BROWSE_ORDER || 'random').trim().toLowerCase(); // random | newest | mixed
@@ -200,28 +202,14 @@ const jitter = (min: number, max: number) => {
 };
 // Human break: pause for a random period to mimic natural behavior.
 let breakUntil = 0;
+let lastAccountStage = 'stable';
+let lastIndustry: string | undefined = 'tattoo'; // default: tattoo industry
 const humanBreak = async () => {
   const now = Date.now();
   if (now < breakUntil) {
     const remaining = breakUntil - now;
-    console.log(`[bot-real] human break: ${Math.round(remaining / 1000)}s remaining...`);
-    await sleep(Math.min(remaining, 60000)); // sleep up to 1 min at a time
-    return humanBreak(); // recurse if still in break
-  }
-};
-
-// Schedule next break after N profiles (with jitter).
-let profilesSinceBreak = 0;
-const maybeScheduleBreak = async () => {
-  profilesSinceBreak++;
-  const threshold = BOT_BREAK_EVERY_N + Math.floor(Math.random() * 3) - 1; // jitter ±1
-  if (profilesSinceBreak >= threshold) {
-    const breakDuration = jitter(BOT_HUMAN_BREAK_MIN_MS, BOT_HUMAN_BREAK_MAX_MS);
-    breakUntil = Date.now() + breakDuration;
-    profilesSinceBreak = 0;
-    logBehavior('human_break_start', { breakMs: breakDuration, breakUntil: new Date(breakUntil).toISOString() });
-    console.log(`[bot-real] taking a ${Math.round(breakDuration / 1000)}s human break...`);
-    // Do some idle scrolling to simulate a person browsing casually.
+    console.log(`[bot-real] human break: ${Math.round(remaining / 1000)}s remaining (stage=${lastAccountStage})...`);
+    // Idle scroll on IG to simulate casual browsing (existing behavior).
     try {
       if (page) {
         for (let i = 0; i < 3 + Math.floor(Math.random() * 4); i++) {
@@ -230,6 +218,51 @@ const maybeScheduleBreak = async () => {
         }
       }
     } catch {}
+    // Human mimicry: simulate real browsing during break.
+    if (HUMAN_MIMICRY_ENABLED && browser && remaining > 60_000) {
+      const mimicryAccountId = ACCOUNT_IDS[0] || BOT_ID;
+      console.log(`[bot-real] mimicry ${Math.round(remaining / 1000)}s (stage=${lastAccountStage})`);
+      try {
+        await runHumanMimicry(browser, mimicryAccountId, remaining, lastIndustry);
+      } catch (err) {
+        console.log(`[bot-real] mimicry error:`, err?.message || err);
+      }
+    }
+    // Fallback sleep if any time remains.
+    const left = breakUntil - Date.now();
+    if (left > 0) await sleep(left);
+  }
+};
+
+// Schedule next break — frequency & duration depend on account stage.
+let profilesSinceBreak = 0;
+const getBreakThreshold = (stage) => {
+  const s = String(stage || '').toLowerCase();
+  if (s === 'new') return 1 + Math.floor(Math.random() * 2);
+  if (s === 'transition') return 2 + Math.floor(Math.random() * 2);
+  if (s === 'growing') return 3 + Math.floor(Math.random() * 3);
+  if (s === 'mature') return 5 + Math.floor(Math.random() * 4);
+  return 4 + Math.floor(Math.random() * 3); // stable/unknown
+};
+const getBreakDuration = (stage) => {
+  const s = String(stage || '').toLowerCase();
+  if (s === 'new') return jitter(3 * 60_000, 8 * 60_000);
+  if (s === 'transition') return jitter(5 * 60_000, 10 * 60_000);
+  if (s === 'mature') return jitter(5 * 60_000, 15 * 60_000);
+  return jitter(BOT_HUMAN_BREAK_MIN_MS, BOT_HUMAN_BREAK_MAX_MS);
+};
+const maybeScheduleBreak = async (command) => {
+  const stage = String(command?.accountStage || lastAccountStage || 'stable').toLowerCase();
+  lastAccountStage = stage;
+  if (command?.industry) lastIndustry = String(command.industry);
+  profilesSinceBreak++;
+  const threshold = getBreakThreshold(stage);
+  if (profilesSinceBreak >= threshold) {
+    const dur = getBreakDuration(stage);
+    breakUntil = Date.now() + dur;
+    profilesSinceBreak = 0;
+    logBehavior('human_break_start', { breakMs: dur, breakUntil: new Date(breakUntil).toISOString(), stage });
+    console.log(`[bot-real] break ${Math.round(dur / 1000)}s (stage=${stage}, threshold=${threshold})`);
   }
 };
 
@@ -1785,7 +1818,7 @@ const pollLoop = async () => {
           await executeCommand(cmd);
           await reportCommand(cmd.id, 'done');
           console.log(`[bot-real] done ${cmd.id}`);
-          await maybeScheduleBreak(); // schedule next break after N profiles
+          await maybeScheduleBreak(cmd); // schedule next break after N profiles
           await sleep(jitter(3500, 9500)); // elastic gap between targets
         } catch (err: any) {
           const reason = String(err?.message || 'worker_exception');
