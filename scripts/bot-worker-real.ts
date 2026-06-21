@@ -185,6 +185,9 @@ let running = true;
 let browser: Browser | null = null;
 let context: BrowserContext | null = null;
 let page: Page | null = null;
+// Cloud behavior log buffer — flushed during heartbeat
+const behaviorBuffer: Record<string, any>[] = [];
+const FLUSH_AT = 20; // flush every 20 events
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const randInt = (min: number, max: number) => Math.floor(Math.random() * (max - min + 1)) + min;
@@ -357,6 +360,8 @@ const logBehavior = (event: string, data: Record<string, any> = {}) => {
       ...data
     };
     fs.appendFileSync(BEHAVIOR_LOG_FILE, JSON.stringify(row) + '\n', 'utf8');
+    // Also push to cloud buffer for frontend display
+    behaviorBuffer.push(row);
   } catch {}
 };
 
@@ -405,6 +410,11 @@ const heartbeatBot = async () => {
     host: BOT_HOST,
     version: BOT_VERSION
   });
+  // Flush behavior log buffer to cloud
+  if (behaviorBuffer.length >= FLUSH_AT) {
+    const batch = behaviorBuffer.splice(0);
+    postJson('/api/automation/behavior-logs', { logs: batch }).catch(() => {});
+  }
 };
 
 const reportCommand = async (commandId: string, status: 'done' | 'failed', reason?: string) => {
