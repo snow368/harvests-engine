@@ -6,7 +6,7 @@ import os from 'node:os';
 import { createWorker } from 'tesseract.js';
 import { generateComment, getFromPool, refillPool, clearRecentHistory } from './comment-generator';
 import { detectPostType } from './tattoo-voice';
-import { runHumanMimicry } from './human-mimicry';
+
 
 type CommandPayload = {
   id: string;
@@ -185,27 +185,6 @@ let running = true;
 let browser: Browser | null = null;
 let context: BrowserContext | null = null;
 let page: Page | null = null;
-// Background noise tabs — always-on pages in the same Chrome for realism.
-const BACKGROUND_NOISE_TABS: string[] = [
-  'https://www.cnn.com',
-  'https://www.amazon.com',
-  'https://www.youtube.com',
-];
-let backgroundPages: Page[] = [];
-
-const openBackgroundTabs = async (b: Browser) => {
-  if (!HUMAN_MIMICRY_ENABLED) return;
-  for (const url of BACKGROUND_NOISE_TABS) {
-    try {
-      const pg = await b.newPage();
-      await pg.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 });
-      backgroundPages.push(pg);
-      console.log(`[bot-real] bg-noise: ${url}`);
-    } catch (e: any) {
-      console.log(`[bot-real] bg-noise skip (${url}): ${e?.message || 'timeout'}`);
-    }
-  }
-};
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const randInt = (min: number, max: number) => Math.floor(Math.random() * (max - min + 1)) + min;
@@ -225,29 +204,28 @@ const jitter = (min: number, max: number) => {
 let breakUntil = 0;
 let lastAccountStage = 'stable';
 let lastIndustry: string | undefined = 'tattoo'; // default: tattoo industry
+
+// Rest-time noise sites — navigated in the SAME IG tab, not new tabs.
+const NOISE_SITES = ['https://www.cnn.com', 'https://www.amazon.com', 'https://www.youtube.com'];
+
 const humanBreak = async () => {
   const now = Date.now();
   if (now < breakUntil) {
     const remaining = breakUntil - now;
     console.log(`[bot-real] human break: ${Math.round(remaining / 1000)}s remaining (stage=${lastAccountStage})...`);
-    // Idle scroll on IG to simulate casual browsing (existing behavior).
-    try {
-      if (page) {
-        for (let i = 0; i < 3 + Math.floor(Math.random() * 4); i++) {
-          await page.mouse.wheel(0, jitter(60, 300));
-          await sleep(jitter(2000, 7000));
-        }
-      }
-    } catch {}
-    // Human mimicry: simulate real browsing during break.
-    if (HUMAN_MIMICRY_ENABLED && browser && remaining > 60_000) {
-      const mimicryAccountId = ACCOUNT_IDS[0] || BOT_ID;
-      console.log(`[bot-real] mimicry ${Math.round(remaining / 1000)}s (stage=${lastAccountStage})`);
+    // Navigate the existing IG tab to a noise site during rest, then back to IG.
+    if (page && remaining > 30_000) {
+      const prevUrl = IG_BASE;
+      const noiseUrl = NOISE_SITES[Math.floor(Math.random() * NOISE_SITES.length)];
       try {
-        await runHumanMimicry(browser, mimicryAccountId, remaining, lastIndustry);
-      } catch (err) {
-        console.log(`[bot-real] mimicry error:`, err?.message || err);
-      }
+        await page.goto(noiseUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+        // Idle on the noise site for a bit.
+        await sleep(Math.min(remaining * 0.6, 60000));
+      } catch {}
+      // Back to IG before next task.
+      try {
+        await page.goto(prevUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+      } catch {}
     }
     // Fallback sleep if any time remains.
     const left = breakUntil - Date.now();
@@ -506,7 +484,6 @@ const ensureBrowser = async () => {
   }
   await page.bringToFront().catch(() => {});
   console.log(`[bot-real] connected via CDP: ${BOT_CDP_URL}`);
-  await openBackgroundTabs(browser);
 };
 
 const reportObservation = async (command: CommandPayload, summary: BrowseSummary, profileFacts?: Record<string, any>) => {
@@ -1887,10 +1864,6 @@ const shutdown = async (signal: string) => {
   console.log(`[bot-real] shutdown on ${signal}`);
   running = false;
   try {
-    for (const pg of backgroundPages) {
-      try { if (!pg.isClosed()) await pg.close(); } catch {}
-    }
-    backgroundPages = [];
     if (BOT_LAUNCH_MODE === 'persistent') {
       if (context) await (context as any).close?.();
     } else if (BOT_CDP_URL) {
