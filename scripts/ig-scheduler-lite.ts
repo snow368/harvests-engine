@@ -91,7 +91,7 @@ async function main() {
 
   // 最终值：环境变量 > DB字段(手动覆盖) > 自动按天算
   const acctStage = process.env.SCHEDULER_STAGE || dbStage || autoStage;
-  const effectiveLimit = Number(process.env.SCHEDULER_DAILY_LIMIT) || dbLimit || autoLimit;
+  const effectiveLimit = Number(process.env.SCHEDULER_DAILY_LIMIT) || autoLimit;
   const acctSpeed = Number(process.env.SCHEDULER_SPEED_FACTOR) || dbSpeed || autoSpeed;
 
   const today = new Date().toISOString().slice(0, 10);
