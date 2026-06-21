@@ -57,6 +57,21 @@ async function ensureTables() {
 async function main() {
   await ensureTables();
 
+  // 先查账号阶段，自动算日限额
+  const accts = await sql`SELECT stage, daily_task_limit, speed_factor, first_used_at FROM bot_accounts WHERE bot_id = ${BOT_ID} LIMIT 1`;
+  let acctStage = 'new', acctLimit = 5, acctSpeed = 2.5, acctAgeDays = 0;
+  if (accts.length > 0) {
+    acctStage = accts[0].stage || 'new';
+    acctLimit = Number(accts[0].daily_task_limit) || 5;
+    acctSpeed = Number(accts[0].speed_factor) || 2.5;
+    if (accts[0].first_used_at) {
+      acctAgeDays = Math.floor((Date.now() - new Date(accts[0].first_used_at).getTime()) / 86400000);
+    }
+  }
+
+  // 环境变量可临时覆盖，未设则用账号阶段算的限额
+  const effectiveLimit = Number(process.env.SCHEDULER_DAILY_LIMIT) || acctLimit;
+
   const today = new Date().toISOString().slice(0, 10);
   const startOfDay = new Date(today).getTime();
   const endOfDay = startOfDay + 86_400_000;
@@ -67,9 +82,9 @@ async function main() {
     WHERE created_at >= ${startOfDay} AND created_at < ${endOfDay}
       AND status IN ('pending', 'done', 'leased')
   `;
-  const remaining = DAILY_LIMIT - (todayCount as number);
+  const remaining = effectiveLimit - (todayCount as number);
   if (remaining <= 0) {
-    console.log(`[ig-scheduler] Quota used (${todayCount}/${DAILY_LIMIT})`);
+    console.log(`[ig-scheduler] Quota used (${todayCount}/${effectiveLimit}, stage=${acctStage})`);
     return;
   }
 
@@ -108,18 +123,6 @@ async function main() {
   if (!artists.length) {
     console.log(`[ig-scheduler] No new artists available for ${TARGET_STATE}`);
     return;
-  }
-
-  // 查账号阶段（号龄控制用）
-  const accts = await sql`SELECT stage, daily_task_limit, speed_factor, first_used_at FROM bot_accounts WHERE bot_id = ${BOT_ID} LIMIT 1`;
-  let acctStage = 'new', acctLimit = 5, acctSpeed = 2.5, acctAgeDays = 0;
-  if (accts.length > 0) {
-    acctStage = accts[0].stage || 'new';
-    acctLimit = Number(accts[0].daily_task_limit) || 5;
-    acctSpeed = Number(accts[0].speed_factor) || 2.5;
-    if (accts[0].first_used_at) {
-      acctAgeDays = Math.floor((Date.now() - new Date(accts[0].first_used_at).getTime()) / 86400000);
-    }
   }
 
   const now = Date.now();
