@@ -57,28 +57,42 @@ async function ensureTables() {
 async function main() {
   await ensureTables();
 
-  // 查账号首次使用时间，按天数自动算日限额
+  // 查账号首次使用时间，按天数自动算阶段、日限额、行为模式
   const accts = await sql`SELECT stage, daily_task_limit, speed_factor, first_used_at FROM bot_accounts WHERE bot_id = ${BOT_ID} LIMIT 1`;
-  let acctStage = 'new', acctSpeed = 2.5, acctAgeDays = 0;
-  if (accts.length > 0) {
-    acctStage = accts[0].stage || 'new';
-    acctSpeed = Number(accts[0].speed_factor) || 2.5;
-    if (accts[0].first_used_at) {
-      acctAgeDays = Math.floor((Date.now() - new Date(accts[0].first_used_at).getTime()) / 86400000);
-    }
+  let dbStage = 'new', dbSpeed = 2.5, dbLimit = 0, acctAgeDays = 0;
+  if (accts.length > 0 && accts[0].first_used_at) {
+    acctAgeDays = Math.floor((Date.now() - new Date(accts[0].first_used_at).getTime()) / 86400000);
+    dbStage = accts[0].stage || 'new';
+    dbSpeed = Number(accts[0].speed_factor) || 2.5;
+    dbLimit = Number(accts[0].daily_task_limit) || 0;
   }
 
-  // 根据天数自动算日限额（硬编码规则）
-  const autoLimit =
-    acctAgeDays < 7   ? 5   // 萌芽期 0-7天
-    : acctAgeDays < 14 ? 10 // 幼苗期 7-14天
-    : acctAgeDays < 30 ? 20 // 成长期 14-30天
-    : acctAgeDays < 60 ? 30 // 稳定期 30-60天
-    : 50;                    // 成熟期 60天+
+  // 根据天数自动算（硬编码规则）
+  const autoStage =
+    acctAgeDays < 7   ? 'new'        // 萌芽期 0-7天
+    : acctAgeDays < 14 ? 'transition' // 幼苗期 7-14天
+    : acctAgeDays < 30 ? 'growing'    // 成长期 14-30天
+    : acctAgeDays < 60 ? 'stable'     // 稳定期 30-60天
+    : 'mature';                        // 成熟期 60天+
 
-  // 优先级：环境变量 > DB daily_task_limit(手动覆盖) > 自动按天算
-  const dbOverride = accts.length > 0 ? Number(accts[0].daily_task_limit) : 0;
-  const effectiveLimit = Number(process.env.SCHEDULER_DAILY_LIMIT) || dbOverride || autoLimit;
+  const autoLimit =
+    acctAgeDays < 7   ? 5
+    : acctAgeDays < 14 ? 10
+    : acctAgeDays < 30 ? 20
+    : acctAgeDays < 60 ? 30
+    : 50;
+
+  const autoSpeed =
+    acctAgeDays < 7   ? 2.5
+    : acctAgeDays < 14 ? 1.8
+    : acctAgeDays < 30 ? 1.2
+    : acctAgeDays < 60 ? 1.0
+    : 0.8;
+
+  // 最终值：环境变量 > DB字段(手动覆盖) > 自动按天算
+  const acctStage = process.env.SCHEDULER_STAGE || dbStage || autoStage;
+  const effectiveLimit = Number(process.env.SCHEDULER_DAILY_LIMIT) || dbLimit || autoLimit;
+  const acctSpeed = Number(process.env.SCHEDULER_SPEED_FACTOR) || dbSpeed || autoSpeed;
 
   const today = new Date().toISOString().slice(0, 10);
   const startOfDay = new Date(today).getTime();
@@ -142,7 +156,7 @@ async function main() {
 
     const taskId = `ig_scheduled_${handle}_${now}_${Math.random().toString(36).slice(2, 6)}`;
     // new 阶段的号只浏览不互动
-    const execMode = acctStage === 'new' ? 'browse_only' : (acctStage === 'transition' ? 'browse_like' : 'browse_like');
+    const execMode = acctStage === 'new' ? 'browse_only' : 'browse_like';
     const payload = JSON.stringify({
       id: taskId,
       taskType: 'ig_outreach',
@@ -155,7 +169,7 @@ async function main() {
       followers: artist.followers ? Number(artist.followers) : null,
       accountStage: acctStage,
       accountAgeDays: acctAgeDays,
-      dailyTaskLimit: acctLimit,
+      dailyTaskLimit: effectiveLimit,
       speedFactor: acctSpeed,
       mode: execMode,
       suggestedExecMode: execMode,
@@ -178,9 +192,16 @@ async function main() {
     }
   }
 
-  console.log(`[ig-scheduler] Created ${created} tasks (${todayCount}/${DAILY_LIMIT} today) for bot=${BOT_ID} state=${TARGET_STATE}`);
+  console.log(`[ig-scheduler] Created ${created} tasks (${todayCount}/${effectiveLimit} today) for bot=${BOT_ID} state=${TARGET_STATE} age=${acctAgeDays}d`);
+
+  // 自动更新 DB 的阶段和日限额
+  if (accts.length > 0 && (accts[0].stage !== autoStage || Number(accts[0].daily_task_limit || 0) !== autoLimit)) {
+    sql`UPDATE bot_accounts SET stage=${autoStage}, daily_task_limit=${autoLimit} WHERE bot_id=${BOT_ID}`.then(() =>
+      console.log(`[ig-scheduler] Auto-updated ${BOT_ID}: stage ${accts[0].stage}→${autoStage}, limit ${accts[0].daily_task_limit}→${autoLimit}`)
+    ).catch(() => {});
+  }
 }
 
-console.log(`[ig-scheduler] Running every 5 mins (bot=${BOT_ID}, state=${TARGET_STATE}, daily=${DAILY_LIMIT})`);
+console.log(`[ig-scheduler] Running every 5 mins (bot=${BOT_ID}, state=${TARGET_STATE}, daily=${DAILY_LIMIT}, auto=${effectiveLimit})`);
 main().catch(e => console.error('[ig-scheduler] first run error:', e));
 setInterval(() => main().catch(e => console.error('[ig-scheduler] error:', e)), 5 * 60 * 1000);
