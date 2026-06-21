@@ -185,6 +185,27 @@ let running = true;
 let browser: Browser | null = null;
 let context: BrowserContext | null = null;
 let page: Page | null = null;
+// Background noise tabs — always-on pages in the same Chrome for realism.
+const BACKGROUND_NOISE_TABS: string[] = [
+  'https://www.cnn.com',
+  'https://www.amazon.com',
+  'https://www.youtube.com',
+];
+let backgroundPages: Page[] = [];
+
+const openBackgroundTabs = async (b: Browser) => {
+  if (!HUMAN_MIMICRY_ENABLED) return;
+  for (const url of BACKGROUND_NOISE_TABS) {
+    try {
+      const pg = await b.newPage();
+      await pg.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 });
+      backgroundPages.push(pg);
+      console.log(`[bot-real] bg-noise: ${url}`);
+    } catch (e: any) {
+      console.log(`[bot-real] bg-noise skip (${url}): ${e?.message || 'timeout'}`);
+    }
+  }
+};
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const randInt = (min: number, max: number) => Math.floor(Math.random() * (max - min + 1)) + min;
@@ -485,6 +506,7 @@ const ensureBrowser = async () => {
   }
   await page.bringToFront().catch(() => {});
   console.log(`[bot-real] connected via CDP: ${BOT_CDP_URL}`);
+  await openBackgroundTabs(browser);
 };
 
 const reportObservation = async (command: CommandPayload, summary: BrowseSummary, profileFacts?: Record<string, any>) => {
@@ -1865,6 +1887,10 @@ const shutdown = async (signal: string) => {
   console.log(`[bot-real] shutdown on ${signal}`);
   running = false;
   try {
+    for (const pg of backgroundPages) {
+      try { if (!pg.isClosed()) await pg.close(); } catch {}
+    }
+    backgroundPages = [];
     if (BOT_LAUNCH_MODE === 'persistent') {
       if (context) await (context as any).close?.();
     } else if (BOT_CDP_URL) {
