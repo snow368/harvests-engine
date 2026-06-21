@@ -57,20 +57,28 @@ async function ensureTables() {
 async function main() {
   await ensureTables();
 
-  // 先查账号阶段，自动算日限额
+  // 查账号首次使用时间，按天数自动算日限额
   const accts = await sql`SELECT stage, daily_task_limit, speed_factor, first_used_at FROM bot_accounts WHERE bot_id = ${BOT_ID} LIMIT 1`;
-  let acctStage = 'new', acctLimit = 5, acctSpeed = 2.5, acctAgeDays = 0;
+  let acctStage = 'new', acctSpeed = 2.5, acctAgeDays = 0;
   if (accts.length > 0) {
     acctStage = accts[0].stage || 'new';
-    acctLimit = Number(accts[0].daily_task_limit) || 5;
     acctSpeed = Number(accts[0].speed_factor) || 2.5;
     if (accts[0].first_used_at) {
       acctAgeDays = Math.floor((Date.now() - new Date(accts[0].first_used_at).getTime()) / 86400000);
     }
   }
 
-  // 环境变量可临时覆盖，未设则用账号阶段算的限额
-  const effectiveLimit = Number(process.env.SCHEDULER_DAILY_LIMIT) || acctLimit;
+  // 根据天数自动算日限额（硬编码规则）
+  const autoLimit =
+    acctAgeDays < 7   ? 5   // 萌芽期 0-7天
+    : acctAgeDays < 14 ? 10 // 幼苗期 7-14天
+    : acctAgeDays < 30 ? 20 // 成长期 14-30天
+    : acctAgeDays < 60 ? 30 // 稳定期 30-60天
+    : 50;                    // 成熟期 60天+
+
+  // 优先级：环境变量 > DB daily_task_limit(手动覆盖) > 自动按天算
+  const dbOverride = accts.length > 0 ? Number(accts[0].daily_task_limit) : 0;
+  const effectiveLimit = Number(process.env.SCHEDULER_DAILY_LIMIT) || dbOverride || autoLimit;
 
   const today = new Date().toISOString().slice(0, 10);
   const startOfDay = new Date(today).getTime();
