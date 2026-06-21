@@ -202,6 +202,6 @@ async function main() {
   }
 }
 
-console.log(`[ig-scheduler] Running every 5 mins (bot=${BOT_ID}, state=${TARGET_STATE}, daily=${DAILY_LIMIT}, auto=${effectiveLimit})`);
+console.log(`[ig-scheduler] Running every 5 mins (bot=${BOT_ID}, state=${TARGET_STATE}, daily=${DAILY_LIMIT})`);
 main().catch(e => console.error('[ig-scheduler] first run error:', e));
 setInterval(() => main().catch(e => console.error('[ig-scheduler] error:', e)), 5 * 60 * 1000);
