@@ -1,11 +1,12 @@
 /**
- * IG Scheduler Lite — Neon 版
- * 从 Neon artists 表读取纹身店 → 创建 automation_tasks 到 Neon
- * server.ts 的 /api/automation/poll 会同步 Neon 任务到本地 SQLite
+ * IG Scheduler Lite — Cloud D1 版
+ * 从 Neon artists 表读取纹身店 → 创建任务到 Cloud API Worker (D1)
+ * Bot worker 直接从 D1 poll 任务，不再需要本地 server.ts
  * 用法: npx tsx scripts/ig-scheduler-lite.ts
  *
  * ENV:
- *   NEON_DATABASE_URL     — Neon 数据库 URL
+ *   NEON_DATABASE_URL     — Neon 数据库 URL（读 artists）
+ *   CLOUD_API_BASE        — Cloud API Worker 地址（默认 https://harvests-cloud-api.inkflowapp.workers.dev）
  *   SCHEDULER_DAILY_LIMIT — 日配额（默认 50）
  *   SCHEDULER_BOT_ID      — 目标 bot（默认 bot_ig_01）
  *   SCHEDULER_STATE       — 目标州代码（默认 OR，ALL=不限）
@@ -21,6 +22,8 @@ const BOT_ID = process.env.SCHEDULER_BOT_ID || 'bot_ig_01';
 const DAILY_LIMIT = Number(process.env.SCHEDULER_DAILY_LIMIT) || 50;
 const BATCH_SIZE = Math.min(20, Math.max(1, Number(process.env.SCHEDULER_BATCH_SIZE) || 10));
 const TARGET_STATE = (process.env.SCHEDULER_STATE || 'OR').trim().toUpperCase();
+const CLOUD_API_BASE = (process.env.CLOUD_API_BASE || 'https://harvests-cloud-api.inkflowapp.workers.dev').replace(/\/+$/, '');
+const BOT_API_TOKEN = (process.env.BOT_API_TOKEN || 'vps-bot-secret-2024').trim();
 
 const ENV_PATH = path.resolve(process.cwd(), '.env');
 
@@ -98,13 +101,18 @@ async function main() {
   const startOfDay = new Date(today).getTime();
   const endOfDay = startOfDay + 86_400_000;
 
-  // 今日已完成的配额
-  const [{ c: todayCount }] = await sql`
-    SELECT COUNT(*) as c FROM automation_tasks
-    WHERE created_at >= ${startOfDay} AND created_at < ${endOfDay}
-      AND status IN ('pending', 'done', 'leased')
-  `;
-  const remaining = effectiveLimit - (todayCount as number);
+  // 今日配额 — 从 Cloud API 读 D1 统计
+  let todayCount = 0;
+  try {
+    const resp = await fetch(`${CLOUD_API_BASE}/api/tasks/count?botId=${encodeURIComponent(BOT_ID)}&token=${BOT_API_TOKEN}`);
+    if (resp.ok) {
+      const data = await resp.json() as any;
+      todayCount = Number(data?.todayCount || 0);
+    }
+  } catch (e: any) {
+    console.error('[ig-scheduler] quota check failed:', e?.message?.slice(0, 80));
+  }
+  const remaining = effectiveLimit - todayCount;
   if (remaining <= 0) {
     console.log(`[ig-scheduler] Quota used (${todayCount}/${effectiveLimit}, stage=${acctStage})`);
     return;
@@ -127,17 +135,14 @@ async function main() {
   };
   const isValidHandle = (h: string) => /^[a-z][a-z0-9._]{1,29}$/.test(h);
 
-  // SQL 只做基本过滤，handle 提取+校验在 JS 做
+  // SQL 做基本过滤，handle 提取+校验在 JS 做
+  // 去重由 Worker D1 的 INSERT OR IGNORE + poll 的 dedup 逻辑处理
   const artists = await sql`
     SELECT ig_handle, website, shop_name, city, rating, reviews, followers
     FROM artists
     WHERE ${stateFilter}
       AND (ig_handle IS NOT NULL AND ig_handle != '' AND ig_handle != 'N/A' AND ig_handle != 'NA'
            OR website IS NOT NULL AND website != '' AND website != 'N/A')
-      AND id NOT IN (
-        SELECT DISTINCT payload->>'artistHandle' FROM automation_tasks
-        WHERE payload->>'artistHandle' IS NOT NULL AND status != 'failed'
-      )
     ORDER BY RANDOM()
     LIMIT ${Math.min(remaining * 3, 50)}
   `;
@@ -148,51 +153,53 @@ async function main() {
   }
 
   const now = Date.now();
-  let created = 0;
+  const batch: Array<{ id: string; payload: any; runAt: number }> = [];
 
   for (const artist of artists) {
     const handle = extractHandle(artist.ig_handle, artist.website);
     if (!handle || !isValidHandle(handle)) continue;
 
     const taskId = `ig_scheduled_${handle}_${now}_${Math.random().toString(36).slice(2, 6)}`;
-    // new 阶段的号只浏览不互动
     const execMode = acctStage === 'new' ? 'browse_only' : 'browse_like';
-    const payload = JSON.stringify({
-      id: taskId,
-      taskType: 'ig_outreach',
-      botId: BOT_ID,
-      artistHandle: handle,
-      shopName: String(artist.shop_name || ''),
+    const payload = {
+      id: taskId, taskType: 'ig_outreach', botId: BOT_ID,
+      artistHandle: handle, shopName: String(artist.shop_name || ''),
       city: String(artist.city || ''),
       rating: artist.rating ? Number(artist.rating) : null,
       reviews: artist.reviews ? Number(artist.reviews) : null,
       followers: artist.followers ? Number(artist.followers) : null,
-      accountStage: acctStage,
-      accountAgeDays: acctAgeDays,
-      dailyTaskLimit: effectiveLimit,
-      speedFactor: acctSpeed,
-      mode: execMode,
-      suggestedExecMode: execMode,
-      desiredOpenCount: 3,
-      source: 'ig_scheduler_lite',
-      state: TARGET_STATE,
+      accountStage: acctStage, accountAgeDays: acctAgeDays,
+      dailyTaskLimit: effectiveLimit, speedFactor: acctSpeed,
+      mode: execMode, suggestedExecMode: execMode, desiredOpenCount: 3,
+      source: 'ig_scheduler_lite', state: TARGET_STATE,
       scheduledAt: new Date().toISOString(),
-    });
-    const runAt = now + 10_000 + Math.floor(Math.random() * 120_000); // 10s~2min 内执行
+    };
+    const runAt = now + 10_000 + Math.floor(Math.random() * 120_000);
+    batch.push({ id: taskId, payload, runAt });
+  }
 
+  // Batch POST to Cloud API Worker
+  let created = 0;
+  if (batch.length > 0) {
     try {
-      await sql`
-        INSERT INTO automation_tasks (id, payload, status, run_at, attempts, max_attempts, created_at, updated_at)
-        VALUES (${taskId}, ${payload}::jsonb, 'pending', ${runAt}, 0, 3, ${now}, ${now})
-        ON CONFLICT (id) DO NOTHING
-      `;
-      created++;
+      const resp = await fetch(`${CLOUD_API_BASE}/api/tasks/create?token=${BOT_API_TOKEN}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tasks: batch }),
+      });
+      if (resp.ok) {
+        const data = await resp.json() as any;
+        created = Number(data?.created || 0);
+      } else {
+        const t = await resp.text();
+        console.error(`[ig-scheduler] API error ${resp.status}: ${t.slice(0, 100)}`);
+      }
     } catch (e: any) {
-      console.error(`  [ERROR] ${handle}: ${e?.message?.slice(0, 80)}`);
+      console.error(`[ig-scheduler] POST failed: ${e?.message?.slice(0, 80)}`);
     }
   }
 
-  console.log(`[ig-scheduler] Created ${created} tasks (${todayCount}/${effectiveLimit} today) for bot=${BOT_ID} state=${TARGET_STATE} age=${acctAgeDays}d`);
+  console.log(`[ig-scheduler] Created ${created}/${batch.length} tasks (${todayCount}/${effectiveLimit} today) for bot=${BOT_ID} state=${TARGET_STATE} age=${acctAgeDays}d`);
 
   // 自动更新 DB 的阶段和日限额
   if (accts.length > 0 && (accts[0].stage !== autoStage || Number(accts[0].daily_task_limit || 0) !== autoLimit)) {
