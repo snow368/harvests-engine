@@ -1819,6 +1819,7 @@ const pollLoop = async () => {
       const data = await getJson(`/api/automation/poll?botId=${encodeURIComponent(BOT_ID)}&limit=${POLL_LIMIT}`);
       const commands: CommandPayload[] = Array.isArray(data?.commands) ? data.commands : [];
       if (!commands.length) {
+        await humanBreak(); // also rest/noise during idle
         await sleep(POLL_INTERVAL_MS);
         continue;
       }
