@@ -210,7 +210,7 @@ let lastAccountStage = 'stable';
 let lastIndustry: string | undefined = 'tattoo'; // default: tattoo industry
 
 // Rest-time noise sites — navigated in the SAME IG tab, not new tabs.
-const NOISE_SITES = ['https://www.cnn.com', 'https://www.amazon.com', 'https://www.youtube.com'];
+const NOISE_SITES = ['https://www.cnn.com', 'https://www.oregonlive.com', 'https://www.youtube.com'];
 
 const humanBreak = async () => {
   const now = Date.now();
