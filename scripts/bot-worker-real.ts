@@ -209,10 +209,36 @@ let breakUntil = 0;
 let lastAccountStage = 'stable';
 let lastIndustry: string | undefined = 'tattoo'; // default: tattoo industry
 
-// Rest-time noise sites — navigated in the SAME IG tab, not new tabs.
-const NOISE_SITES = ['https://www.cnn.com', 'https://www.nydailynews.com', 'https://www.youtube.com'];
+// Rest-time noise sites — fetched from cloud API so frontend can configure.
+let NOISE_SITES: string[] = ['https://www.cnn.com', 'https://www.nydailynews.com', 'https://www.youtube.com'];
+let NOISE_SITES_CACHED_AT = 0;
+const NOISE_SITES_CACHE_TTL = 5 * 60 * 1000; // re-fetch every 5 min
+
+const fetchNoiseSites = async () => {
+  if (!API_BASE) return;
+  try {
+    const resp = await fetch(`${API_BASE}/api/bot/noise-sites?botId=${encodeURIComponent(BOT_ID)}`, {
+      headers: buildHeaders(),
+    });
+    if (resp.ok) {
+      const data = await resp.json() as any;
+      if (Array.isArray(data?.sites) && data.sites.length > 0) {
+        NOISE_SITES = data.sites;
+        NOISE_SITES_CACHED_AT = Date.now();
+      }
+    }
+  } catch {}
+};
+
+// Refresh noise sites periodically (check cache)
+const ensureNoiseSites = async () => {
+  if (Date.now() - NOISE_SITES_CACHED_AT > NOISE_SITES_CACHE_TTL) {
+    await fetchNoiseSites();
+  }
+};
 
 const humanBreak = async () => {
+  await ensureNoiseSites(); // keep noise sites fresh
   const now = Date.now();
   if (now < breakUntil) {
     const remaining = breakUntil - now;
@@ -1909,6 +1935,7 @@ const main = async () => {
   if (BOT_COMMENT_ENABLED) {
     refillPool().then(() => console.log('[bot-real] comment pool warmed up'));
   }
+  await fetchNoiseSites(); // load noise sites from cloud
   await registerBot();
   await ensureBrowser();
   await Promise.all([heartbeatLoop(), pollLoop()]);
