@@ -69,6 +69,7 @@ const BOT_HOST = process.env.BOT_HOST || process.env.HOSTNAME || 'local-dev';
 const BOT_VERSION = process.env.BOT_VERSION || '0.2.0-real';
 const ACCOUNT_IDS = (process.env.BOT_ACCOUNT_IDS || '').split(',').map((x) => x.trim()).filter(Boolean);
 const BOT_API_KEY = (process.env.BOT_API_KEY || '').trim();
+const BOT_API_TOKEN = (process.env.BOT_API_TOKEN || 'vps-bot-secret-2024').trim();
 const POLL_INTERVAL_MS = Math.max(1500, Number(process.env.BOT_POLL_INTERVAL_MS || 4000));
 const POLL_LIMIT = Math.max(1, Math.min(5, Number(process.env.BOT_POLL_LIMIT || 1)));
 const HEARTBEAT_INTERVAL_MS = Math.max(5000, Number(process.env.BOT_HEARTBEAT_INTERVAL_MS || 15000));
@@ -368,6 +369,7 @@ const logBehavior = (event: string, data: Record<string, any> = {}) => {
 const buildHeaders = (): Record<string, string> => {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (BOT_API_KEY) headers['x-bot-key'] = BOT_API_KEY;
+  if (BOT_API_TOKEN) headers['Authorization'] = `Bearer ${BOT_API_TOKEN}`;
   return headers;
 };
 
