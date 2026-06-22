@@ -265,6 +265,14 @@ const humanBreak = async () => {
 
 // Schedule next break — frequency & duration depend on account stage.
 let profilesSinceBreak = 0;
+let tasksSinceLastLearn = 0;
+const LEARN_INTERVAL = 20; // trigger learning analysis every 20 tasks
+
+const triggerLearn = async () => {
+  try {
+    await postJson('/api/bot/learn/analyze', { botId: BOT_ID });
+  } catch {}
+};
 const getBreakThreshold = (stage) => {
   const s = String(stage || '').toLowerCase();
   if (s === 'new') return 1 + Math.floor(Math.random() * 2);
@@ -1856,6 +1864,11 @@ const pollLoop = async () => {
           await executeCommand(cmd);
           await reportCommand(cmd.id, 'done');
           console.log(`[bot-real] done ${cmd.id}`);
+          tasksSinceLastLearn++;
+          if (tasksSinceLastLearn >= LEARN_INTERVAL) {
+            tasksSinceLastLearn = 0;
+            triggerLearn(); // auto-analyze in background
+          }
           await maybeScheduleBreak(cmd); // schedule next break after N profiles
           await sleep(jitter(3500, 9500)); // elastic gap between targets
         } catch (err: any) {
