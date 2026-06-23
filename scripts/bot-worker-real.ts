@@ -431,7 +431,9 @@ const heartbeatBot = async () => {
   // Flush behavior log buffer to cloud
   if (behaviorBuffer.length >= FLUSH_AT) {
     const batch = behaviorBuffer.splice(0);
-    postJson('/api/automation/behavior-logs', { logs: batch }).catch(() => {});
+    postJson('/api/automation/behavior-logs', { logs: batch }).catch((e) => {
+      console.error(`[bot-real] behavior-logs flush failed (${batch.length} entries):`, e?.message || e);
+    });
   }
 };
 
@@ -1897,6 +1899,16 @@ const heartbeatLoop = async () => {
 const shutdown = async (signal: string) => {
   console.log(`[bot-real] shutdown on ${signal}`);
   running = false;
+  // Flush pending behavior logs before exit
+  if (behaviorBuffer.length > 0) {
+    const batch = behaviorBuffer.splice(0);
+    console.log(`[bot-real] flushing ${batch.length} pending behavior logs on ${signal}...`);
+    try {
+      await postJson('/api/automation/behavior-logs', { logs: batch });
+    } catch (e) {
+      console.error('[bot-real] behavior-logs flush on shutdown failed:', e);
+    }
+  }
   try {
     if (BOT_LAUNCH_MODE === 'persistent') {
       if (context) await (context as any).close?.();
