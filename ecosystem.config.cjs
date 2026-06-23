@@ -1,18 +1,17 @@
 /**
- * PM2 Ecosystem — Bot Workers（纯 Windows，路径自适应）
+ * PM2 Ecosystem — Bot Workers（纯 Windows）
  *
  * 管理两个进程：
  *   1. ig-scheduler   — 从 Neon 读艺人 → 创建任务到 D1
  *   2. bot-worker     — 从 D1 poll 任务 → 用 CDP Chrome 操作 IG
  *
- * 路径自适应：基于 __dirname（本文件所在目录），在哪台 VPS 上 clone 都能跑。
- *   引擎目录 = ecosystem.config.js 所在目录
- *   日志目录 = 引擎目录的上层 /logs（即 {repo-root}/logs）
- *   如需覆盖，设置环境变量 HARVESTS_DIR（引擎目录的上层）
+ * 路径自适应：基于 __dirname（本文件所在目录），哪里 clone 都能跑。
+ *   引擎目录 = 本文件所在目录
+ *   日志目录 = 项目根目录 /logs
  *
  * Windows 专用。首次部署：
- *   cd C:\harvests\harvests-engine
- *   pm2 start ecosystem.config.js
+ *   cd <引擎目录>
+ *   pm2 start ecosystem.config.cjs
  *   pm2 save
  *
  * 注意：
@@ -24,11 +23,19 @@
 /* eslint-env node */
 
 const path = require('node:path');
+const fs = require('node:fs');
 
-// ── 目录配置（__dirname 自适应，HARVESTS_DIR 可覆盖）─
-const ENGINE_DIR = __dirname;   // 本文件在哪，引擎目录就在哪
+// ── 目录配置 ────────────────────────────────────
+const ENGINE_DIR = __dirname;
 const HARVESTS_DIR = process.env.HARVESTS_DIR || path.resolve(ENGINE_DIR, '..');
 const LOGS_DIR = path.join(HARVESTS_DIR, 'logs');
+
+// ── tsx 路径（优先用 local node_modules，fallback PATH）─
+const TSX_BIN = (() => {
+  const local = path.join(ENGINE_DIR, 'node_modules', '.bin', 'tsx.cmd');
+  if (fs.existsSync(local)) return local;
+  return 'tsx.cmd'; // 靠 PATH
+})();
 
 // ── 公共 env ────────────────────────────────────
 const COMMON_ENV = {
@@ -55,8 +62,8 @@ const apps = [
   {
     name: 'ig-scheduler',
     cwd: ENGINE_DIR,
-    script: 'npx.cmd',
-    args: 'tsx scripts/ig-scheduler-lite.ts',
+    script: './scripts/ig-scheduler-lite.ts',
+    interpreter: TSX_BIN,
     ...DEFAULTS,
     restart_delay: 10_000,
     env: {
@@ -73,8 +80,8 @@ const apps = [
   {
     name: 'bot-worker',
     cwd: ENGINE_DIR,
-    script: 'npx.cmd',
-    args: 'tsx scripts/bot-worker-real.ts',
+    script: './scripts/bot-worker-real.ts',
+    interpreter: TSX_BIN,
     ...DEFAULTS,
     restart_delay: 15_000,
     kill_timeout: 30_000,
