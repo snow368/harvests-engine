@@ -87,8 +87,6 @@ const BOT_SPEED_FACTOR = Math.max(0.8, Number(process.env.BOT_SPEED_FACTOR || 1.
 const BOT_VARIANCE = Math.min(0.8, Math.max(0, Number(process.env.BOT_VARIANCE || 0.25))); // per-bot elastic variance
 const BOT_BROWSE_ORDER = (process.env.BOT_BROWSE_ORDER || 'random').trim().toLowerCase(); // random | newest | mixed
 const BOT_MIN_VISIBLE_TILES = Math.max(2, Math.min(12, Number(process.env.BOT_MIN_VISIBLE_TILES || 6)));
-const DEFAULT_BEHAVIOR_LOG = path.resolve(process.cwd(), 'data', 'bot_logs', `${BOT_ID}.jsonl`);
-const BOT_BEHAVIOR_LOG = (process.env.BOT_BEHAVIOR_LOG || DEFAULT_BEHAVIOR_LOG).trim();
 const BOT_PROXY_SERVER = (process.env.BOT_PROXY_SERVER || '').trim();
 const BOT_PROXY_USERNAME = (process.env.BOT_PROXY_USERNAME || '').trim();
 const BOT_PROXY_PASSWORD = (process.env.BOT_PROXY_PASSWORD || '').trim();
@@ -378,25 +376,9 @@ if (!likeState.comments.byDay) likeState.comments.byDay = {};
 if (!likeState.comments.byHandle) likeState.comments.byHandle = {};
 if (!likeState.comments.recentText) likeState.comments.recentText = [];
 
-const ensureBehaviorLogDir = () => {
-  const p = path.resolve(BOT_BEHAVIOR_LOG);
-  const dir = path.dirname(p);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  return p;
-};
-
-const BEHAVIOR_LOG_FILE = ensureBehaviorLogDir();
 const logBehavior = (event: string, data: Record<string, any> = {}) => {
   try {
-    const row = {
-      ts: new Date().toISOString(),
-      botId: BOT_ID,
-      event,
-      ...data
-    };
-    fs.appendFileSync(BEHAVIOR_LOG_FILE, JSON.stringify(row) + '\n', 'utf8');
-    // Also push to cloud buffer for frontend display
-    behaviorBuffer.push(row);
+    behaviorBuffer.push({ ...data, ts: new Date().toISOString(), botId: BOT_ID, event });
   } catch {}
 };
 
@@ -1939,7 +1921,6 @@ const main = async () => {
     speedFactor: BOT_SPEED_FACTOR,
     variance: BOT_VARIANCE,
     browseOrder: BOT_BROWSE_ORDER,
-    behaviorLog: BEHAVIOR_LOG_FILE,
     proxyEnabled: Boolean(BOT_PROXY_SERVER),
     proxyServer: BOT_PROXY_SERVER || null,
     commentEnabled: BOT_COMMENT_ENABLED,
