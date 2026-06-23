@@ -29,7 +29,6 @@ const LOGS_DIR = path.join(HARVESTS_DIR, 'logs');
 // ── 公共 env ────────────────────────────────────
 const COMMON_ENV = {
   NODE_ENV: 'production',
-  CLOUD_API_BASE: 'https://harvests-cloud-api.inkflowapp.workers.dev',
   BOT_API_TOKEN: 'vps-bot-secret-2024',
 };
 
@@ -58,6 +57,7 @@ const apps = [
     restart_delay: 10_000,
     env: {
       ...COMMON_ENV,
+      CLOUD_API_BASE: 'https://harvests-cloud-api.inkflowapp.workers.dev',
       SCHEDULER_BOT_ID: 'bot_ig_01',
       SCHEDULER_DAILY_LIMIT: '50',
       SCHEDULER_STATE: 'OR',
@@ -78,6 +78,7 @@ const apps = [
     kill_timeout: 30_000,
     env: {
       ...COMMON_ENV,
+      BOT_API_BASE: 'https://harvests-cloud-api.inkflowapp.workers.dev',
       BOT_ID: 'bot_ig_01',
       BOT_CDP_URL: 'http://localhost:9222',
       HUMAN_MIMICRY_ENABLED: 'true',
