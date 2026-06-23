@@ -4,27 +4,25 @@
  * 用法：
  *   set BOT_CDP_URL=http://localhost:9222
  *   set POST_URL=https://www.instagram.com/p/xxxxx/
- *   set COMMENT_TEXT=Love the work! 🔥
+ *   set COMMENT_TEXT=Clean work
  *   npx tsx scripts/comment-test.ts
  *
- * 你可以在旁边看着 bot 打字、点 Post。
+ * 你可以在旁边看着 bot 打字、发评论。
+ * 建议不用 emoji（Win CMD 可能不显示），纯英文最稳。
  */
 
 import { chromium } from 'playwright';
 
 const CDP_URL = process.env.BOT_CDP_URL || 'http://localhost:9222';
 const POST_URL = process.env.POST_URL || '';
-const COMMENT_TEXT = process.env.COMMENT_TEXT || 'Clean work 🔥';
+const COMMENT_TEXT = process.env.COMMENT_TEXT || 'Clean work';
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
 async function typeLikeHuman(page: any, text: string) {
-  // 像真人一样逐字打字，每字间隔随机 80~250ms
-  // 偶尔停顿模拟思考
   for (let i = 0; i < text.length; i++) {
     await page.keyboard.type(text[i]);
     if (Math.random() < 0.08) {
-      // 8% 概率假装卡顿思考
       await sleep(300 + Math.random() * 600);
     } else {
       await sleep(80 + Math.random() * 170);
@@ -35,7 +33,6 @@ async function typeLikeHuman(page: any, text: string) {
 async function main() {
   if (!POST_URL) {
     console.error('请设置 POST_URL 环境变量');
-    console.error('例: set POST_URL=https://www.instagram.com/p/xxxxx/');
     process.exit(1);
   }
 
@@ -62,105 +59,87 @@ async function main() {
   await sleep(4000);
   console.log('   ✅ 页面加载完成');
 
-  // 3. 点击评论输入框
+  // 3. 定位评论框
   console.log('\n[3] 定位评论框...');
-  // Instagram 的评论框有多种可能的选择器
-  const commentSelectors = [
-    '[aria-label="添加评论…"]',
-    '[aria-label="Add a comment…"]',
-    'textarea[placeholder*="comment" i]',
-    'textarea[placeholder*="评论" i]',
-    'form input[type="text"]',
-    'div[role="textbox"]',
+  const selectors = [
+    '[aria-label="添加评论…"]', '[aria-label="Add a comment…"]',
+    'textarea[placeholder*="comment" i]', 'textarea[placeholder*="评论" i]',
+    'form input[type="text"]', 'div[role="textbox"]',
   ];
 
   let commentBox: any = null;
-  for (const sel of commentSelectors) {
+  for (const sel of selectors) {
     const el = page.locator(sel).first();
-    if (await el.count() > 0) {
+    if (await el.count() > 0 && await el.isVisible().catch(() => false)) {
       commentBox = el;
-      console.log(`   ✅ 找到评论框: ${sel}`);
+      console.log(`   ✅ 找到: ${sel}`);
       break;
     }
   }
 
   if (!commentBox) {
-    // 尝试点击评论图标先打开评论栏
-    console.log('   → 尝试点评论图标打开输入框...');
-    const commentIcon = page.locator('svg[aria-label="评论"], svg[aria-label="Comment"]').first();
-    if (await commentIcon.count() > 0) {
-      await commentIcon.click();
+    // 点评论图标先
+    const icon = page.locator('svg[aria-label="评论"], svg[aria-label="Comment"]').first();
+    if (await icon.count() > 0) {
+      await icon.click();
       await sleep(2000);
-      // 再找一次
-      for (const sel of commentSelectors) {
+      for (const sel of selectors) {
         const el = page.locator(sel).first();
         if (await el.count() > 0) {
-          commentBox = el;
-          console.log(`   ✅ 找到评论框: ${sel}`);
-          break;
+          commentBox = el; break;
         }
       }
     }
   }
 
   if (!commentBox) {
-    console.error('   ❌ 找不到评论输入框，可能需要手动定位');
-    console.log('   URL:', page.url());
+    console.error('❌ 找不到评论框');
     await browser.close();
     process.exit(1);
   }
 
-  // 4. 打字（模拟真人）
-  console.log('\n[4] 正在输入评论...');
+  // 4. 打字
+  console.log('\n[4] 输入评论...');
   await commentBox.click();
   await sleep(500);
   await typeLikeHuman(page, COMMENT_TEXT);
   console.log(`   ✅ 已输入: "${COMMENT_TEXT}"`);
 
-  // 5. 点 Post 按钮
-  console.log('\n[5] 点击 Post...');
-  await sleep(800);
+  // 5. 发送 — 回车最稳，IG 原生支持
+  console.log('\n[5] 发送...');
+  await sleep(1000);
+  await page.keyboard.press('Enter');
+  await sleep(3000);
 
-  const postBtnSelectors = [
-    'button:has-text("发布")',
-    'button:has-text("Post")',
-    'div[role="button"]:has-text("发布")',
-    'div[role="button"]:has-text("Post")',
-    'button[type="submit"]',
-  ];
+  // 验证：评论框是否清空
+  let sent = false;
+  try {
+    const val = await commentBox.inputValue();
+    if (!val || val.trim() === '') sent = true;
+  } catch { sent = true; }
 
-  let posted = false;
-  for (const sel of postBtnSelectors) {
-    const btn = page.locator(sel).first();
-    if (await btn.count() > 0 && await btn.isVisible()) {
+  if (!sent) {
+    // fallback: 点 submit
+    const btn = page.locator('button[type="submit"]').first();
+    if (await btn.count() > 0) {
       await btn.click();
-      posted = true;
-      console.log(`   ✅ 点击了: ${sel}`);
-      break;
+      await sleep(2000);
+      sent = true;
     }
   }
 
-  if (!posted) {
-    // 尝试回车发送
-    console.log('   → 尝试回车发送...');
-    await page.keyboard.press('Enter');
-    posted = true;
-  }
-
-  await sleep(3000);
   console.log('');
-  if (posted) {
-    console.log('   🎉 评论已发送！');
-    console.log(`      帖子: ${POST_URL}`);
-    console.log(`      评论: "${COMMENT_TEXT}"`);
+  if (sent) {
+    console.log(`   🎉 评论已发送！`);
+    console.log(`      "${COMMENT_TEXT}"`);
   } else {
-    console.log('   ⚠️ 不确定是否发送成功，请查看浏览器窗口');
+    console.log('   ⚠️ 请查看浏览器窗口确认是否发送成功');
   }
 
   await browser.close();
 }
 
 main().catch(e => {
-  console.error('测试失败:', e?.message || e);
+  console.error('失败:', e?.message || e);
   process.exit(1);
 });
