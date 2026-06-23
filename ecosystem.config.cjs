@@ -1,41 +1,30 @@
 /**
- * PM2 Ecosystem — Bot Workers（纯 Windows）
+ * PM2 Ecosystem — Bot Workers（Windows）
  *
- * 管理两个进程：
- *   1. ig-scheduler   — 从 Neon 读艺人 → 创建任务到 D1
- *   2. bot-worker     — 从 D1 poll 任务 → 用 CDP Chrome 操作 IG
+ * 用 Node.js `--import tsx` loader 运行 TypeScript 脚本。
+ * 不需要 tsx.cmd 在 PATH 上，node.exe 足矣。
  *
  * 路径自适应：基于 __dirname（本文件所在目录），哪里 clone 都能跑。
- *   引擎目录 = 本文件所在目录
- *   日志目录 = 项目根目录 /logs
  *
- * Windows 专用。首次部署：
+ * 首次部署：
  *   cd <引擎目录>
+ *   npm install tsx --save-dev
  *   pm2 start ecosystem.config.cjs
  *   pm2 save
  *
  * 注意：
  *   - NEON_DATABASE_URL 通过 .env 文件读取（已在 gitignore）
- *   - 首次部署后先 pm2 start → pm2 save 建立快照
  */
 
 // @ts-check
 /* eslint-env node */
 
 const path = require('node:path');
-const fs = require('node:fs');
 
 // ── 目录配置 ────────────────────────────────────
 const ENGINE_DIR = __dirname;
 const HARVESTS_DIR = process.env.HARVESTS_DIR || path.resolve(ENGINE_DIR, '..');
 const LOGS_DIR = path.join(HARVESTS_DIR, 'logs');
-
-// ── tsx 路径（优先用 local node_modules，fallback PATH）─
-const TSX_BIN = (() => {
-  const local = path.join(ENGINE_DIR, 'node_modules', '.bin', 'tsx.cmd');
-  if (fs.existsSync(local)) return local;
-  return 'tsx.cmd'; // 靠 PATH
-})();
 
 // ── 公共 env ────────────────────────────────────
 const COMMON_ENV = {
@@ -63,7 +52,8 @@ const apps = [
     name: 'ig-scheduler',
     cwd: ENGINE_DIR,
     script: './scripts/ig-scheduler-lite.ts',
-    interpreter: TSX_BIN,
+    interpreter: 'node.exe',
+    node_args: '--import tsx',
     ...DEFAULTS,
     restart_delay: 10_000,
     env: {
@@ -81,7 +71,8 @@ const apps = [
     name: 'bot-worker',
     cwd: ENGINE_DIR,
     script: './scripts/bot-worker-real.ts',
-    interpreter: TSX_BIN,
+    interpreter: 'node.exe',
+    node_args: '--import tsx',
     ...DEFAULTS,
     restart_delay: 15_000,
     kill_timeout: 30_000,
