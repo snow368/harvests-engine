@@ -46,7 +46,7 @@ cd /d "%ENGINE_DIR%"
 pm2 resurrect 2>nul
 if %ERRORLEVEL% NEQ 0 (
     echo      无 PM2 快照，从 ecosystem 启动...
-    pm2 start ecosystem.config.js
+    pm2 start ecosystem.config.cjs
     pm2 save
 ) else (
     echo      PM2 已恢复快照
