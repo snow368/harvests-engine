@@ -235,7 +235,19 @@ const callDeepSeek = async (prompt: string): Promise<string> => {
  */
 export const generateComment = async (input: CommentInput): Promise<GeneratedComment> => {
   if (!DEEPSEEK_API_KEY) {
-    throw new Error('DEEPSEEK_API_KEY not set');
+    // 无 API key 时直接用模板库
+    const fallbacks = [
+      'Love the shading on this piece.',
+      'Clean linework, really nice result.',
+      'Smooth blends on this one.',
+      'Nice saturation, the color holds well.',
+      'Great composition, flows really nicely.',
+      'The contrast in this is beautiful.',
+      'Really clean work.',
+      'This is awesome.',
+    ];
+    const fbText = fallbacks[Math.floor(Math.random() * fallbacks.length)];
+    return { text: fbText, style: 'fallback' };
   }
 
   // 随机选风格，但倾向简短赞美和随性
