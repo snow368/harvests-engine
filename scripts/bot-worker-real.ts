@@ -63,7 +63,7 @@ type ProfileFacts = {
   nonTattooSuspect?: boolean;
 };
 
-const API_BASE = (process.env.BOT_API_BASE || 'http://localhost:3000').replace(/\/+$/, '');
+const API_BASE = (process.env.BOT_API_BASE || 'https://harvests-cloud-api.inkflowapp.workers.dev').replace(/\/+$/, '');
 const BOT_ID = process.env.BOT_ID || `bot_${Math.random().toString(36).slice(2, 8)}`;
 const BOT_HOST = process.env.BOT_HOST || process.env.HOSTNAME || 'local-dev';
 const BOT_VERSION = process.env.BOT_VERSION || '0.2.0-real';
