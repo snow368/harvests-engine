@@ -66,6 +66,43 @@ const apps = [
     out_file: path.join(LOGS_DIR, 'scheduler-out.log'),
   },
 
+  // ── 3. Backlink Scheduler ──────────────────────
+  {
+    name: 'backlink-scheduler',
+    cwd: ENGINE_DIR,
+    script: './scripts/backlink-scheduler.ts',
+    interpreter: 'node.exe',
+    node_args: '--import tsx',
+    ...DEFAULTS,
+    restart_delay: 30_000,
+    cron_restart: '0 9 * * *',  // 每天早上 9 点生成任务
+    env: {
+      ...COMMON_ENV,
+      BOT_BACKLINK_DAILY_QUOTA: '20',
+    },
+    error_file: path.join(LOGS_DIR, 'backlink-scheduler-error.log'),
+    out_file: path.join(LOGS_DIR, 'backlink-scheduler-out.log'),
+  },
+
+  // ── 4. Backlink Worker ──────────────────────────
+  {
+    name: 'backlink-worker',
+    cwd: ENGINE_DIR,
+    script: './scripts/backlink-worker.ts',
+    interpreter: 'node.exe',
+    node_args: '--import tsx',
+    ...DEFAULTS,
+    restart_delay: 15_000,
+    env: {
+      ...COMMON_ENV,
+      BOT_CDP_URL: 'http://localhost:9222',
+      BOT_BACKLINK_QUOTA: '10',
+      BOT_API_BASE: 'https://harvests-cloud-api.inkflowapp.workers.dev',
+    },
+    error_file: path.join(LOGS_DIR, 'backlink-worker-error.log'),
+    out_file: path.join(LOGS_DIR, 'backlink-worker-out.log'),
+  },
+
   // ── 2. Bot Worker ─────────────────────────────
   {
     name: 'bot-worker',
