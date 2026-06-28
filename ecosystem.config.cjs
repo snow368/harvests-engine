@@ -116,6 +116,7 @@ const apps = [
     env: {
       ...COMMON_ENV,
       BOT_API_BASE: 'https://harvests-cloud-api.inkflowapp.workers.dev',
+      BOT_ACCOUNT_IDS: 'raiha8833',
       BOT_ID: 'bot_ig_01',
       BOT_CDP_URL: 'http://localhost:9222',
       HUMAN_MIMICRY_ENABLED: 'true',
