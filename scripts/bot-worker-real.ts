@@ -1535,12 +1535,21 @@ const readModalMeta = async (primaryStyle: string, expectedHandle = '', follower
 
 const closeModal = async () => {
   if (!page) return;
-  const closeBtn = page.locator('svg[aria-label="Close"], svg[aria-label="关闭"]').first();
-  if ((await closeBtn.count()) > 0) {
-    await closeBtn.click({ timeout: 5000 }).catch(async () => page?.keyboard.press('Escape'));
-  } else {
+  // Escape 键最可靠：绕过 IG overlay 拦截
+  try {
     await page.keyboard.press('Escape');
-  }
+    await page.waitForTimeout(jitter(400, 1000));
+    // 检查是否真的关掉了（没关掉再走 click 兜底）
+    const stillOpen = await page.locator('div[role="dialog"]').first().isVisible().catch(() => false);
+    if (!stillOpen) { await page.waitForTimeout(jitter(200, 600)); return; }
+  } catch {}
+  // 兜底：click SVG Close
+  try {
+    const closeBtn = page.locator('svg[aria-label="Close"]').first();
+    if (await closeBtn.count() > 0) {
+      await closeBtn.click({ timeout: 3000, force: true }).catch(() => {});
+    }
+  } catch {}
   await page.waitForTimeout(jitter(600, 1400));
 };
 
