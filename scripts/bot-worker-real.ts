@@ -61,6 +61,7 @@ type ProfileFacts = {
     imageNegativeHits: string[];
   };
   nonTattooSuspect?: boolean;
+  category?: string;
 };
 
 const API_BASE = (process.env.BOT_API_BASE || 'https://harvests-cloud-api.inkflowapp.workers.dev').replace(/\/+$/, '');
@@ -1047,6 +1048,16 @@ const captureProfileFacts = async () => {
   const imagePositiveHits = keywordHits(imageBlob, POSITIVE_KEYWORDS);
   const imageNegativeHits = keywordHits(imageBlob, NEGATIVE_KEYWORDS);
   facts.categorySignals = { textPositiveHits, textNegativeHits, imagePositiveHits, imageNegativeHits };
+
+  // Normalized business category from bio/title/categoryLabel/sampleCaption
+  const catBlob = normalizeForMatch(`${facts.title || ''} ${facts.bio || ''} ${facts.categoryLabel || ''} ${facts.sampleCaption || ''}`);
+  if (/\b(tattoo|ink|irezumi|tattoolife|tattoolover|tattooist|tatted|tatuaje|bodyart)\b/.test(catBlob)) facts.category = 'tattoo';
+  else if (/\b(piercing|piercer|body.mod|stretched|gauges|modifikasi)\b/.test(catBlob)) facts.category = 'piercing';
+  else if (/\b(nail|manicure|pedicure|gel|acrylic|nailart|nailtech|nail.salon)\b/.test(catBlob)) facts.category = 'nail';
+  else if (/\b(barber|barbershop|haircut|fade|grooming|clipper|haircutter)\b/.test(catBlob)) facts.category = 'barber';
+  else if (/\b(esthetician|skincare|facial|lashes|eyelash|waxing|microblading|brow|lash.ext)\b/.test(catBlob)) facts.category = 'esthetician';
+  else if (/\b(massage|spa|wellness|therapist|reflexology|bodywork)\b/.test(catBlob)) facts.category = 'massage';
+  else if (/\b(salon|hairstylist|hairstyle|beauty|cosmetology|haircolor|blowout)\b/.test(catBlob)) facts.category = 'salon';
 
   const positiveScore = textPositiveHits.length + imagePositiveHits.length;
   const negativeScore = textNegativeHits.length + imageNegativeHits.length;
