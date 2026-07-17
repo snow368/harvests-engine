@@ -249,6 +249,13 @@ export function runTests() {
       ],
     },
     {
+      // 4731 —— 西语描述 "Caja gratuita"(免费礼盒) + 标准针码，环绕文字不影响提取
+      note: 'Caja gratuita 1214RL',
+      expected: [
+        { label: '1214RL', qty: 1 },
+      ],
+    },
+    {
       // 中文乘量: "两盒" → 2（曾因字符类漏 "两" 返回 1）
       note: '1003RL两盒',
       expected: [
