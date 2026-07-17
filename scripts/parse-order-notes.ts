@@ -256,6 +256,13 @@ export function runTests() {
       ],
     },
     {
+      // 4732 —— 裸针码 + SEM 后缀，无乘子/描述
+      note: '1009SEM',
+      expected: [
+        { label: '1009SEM', qty: 1 },
+      ],
+    },
+    {
       // 中文乘量: "两盒" → 2（曾因字符类漏 "两" 返回 1）
       note: '1003RL两盒',
       expected: [
