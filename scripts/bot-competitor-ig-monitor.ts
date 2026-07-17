@@ -192,22 +192,16 @@ async function scrapePost(page: Page, url: string): Promise<{
   }).catch(() => '');
   if (loginWall) throw new Error(`login wall (${loginWall}) — 该 Chrome profile 未登录 Instagram`);
   // 优先从 post 页内嵌 JSON 抽取完整结构（caption / carousel 图 / 评论 / 互动）
+  // ⚠️ 此块内禁止出现具名函数(声明/表达式都不行)：tsx(esbuild keepNames)会给具名函数
+  //    注入 __name() 包装，而 page.evaluate 会把函数序列化到浏览器执行，浏览器无 __name
+  //    定义会抛 ReferenceError。故 pick 改为内联属性访问，保留零具名函数。
   const data = await page.evaluate(() => {
-    const pick = (o: any): any => {
-      if (!o || typeof o !== 'object') return null;
-      if (o.shortcode_media) return o.shortcode_media;
-      for (const k of Object.keys(o)) {
-        const v = (o as any)[k];
-        if (v && typeof v === 'object' && v.shortcode_media) return v.shortcode_media;
-      }
-      return null;
-    };
     const scripts = Array.from(document.querySelectorAll('script[type="application/json"]'));
     let media: any = null;
     for (const s of scripts) {
       try {
         const d = JSON.parse(s.textContent || '{}');
-        media = pick(d?.graphql) || pick(d?.data) || pick(d) || media;
+        media = d?.graphql?.shortcode_media || d?.data?.shortcode_media || d?.shortcode_media || media;
         if (media) break;
       } catch {}
     }
