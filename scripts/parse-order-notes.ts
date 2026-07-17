@@ -1,9 +1,16 @@
+import { fileURLToPath } from 'node:url';
+
 /**
- * 订单备注解析器 —— 提取赠品信息
- * 规则: 针型号 + 其他赠品
- * 针格式: [数字][数字][RL/RS/RG/RT/F/M]
- *   如: 1003RL (10号/03针/圆针), 1209RS (12号/09针/圆弯针)
- * 赠品: 小海报, 贴纸, 海报等
+ * 订单备注解析器 —— 提取赠品与针型号信息
+ * 
+ * 规则: 按行解析,每行结构 = [数量][品牌] : [描述] [针型号]
+ *   示例: 2Peach CON : extended cap 1007RL  → 2盒 Peach 品牌 1007RL
+ *         3 AES: 1003RL                     → 3盒 AES 品牌 1003RL
+ *         1AES: 0603RL                      → 1盒 AES 品牌 0603RL
+ *         送1003RL一盒                      → 赠品 1003RL 1盒
+ * 
+ * 通用型: 1003RL / 1209RM / RL1003 / 1003 RL / 10号03针RL
+ * 赠品:   小海报, 贴纸, 海报等
  */
 
 export interface GiftItem {
@@ -14,49 +21,180 @@ export interface GiftItem {
   estimatedBoxes?: number;
 }
 
-// 针型匹配: 4-6位数字 + RL/RS/RG/RT/F/M
-const NEEDLE_PATTERN = /\b(\d{3,4})(RL|RS|RG|RT|F|M)\b/gi;
+/** 针型后缀列表（常见纹身针分类） */
+const NEEDLE_SUFFIXES = [
+  'RL', 'RS', 'RG', 'RT', 'RM',        // 圆针系列
+  'F', 'FL',                             // 平针系列
+  'M', 'M1', 'M2', 'MC', 'MT', 'MAG',   // 排针系列
+  'L', 'LL', 'SL',                       // 其他
+];
+
+// 构建后缀正则: 按长度降序排列(先匹配长的如 M1 再匹配短的如 M)
+const SUFFIX_PATTERN = NEEDLE_SUFFIXES.sort((a, b) => b.length - a.length).join('|');
+
+// 针型号匹配 A: 数字(3-4位) + 字母后缀 —— 如 1003RL, 1209RM, 0603RL
+const NEEDLE_DIGITS_FIRST = new RegExp(`\\b(\\d{3,4})(${SUFFIX_PATTERN})\\b`, 'gi');
+
+// 针型号匹配 B: 字母后缀 + 数字(3-4位) —— 如 RL1003, RM1209
+const NEEDLE_LETTERS_FIRST = new RegExp(`\\b(${SUFFIX_PATTERN})(\\d{3,4})\\b`, 'gi');
+
+// 针型号匹配 C: 数字 + 空格 + 字母后缀 —— 如 1003 RL, 0603 RL
+const NEEDLE_SPACE_SEP = new RegExp(`\\b(\\d{3,4})\\s+(${SUFFIX_PATTERN})\\b`, 'gi');
+
+// 额外: "10号03针RL" 格式的中文描述针
+const NEEDLE_CHINESE = /(\d{1,2})[号#](\d{1,2})[针/]?(RL|RS|RG|RT|RM|F|M)/gi;
+
+// 行首数量提取: "2Peach" → 2, "3 AES" → 3, "1AES" → 1
+// 注意: 必须是「数字 + 品牌词(2个以上字母)」, 否则会误把针型号(1209RS/1003RL)的数字当成数量
+const LINE_QTY_PREFIX = /^(\d{1,2})\s*([A-Za-z]{2,})/;
+
+// 额外数量标注: "x2", "*2", "×2", "2盒", "两盒" 等
+const QTY_SUFFIX = /[×xX*]\s*(\d+)|(\d+)\s*盒/g;
 
 // 常见赠品关键词
 const GIFT_KEYWORDS: Array<{ pattern: RegExp; type: GiftItem['type']; label: string }> = [
   { pattern: /小海报/gi, type: 'poster', label: '小海报' },
-
   { pattern: /贴纸/gi, type: 'sticker', label: '贴纸' },
+  { pattern: /海报/gi, type: 'poster', label: '海报' },
   { pattern: / sticker/i, type: 'sticker', label: 'Sticker' },
 ];
 
-// 套餐匹配: "套餐尺寸" 后面的针型号
-const SET_PATTERN = /套餐尺寸(.+)/gi;
+/** 判断两个 needle 型号是否等价（忽略大小写和后缀大小写） */
+function areNeedlesEqual(a: string, b: string): boolean {
+  return a.replace(/[^a-zA-Z0-9]/g, '').toLowerCase()
+      === b.replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+}
+
+/**
+ * 从一行备注文本中提取 needle 型号列表
+ */
+function extractNeedlesFromLine(line: string): Array<{ code: string; qty: number }> {
+  const results: Array<{ code: string; qty: number }> = [];
+  const seen = new Set<string>();
+
+  // 1. 尝试各种针型号匹配
+  const addIfNew = (code: string) => {
+    const key = code.replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+    if (!seen.has(key)) {
+      seen.add(key);
+      results.push({ code, qty: 1 });
+    }
+  };
+
+  let m;
+
+  // a) 中文描述: "10号03针RL" → 1003RL
+  NEEDLE_CHINESE.lastIndex = 0;
+  while ((m = NEEDLE_CHINESE.exec(line)) !== null) {
+    const gauge = m[1].padStart(2, '0');
+    const needleCount = m[2].padStart(2, '0');
+    const suffix = m[3];
+    addIfNew(`${gauge}${needleCount}${suffix}`);
+  }
+
+  // b) 空格分隔: "1003 RL"
+  NEEDLE_SPACE_SEP.lastIndex = 0;
+  while ((m = NEEDLE_SPACE_SEP.exec(line)) !== null) {
+    addIfNew(m[1] + m[2]);
+  }
+
+  // c) 字母在前: "RL1003"
+  NEEDLE_LETTERS_FIRST.lastIndex = 0;
+  while ((m = NEEDLE_LETTERS_FIRST.exec(line)) !== null) {
+    addIfNew(m[2] + m[1]);
+  }
+
+  // d) 数字在前(标准): "1003RL"
+  NEEDLE_DIGITS_FIRST.lastIndex = 0;
+  while ((m = NEEDLE_DIGITS_FIRST.exec(line)) !== null) {
+    addIfNew(m[1] + m[2]);
+  }
+
+  return results;
+}
+
+/**
+ * 从一行文本中提取行首数量
+ * "2Peach..." → 2, "3 AES..." → 3, "1AES..." → 1, "送1003RL..." → null
+ */
+function extractLineQuantity(line: string): number | null {
+  const m = line.match(LINE_QTY_PREFIX);
+  if (m) return parseInt(m[1], 10);
+  return null;
+}
+
+/**
+ * 从一行文本中提取「后缀倍率」(x2 / ×2 / *2 / 2盒 / 两盒)
+ * 用于把该行的针型号数量乘以倍率。无倍率则返回 1。
+ */
+const CN_NUM = new Map<string, number>([['一', 1], ['两', 2], ['二', 2], ['三', 3], ['四', 4], ['五', 5], ['六', 6], ['七', 7], ['八', 8], ['九', 9], ['十', 10]]);
+function extractLineMultiplier(line: string): number {
+  let m;
+  // 阿拉伯数字: x2 / ×2 / *2 / 2盒
+  QTY_SUFFIX.lastIndex = 0;
+  while ((m = QTY_SUFFIX.exec(line)) !== null) {
+    const qty = parseInt(m[1] || m[2], 10);
+    if (!isNaN(qty) && qty > 0) return qty;
+  }
+  // 中文数字: 两盒 / 三盒
+  const cn = line.match(/([一二三四五六七八九十])\s*盒/);
+  if (cn && CN_NUM.has(cn[1])) return CN_NUM.get(cn[1])!;
+  return 1;
+}
 
 export function parseOrderNote(note: string): GiftItem[] {
   if (!note) return [];
   const gifts: GiftItem[] = [];
-  const seen = new Set<string>();
+  const allNeedleCodes: string[] = [];
 
-  // 清理: 去掉 IG 链接
+  // 清理: 去掉 IG 链接、多余空格
   const cleanNote = note.replace(/https?:\/\/[^\s]+/gi, '').trim();
 
-  // 1. 匹配针型号
-  let match;
-  while ((match = NEEDLE_PATTERN.exec(cleanNote)) !== null) {
-    const key = match[0].toLowerCase();
-    if (!seen.has(key)) {
-      seen.add(key);
+  // 按行解析
+  const lines = cleanNote.split(/[\n\r,;、]+/).map(l => l.trim()).filter(Boolean);
+
+  for (const line of lines) {
+    const lineQty = extractLineQuantity(line);
+    const lineMult = extractLineMultiplier(line);
+    const needles = extractNeedlesFromLine(line);
+
+    for (const n of needles) {
+      const baseQty = lineQty !== null ? lineQty : n.qty;
+      const effectiveQty = baseQty * lineMult;
+      
+      // 去重（同一个型号只出现一次，但取最大数量）
+      const existing = allNeedleCodes.findIndex(c => areNeedlesEqual(c, n.code));
+      if (existing === -1) {
+        allNeedleCodes.push(n.code);
+        gifts.push({
+          type: 'needle',
+          label: n.code,
+          quantity: effectiveQty,
+          estimatedBoxes: effectiveQty,
+        });
+      }
+    }
+  }
+
+  // 如果按行解析没命中，回退到整体匹配
+  if (gifts.length === 0) {
+    const fallbackNeedles = extractNeedlesFromLine(cleanNote);
+    for (const n of fallbackNeedles) {
+      allNeedleCodes.push(n.code);
       gifts.push({
         type: 'needle',
-        label: match[0],
-        quantity: 1,
-        estimatedBoxes: 1, // 默认1盒
+        label: n.code,
+        quantity: n.qty,
+        estimatedBoxes: n.qty,
       });
     }
   }
 
-  // 2. 匹配赠品关键词
+  // 赠品匹配（整体）
   for (const kw of GIFT_KEYWORDS) {
     if (kw.pattern.test(cleanNote)) {
       const key = kw.label;
-      if (!seen.has(key)) {
-        seen.add(key);
+      if (!gifts.some(g => g.label === key)) {
         gifts.push({
           type: kw.type,
           label: kw.label,
@@ -66,15 +204,95 @@ export function parseOrderNote(note: string): GiftItem[] {
     }
   }
 
-  // 3. 套餐检测
-  const setMatch = SET_PATTERN.exec(cleanNote);
-  if (setMatch) {
-    // 套餐标记: 里面的针已在第1步匹配到
-    // 如果没有任何针匹配，标记为套装
-    if (gifts.filter(g => g.type === 'needle').length === 0) {
-      // 可能有未识别的针型号，标记为套餐
-    }
+// 套餐检测: "套餐尺寸" 关键词
+  if (/套餐尺寸/.test(cleanNote) && gifts.filter(g => g.type === 'needle').length === 0) {
+    gifts.push({
+      type: 'unknown',
+      label: '套餐(未识别型号)',
+      quantity: 1,
+    });
   }
 
   return gifts;
+}
+
+/**
+ * 测试用例
+ */
+export function runTests() {
+  const testCases: Array<{ note: string; expected: Array<{ label: string; qty: number }> }> = [
+    {
+      note: `2Peach CON : extended cap 1007RL
+2Peach CON : extended cap 1009RL
+2Peach COG: extended cap 1011RS
+2Peach COG: extended cap 1209RM
+3 AES: 1003RL
+1AES: 0603RL`,
+      expected: [
+        { label: '1007RL', qty: 2 },
+        { label: '1009RL', qty: 2 },
+        { label: '1011RS', qty: 2 },
+        { label: '1209RM', qty: 2 },
+        { label: '1003RL', qty: 3 },
+        { label: '0603RL', qty: 1 },
+      ],
+    },
+    {
+      note: '送1003RL一盒 贴纸',
+      expected: [
+        { label: '1003RL', qty: 1 },
+      ],
+    },
+    {
+      note: 'RL1003 x2, 1209RS',
+      expected: [
+        { label: '1003RL', qty: 2 },
+        { label: '1209RS', qty: 1 },
+      ],
+    },
+    {
+      note: '1003 RL, 1209RS',
+      expected: [
+        { label: '1003RL', qty: 1 },
+        { label: '1209RS', qty: 1 },
+      ],
+    },
+    {
+      note: '',
+      expected: [],
+    },
+  ];
+
+  let pass = 0; let fail = 0;
+  for (const tc of testCases) {
+    const result = parseOrderNote(tc.note);
+    const resultSummary = result
+      .filter(g => g.type === 'needle')
+      .map(g => ({ label: g.label.toUpperCase().replace(/[^A-Z0-9]/g, ''), qty: g.quantity }));
+    
+    const expectedSummary = tc.expected.map(e => ({ label: e.label.toUpperCase().replace(/[^A-Z0-9]/g, ''), qty: e.qty }));
+    
+    const resultStr = JSON.stringify(resultSummary);
+    const expectedStr = JSON.stringify(expectedSummary);
+    
+    if (resultStr === expectedStr) {
+      pass++;
+      console.log(`✅ PASS: "${tc.note.slice(0, 40)}..."`);
+    } else {
+      fail++;
+      console.log(`❌ FAIL: "${tc.note.slice(0, 40)}..."`);
+      console.log(`   Expected: ${expectedStr}`);
+      console.log(`   Got:      ${resultStr}`);
+    }
+  }
+
+  console.log(`\n${pass}/${pass + fail} tests passed`);
+  return { pass, fail };
+}
+
+// 如果直接运行此文件则执行测试
+const __filename = fileURLToPath(import.meta.url);
+if (process.argv[1] && __filename === process.argv[1]) {
+  const results = runTests();
+  process.exit(results.fail > 0 ? 1 : 0);
 }
