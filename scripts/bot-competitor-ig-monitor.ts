@@ -179,8 +179,18 @@ async function scrapePost(page: Page, url: string): Promise<{
   imageUrls: string[]; comments: { author: string; text: string; likes: number }[];
   likes_count: number | null; comments_count: number | null;
 }> {
-  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 15000 });
+  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 25000 });
   await page.waitForTimeout(jitter(1500, 2500));
+  // 登录墙检测：未登录时 IG 会把 /p/xxx 重定向到 /accounts/login 或塞登录弹窗
+  const loginWall = await page.evaluate(() => {
+    const u = location.href;
+    if (/\/accounts\/login/i.test(u)) return 'redirected to /accounts/login';
+    const t = document.body?.innerText || '';
+    if (/log in to see|Log in to Instagram|登录以查看|请先登录/i.test(t) &&
+        !document.querySelector('script[type="application/json"]')) return 'login wall dialog';
+    return '';
+  }).catch(() => '');
+  if (loginWall) throw new Error(`login wall (${loginWall}) — 该 Chrome profile 未登录 Instagram`);
   // 优先从 post 页内嵌 JSON 抽取完整结构（caption / carousel 图 / 评论 / 互动）
   const data = await page.evaluate(() => {
     const pick = (o: any): any => {
@@ -291,13 +301,16 @@ async function runCompetitor(c: { brand: string; handle: string; tenant: string 
   const tiles = await scrapeProfileTiles(page!, c.handle, MAX_POSTS_PER_BRAND);
   console.log(`\n[${c.brand}] @${c.handle}: ${tiles.length} 帖`);
   const brandState = state[c.brand] || { lastRun: '', seen: {} as Record<string, string> };
-  let wroteNew = 0, wroteBaseline = 0, skipped = 0, wrotePosts = 0;
+  let wroteNew = 0, wroteBaseline = 0, skipped = 0, wrotePosts = 0, fetchFail = 0;
 
   for (const url of tiles) {
     const code = shortcodeFromUrl(url);
     const alreadySeen = !!brandState.seen[code];
-    const post = await scrapePost(page!, url).catch(() => null);
-    if (!post) { skipped++; continue; }
+    const post = await scrapePost(page!, url).catch((e: any) => {
+      console.warn(`  [抓取失败] ${code}: ${(e && e.message) || e}`);
+      return null;
+    });
+    if (!post) { skipped++; fetchFail++; continue; }
     const hits = keywordHits(post.caption);
     const hasSku = SKU_RE.test(post.caption);
     const isNewProduct = hits.length > 0 || hasSku;
@@ -333,7 +346,11 @@ async function runCompetitor(c: { brand: string; handle: string; tenant: string 
 
   brandState.lastRun = new Date().toISOString();
   state[c.brand] = brandState;
-  console.log(`[${c.brand}] 本轮: 整帖(competitor_post)写 ${wrotePosts}, 新品写 ${wroteNew}, 基线写 ${wroteBaseline}, 跳过 ${skipped}`);
+  const seenSkip = skipped - fetchFail;
+  console.log(`[${c.brand}] 本轮: 整帖(competitor_post)写 ${wrotePosts}, 新品写 ${wroteNew}, 基线写 ${wroteBaseline}, 跳过 ${skipped}(抓取失败 ${fetchFail} / 已见过 ${seenSkip})`);
+  if (fetchFail > 0 && wrotePosts === 0) {
+    console.log(`  ⚠️ 全部 ${fetchFail} 篇详情抓取失败。最常见原因：该 Chrome profile 未登录 Instagram（详情页 /p/ 被登录墙拦），或代理不稳导致 goto 超时。上面的 [抓取失败] 行给出了每篇的真实原因。`);
+  }
 }
 
 async function writeMemory(
