@@ -26,6 +26,7 @@ const NEEDLE_SUFFIXES = [
   'RL', 'RS', 'RG', 'RT', 'RM',        // 圆针系列
   'F', 'FL',                             // 平针系列
   'M', 'M1', 'M2', 'MC', 'MT', 'MAG',   // 排针系列
+  'SEM',                                // Soft-Edge Magnum (例 4737: 1013SEM)
   'L', 'LL', 'SL',                       // 其他
 ];
 
@@ -238,6 +239,13 @@ export function runTests() {
       note: '0803RL*2',
       expected: [
         { label: '0803RL', qty: 2 },
+      ],
+    },
+    {
+      // 4737 —— 新后缀 SEM (Soft-Edge Magnum) + "*N" 行内乘子
+      note: '1013SEM*2',
+      expected: [
+        { label: '1013SEM', qty: 2 },
       ],
     },
     {
