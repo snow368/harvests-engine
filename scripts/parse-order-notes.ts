@@ -127,7 +127,7 @@ function extractLineQuantity(line: string): number | null {
  * 从一行文本中提取「后缀倍率」(x2 / ×2 / *2 / 2盒 / 两盒)
  * 用于把该行的针型号数量乘以倍率。无倍率则返回 1。
  */
-const CN_NUM = new Map<string, number>([['一', 1], ['两', 2], ['二', 2], ['三', 3], ['四', 4], ['五', 5], ['六', 6], ['七', 7], ['八', 8], ['九', 9], ['十', 10]]);
+const CN_NUM = new Map<string, number>([['一', 1], ['两', 2], ['兩', 2], ['二', 2], ['双', 2], ['三', 3], ['四', 4], ['五', 5], ['六', 6], ['七', 7], ['八', 8], ['九', 9], ['十', 10]]);
 function extractLineMultiplier(line: string): number {
   let m;
   // 阿拉伯数字: x2 / ×2 / *2 / 2盒
@@ -137,7 +137,7 @@ function extractLineMultiplier(line: string): number {
     if (!isNaN(qty) && qty > 0) return qty;
   }
   // 中文数字: 两盒 / 三盒
-  const cn = line.match(/([一二三四五六七八九十])\s*盒/);
+  const cn = line.match(/([一二三四五六七八九十两双兩])\s*盒/);
   if (cn && CN_NUM.has(cn[1])) return CN_NUM.get(cn[1])!;
   return 1;
 }
@@ -150,8 +150,8 @@ export function parseOrderNote(note: string): GiftItem[] {
   // 清理: 去掉 IG 链接、多余空格
   const cleanNote = note.replace(/https?:\/\/[^\s]+/gi, '').trim();
 
-  // 按行解析
-  const lines = cleanNote.split(/[\n\r,;、]+/).map(l => l.trim()).filter(Boolean);
+  // 按行解析 —— 真实 Shopify 备注常用 "/" 分隔不同条目（如 4735: "...1007RL / ...1009RL / 3 AES: 1003RL"）
+  const lines = cleanNote.split(/[\n\r,;、/]+/).map(l => l.trim()).filter(Boolean);
 
   for (const line of lines) {
     const lineQty = extractLineQuantity(line);
@@ -222,12 +222,8 @@ export function parseOrderNote(note: string): GiftItem[] {
 export function runTests() {
   const testCases: Array<{ note: string; expected: Array<{ label: string; qty: number }> }> = [
     {
-      note: `2Peach CON : extended cap 1007RL
-2Peach CON : extended cap 1009RL
-2Peach COG: extended cap 1011RS
-2Peach COG: extended cap 1209RM
-3 AES: 1003RL
-1AES: 0603RL`,
+      // 4735 —— 真实 Shopify 备注用 "/" 分隔条目（回归：曾因未分行被误算）
+      note: '2Peach CON : extended cap 1007RL / 2Peach CON : extended cap 1009RL / 2Peach COG: extended cap 1011RS / 2Peach COG: extended cap 1209RM / 3 AES: 1003RL / 1AES: 0603RL',
       expected: [
         { label: '1007RL', qty: 2 },
         { label: '1009RL', qty: 2 },
@@ -235,6 +231,20 @@ export function runTests() {
         { label: '1209RM', qty: 2 },
         { label: '1003RL', qty: 3 },
         { label: '0603RL', qty: 1 },
+      ],
+    },
+    {
+      // 4733 —— 纯针码 + "*N" 行内乘子
+      note: '0803RL*2',
+      expected: [
+        { label: '0803RL', qty: 2 },
+      ],
+    },
+    {
+      // 中文乘量: "两盒" → 2（曾因字符类漏 "两" 返回 1）
+      note: '1003RL两盒',
+      expected: [
+        { label: '1003RL', qty: 2 },
       ],
     },
     {
