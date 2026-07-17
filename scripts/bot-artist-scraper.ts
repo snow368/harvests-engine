@@ -1,3 +1,6 @@
+import dns from 'node:dns';
+dns.setDefaultResultOrder('ipv4first');
+
 /**
  * Artist Caption + Comment Scraper
  *
@@ -97,7 +100,7 @@ async function main() {
   console.log(`Existing captions: ${dataset.length}`);
   const doneHandles = new Set(dataset.map((d: any) => d.handle));
 
-  const browser = await chromium.connectOverCDP('http://localhost:9222');
+  const browser = await chromium.connectOverCDP('http://127.0.0.1:9222');
   const context = browser.contexts()[0];
   const page = await context.newPage();
   await page.setViewportSize({ width: 1280, height: 800 });

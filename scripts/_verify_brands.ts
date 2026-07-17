@@ -1,3 +1,6 @@
+import dns from 'node:dns';
+dns.setDefaultResultOrder('ipv4first');
+
 /**
  * Verify supply brand IG handles — check which ones exist
  * Uses CDP Chrome (port 9222)
@@ -146,7 +149,7 @@ async function main() {
   const remaining = CANDIDATES.filter(h => !done.has(h));
   console.log(`Existing: ${verified.length}, Remaining: ${remaining.length}`);
 
-  const browser = await chromium.connectOverCDP('http://localhost:9222');
+  const browser = await chromium.connectOverCDP('http://127.0.0.1:9222');
   const context = browser.contexts()[0];
   const page = await context.newPage();
 

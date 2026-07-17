@@ -1,3 +1,6 @@
+import dns from 'node:dns';
+dns.setDefaultResultOrder('ipv4first');
+
 /**
  * Backlink Tracker v1
  * ===================
@@ -19,7 +22,7 @@ const DATA_DIR = path.join(BASE_DIR, 'data');
 const DB_PATH = path.join(BASE_DIR, 'data/backlinks.db');
 
 let db: Database.Database;
-const CDP_URL = process.env.BOT_CDP_URL || 'http://localhost:9222';
+const CDP_URL = process.env.BOT_CDP_URL || 'http://127.0.0.1:9222';
 
 function initDB() {
   db = new Database(DB_PATH);

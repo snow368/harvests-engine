@@ -1,3 +1,6 @@
+import dns from 'node:dns';
+dns.setDefaultResultOrder('ipv4first');
+
 /**
  * Test — 从 JSON script tag 提取 caption + comments
  */
@@ -7,7 +10,7 @@ import { chromium } from 'playwright';
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
 async function main() {
-  const browser = await chromium.connectOverCDP('http://localhost:9222');
+  const browser = await chromium.connectOverCDP('http://127.0.0.1:9222');
   const context = browser.contexts()[0];
   const page = await context.newPage();
 

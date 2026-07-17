@@ -1,3 +1,6 @@
+import dns from 'node:dns';
+dns.setDefaultResultOrder('ipv4first');
+
 /**
  * Amazon Worker — VPS 端守护进程，轮询 Cloud API 执行 Amazon 搜索/评论抓取
  *
@@ -9,7 +12,7 @@
  *   AMAZON_BOT_TOKEN    - bot 令牌 (默认 vps-bot-secret-2024)
  *   AMAZON_POLL_INTERVAL- 轮询间隔秒数 (默认 60)
  *   AMAZON_USE_BROWSER  - 是否使用 Playwright (默认 false，设为 true 需 Chrome)
- *   AMAZON_CHROME_CDP   - Chrome CDP 地址 (默认 http://localhost:9222)
+ *   AMAZON_CHROME_CDP   - Chrome CDP 地址 (默认 http://127.0.0.1:9222)
  */
 
 import 'dotenv/config';
@@ -25,7 +28,7 @@ const API_URL = (process.env.AMAZON_API_URL || 'https://harvests-cloud-api.snow3
 const BOT_TOKEN = process.env.AMAZON_BOT_TOKEN || process.env.BOT_SECRET || 'vps-bot-secret-2024';
 const POLL_INTERVAL = Math.max(10, Number(process.env.AMAZON_POLL_INTERVAL || 60));
 const USE_BROWSER = process.env.AMAZON_USE_BROWSER === 'true';
-const CHROME_CDP = process.env.AMAZON_CHROME_CDP || 'http://localhost:9222';
+const CHROME_CDP = process.env.AMAZON_CHROME_CDP || 'http://127.0.0.1:9222';
 
 let browser: any = null;
 

@@ -1,3 +1,6 @@
+import dns from 'node:dns';
+dns.setDefaultResultOrder('ipv4first');
+
 import { chromium } from 'playwright';
 import fs from 'fs';
 import path from 'path';
@@ -12,7 +15,7 @@ const URLS = [
 const OUT = 'F:/inkflow app/InkFlow_Project/inkflow_harvests/data/generated_samples/kwadron_refs';
 fs.mkdirSync(OUT, { recursive: true });
 
-const browser = await chromium.connectOverCDP('http://localhost:9222');
+const browser = await chromium.connectOverCDP('http://127.0.0.1:9222');
 const page = await browser.contexts()[0].newPage();
 
 for (let i = 0; i < URLS.length; i++) {

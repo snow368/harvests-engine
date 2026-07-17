@@ -1,3 +1,6 @@
+import dns from 'node:dns';
+dns.setDefaultResultOrder('ipv4first');
+
 /**
  * IG Bulk Downloader — uses existing Chrome CDP session to download brand product images.
  *
@@ -12,7 +15,7 @@ import { chromium } from 'playwright';
 import fs from 'node:fs';
 import path from 'node:path';
 
-const CDP_WS = 'http://localhost:9222/json/version';
+const CDP_WS = 'http://127.0.0.1:9222/json/version';
 const FRAMES_DIR = 'data/hook_frames';
 const SCROLLS = 30;           // number of scrolls per brand
 const MAX_POSTS = 30;         // max posts to save per brand

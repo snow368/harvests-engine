@@ -1,7 +1,10 @@
+import dns from 'node:dns';
+dns.setDefaultResultOrder('ipv4first');
+
 import { chromium } from 'playwright';
 import fs from 'fs';
 
-const b = await chromium.connectOverCDP('http://localhost:9222');
+const b = await chromium.connectOverCDP('http://127.0.0.1:9222');
 const p = await b.contexts()[0].newPage();
 
 await p.goto('https://www.instagram.com/stigmarotary/', { timeout: 15000, waitUntil: 'domcontentloaded' });

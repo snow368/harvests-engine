@@ -1,8 +1,11 @@
+import dns from 'node:dns';
+dns.setDefaultResultOrder('ipv4first');
+
 /**
  * 评论测试 — 让 bot 在指定帖子下打一条评论
  *
  * 用法：
- *   set BOT_CDP_URL=http://localhost:9222
+ *   set BOT_CDP_URL=http://127.0.0.1:9222
  *   set POST_URL=https://www.instagram.com/p/xxxxx/
  *   set COMMENT_TEXT=Clean work
  *   npx tsx scripts/comment-test.ts
@@ -13,7 +16,7 @@
 
 import { chromium } from 'playwright';
 
-const CDP_URL = process.env.BOT_CDP_URL || 'http://localhost:9222';
+const CDP_URL = process.env.BOT_CDP_URL || 'http://127.0.0.1:9222';
 const POST_URL = process.env.POST_URL || '';
 const COMMENT_TEXT = process.env.COMMENT_TEXT || 'Clean work';
 

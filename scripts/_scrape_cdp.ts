@@ -1,3 +1,6 @@
+import dns from 'node:dns';
+dns.setDefaultResultOrder('ipv4first');
+
 /** IG 抓图 — 点击 tile → 弹窗截图，不关浏览器 */
 import { chromium } from 'playwright';
 import fs from 'fs';
@@ -7,7 +10,7 @@ const HANDLES = ['woohootattoo', 'maxtattooneedle', 'chiyoda_tattoo', 'stigmarot
 const FRAMES_DIR = 'F:/inkflow app/InkFlow_Project/inkflow_harvests/data/hook_frames';
 const TARGET = 30;
 
-const browser = await chromium.connectOverCDP('http://localhost:9222');
+const browser = await chromium.connectOverCDP('http://127.0.0.1:9222');
 const ctx = browser.contexts()[0];
 const page = await ctx.newPage();
 await page.setViewportSize({ width: 1280, height: 1800 });

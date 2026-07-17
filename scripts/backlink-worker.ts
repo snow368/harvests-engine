@@ -1,3 +1,6 @@
+import dns from 'node:dns';
+dns.setDefaultResultOrder('ipv4first');
+
 /**
  * Backlink Automation Worker v1
  * ==============================
@@ -15,7 +18,7 @@
  *   npx tsx scripts/backlink-worker.ts --project inkflow  # 指定项目
  *
  * 环境变量：
- *   BOT_CDP_URL=http://localhost:9222                # Chrome CDP 地址
+ *   BOT_CDP_URL=http://127.0.0.1:9222                # Chrome CDP 地址
  *   BOT_BACKLINK_QUOTA=10                            # 每次最大提交数
  */
 
@@ -423,7 +426,7 @@ async function main() {
   const isLoop = args.includes('--loop');
   const projectFilter = args.find(a => a.startsWith('--project='))?.split('=')[1];
 
-  const cdpUrl = process.env.BOT_CDP_URL || 'http://localhost:9222';
+  const cdpUrl = process.env.BOT_CDP_URL || 'http://127.0.0.1:9222';
   const quota = parseInt(process.env.BOT_BACKLINK_QUOTA || '8', 10);
 
   console.log(`╔════════════════════════════════════════╗`);
