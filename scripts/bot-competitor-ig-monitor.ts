@@ -26,14 +26,19 @@
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
 import fs from 'node:fs';
 import path from 'node:path';
+import dns from 'node:dns';
 import { fileURLToPath } from 'node:url';
 import 'dotenv/config';
+
+// Windows 上 localhost 常先解析到 IPv6(::1)，而 Chrome 的 CDP 只监听 127.0.0.1(IPv4)。
+// 这会导致 connectOverCDP 的 WebSocket 握手失败、被误报为「CDP 不可用」。强制 IPv4 优先。
+dns.setDefaultResultOrder('ipv4first');
 
 // ── 配置（与 bot-worker-real.ts 同源，方便 VPS 复用 env） ───────────────────
 const IG_BASE = (process.env.INSTAGRAM_BASE || 'https://www.instagram.com').replace(/\/+$/, '');
 const AI_CORE_BASE = (process.env.AI_CORE_BASE || 'https://harvests-ai-core-api.inkflowapp.workers.dev').replace(/\/+$/, '');
 const AI_CORE_AUTH = process.env.AI_CORE_AUTH || 'Bearer dev';
-const CDP_URL = (process.env.BOT_CDP_URL || 'http://localhost:9222').trim();
+const CDP_URL = (process.env.BOT_CDP_URL || 'http://127.0.0.1:9222').trim();
 // 本机代理（GFW 下抓 IG 必需）。如 http://127.0.0.1:7890 或 socks5://127.0.0.1:7891
 // 兼容：用户常只设 HTTPS_PROXY/HTTP_PROXY，浏览器也必须走同一代理才能抓到 IG
 const BOT_PROXY = (process.env.BOT_PROXY || '').trim();
@@ -127,8 +132,9 @@ async function launchBrowser(): Promise<{ browser: Browser; context: BrowserCont
     const page = context.pages()[0] || await context.newPage();
     console.log(`[browser] connected via CDP ${CDP_URL}`);
     return { browser, context, page, viaCdp: true };
-  } catch {
-    console.log(`[browser] CDP 不可用，回退 persistent profile ${PROFILE_DIR}`);
+  } catch (e: any) {
+    const reason = e?.message?.split('\n')[0] || e?.code || 'unknown';
+    console.log(`[browser] CDP 不可用 (${reason})，回退 persistent profile ${PROFILE_DIR}`);
     const ctxOpts: any = {
       headless: false, channel: 'chrome',
       viewport: { width: 1280, height: 900 },
