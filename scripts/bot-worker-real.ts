@@ -112,6 +112,13 @@ const BOT_DAILY_BROWSE_TARGET_NEW = Math.max(1, Number(process.env.BOT_DAILY_BRO
 const BOT_DAILY_BROWSE_TARGET_TRANSITION = Math.max(1, Number(process.env.BOT_DAILY_BROWSE_TARGET_TRANSITION || 50));
 const BOT_DAILY_BROWSE_TARGET_STABLE = Math.max(1, Number(process.env.BOT_DAILY_BROWSE_TARGET_STABLE || 80));
 
+// ── AI Core (sales_chats D1 sync for triangulation) ───────────────────
+// Bot pushes DM conversations into the sales_chats + chat_messages tables
+// so the triangulation engine can detect demand signals across sources.
+const AI_CORE_BASE = (process.env.AI_CORE_BASE || 'https://harvests-ai-core-api.inkflowapp.workers.dev').replace(/\/+$/, '');
+const AI_CORE_AUTH = process.env.AI_CORE_AUTH || 'Bearer dev';
+const AI_CORE_TENANT = process.env.AI_CORE_TENANT || 'sales';
+
 const POSITIVE_KEYWORDS = [
   'tattoo', 'tattooing', 'tattoo studio', 'tattoo shop', 'tattoo parlor', 'tattoo parlour',
   'ink', 'inked', 'blackwork', 'fineline', 'fine line', 'realism', 'traditional', 'neo traditional',
@@ -340,7 +347,7 @@ type LikeState = {
   };
   follows?: {
     byDay?: Record<string, number>;
-    byHandle?: Record<string, { followedAt?: number }>;
+    byHandle?: Record<string, { followedAt?: number; followBackDetected?: boolean; followBackDetectedAt?: number }>;
     dayCap?: { key: string; cap: number };
   };
   comments?: {
@@ -410,6 +417,42 @@ const getJson = async (path: string) => {
   try { payload = text ? JSON.parse(text) : null; } catch { payload = { raw: text }; }
   if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}: ${JSON.stringify(payload)}`);
   return payload;
+};
+
+// ── AI Core helpers (sales_chats D1 sync) ──────────────────────────────
+const aicorePost = async (path: string, body: Record<string, any>): Promise<any> => {
+  const resp = await fetch(`${AI_CORE_BASE}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: AI_CORE_AUTH },
+    body: JSON.stringify(body),
+  });
+  const text = await resp.text();
+  let payload: any = null;
+  try { payload = text ? JSON.parse(text) : null; } catch { payload = { raw: text }; }
+  if (!resp.ok) {
+    // Log but don't throw — chat sync is best-effort, never break the DM flow.
+    console.warn(`[aicore] POST ${path} FAILED ${resp.status}: ${JSON.stringify(payload).slice(0, 200)}`);
+    return null;
+  }
+  return payload;
+};
+
+/** Upsert a sales_chat + append a message. Idempotent on handle. */
+const reportDmChat = async (handle: string, role: 'agent' | 'customer', body: string, dealStage?: string) => {
+  if (!handle || !body) return;
+  const r = await aicorePost(`/${AI_CORE_TENANT}/chats`, {
+    customer_handle: handle,
+    customer_type: 'artist',
+    platform: 'instagram',
+    locale: 'en',
+    deal_stage: dealStage || 'inquiry',
+    summary: body.slice(0, 200),
+  });
+  if (r?.ok && r?.chat?.id) {
+    await aicorePost(`/${AI_CORE_TENANT}/chats/${r.chat.id}/messages`, {
+      messages: [{ role, body, created_at: new Date().toISOString() }],
+    }).catch(() => {});
+  }
 };
 
 const registerBot = async () => {
@@ -550,6 +593,31 @@ const openProfile = async (handle: string) => {
   await page.waitForTimeout(dwell);
   logBehavior('open_profile', { handle, dwellMs: dwell });
   logBehavior('open_profile_done', { handle, currentUrl: page.url() });
+
+  // ── Follow-back detection (self-learning feedback) ──
+  // Only check accounts we previously followed; detect "Follows you" →
+  // report to server + create a DM marketing task for follow-up outreach.
+  const prevFollow = likeState.follows?.byHandle?.[handle];
+  if (prevFollow?.followedAt && !prevFollow.followBackDetected) {
+    try {
+      const followsYou = await page.locator('text="Follows you"').first().isVisible({ timeout: 2000 }).catch(() => false);
+      if (followsYou) {
+        (likeState.follows!.byHandle![handle] as any).followBackDetected = true;
+        (likeState.follows!.byHandle![handle] as any).followBackDetectedAt = Date.now();
+        saveLikeState(likeState);
+        logBehavior('follow_back_detected', { handle });
+        postJson('/api/bot/follow-back-report', { targetHandle: handle, didFollowBack: true }).catch(() => {});
+        postJson('/api/automation/create-marketing-task', {
+          targetHandle: handle,
+          botId: BOT_ID,
+          category: 'industry_talk',
+          direction: 'auto_detected',
+          leadScore: 0,
+          touchCount: likeState.touches?.[handle] || 0
+        }).catch(() => {});
+      }
+    } catch {}
+  }
 };
 
 const isInvalidProfilePage = async () => {
@@ -879,16 +947,19 @@ const captureProfileFacts = async () => {
     let anchorFollowers = '';
     let anchorFollowing = '';
     try {
+      // NOTE: no named functions inside page.evaluate — esbuild keepNames would inject
+      // a browser-undefined `__name()` and crash at runtime. Inline the regex instead.
       const anchorCounts = await page.evaluate(() => {
-        const getNum = (s: string) => {
-          const m = String(s || '').match(/(\d[\d,.]*\s*[kKmM]?)/);
-          return m?.[1] || '';
-        };
+        const re = /(\d[\d,.]*\s*[kKmM]?)/;
         const fA = document.querySelector('a[href*="/followers/"]');
         const gA = document.querySelector('a[href*="/following/"]');
+        const fTitle = fA?.querySelector('span[title]')?.getAttribute('title') || '';
+        const fText = fA?.textContent || '';
+        const gTitle = gA?.querySelector('span[title]')?.getAttribute('title') || '';
+        const gText = gA?.textContent || '';
         return {
-          followers: fA ? (getNum(fA.querySelector('span[title]')?.getAttribute('title') || '') || getNum(fA.textContent || '')) : '',
-          following: gA ? (getNum(gA.querySelector('span[title]')?.getAttribute('title') || '') || getNum(gA.textContent || '')) : '',
+          followers: (fTitle.match(re)?.[1]) || (fText.match(re)?.[1]) || '',
+          following: (gTitle.match(re)?.[1]) || (gText.match(re)?.[1]) || '',
         };
       }).catch(() => null);
       if (anchorCounts) {
@@ -1752,6 +1823,264 @@ const tryLikeWithStrategy = async (handle: string, facts?: ProfileFacts, command
   return { attempted: maxLikes, liked, skippedCooldown: false, likedUrls };
 };
 
+// =====================================================================
+// DM Marketing Execution — send Instagram DMs from marketing_tasks
+// =====================================================================
+
+const executeDmTask = async (task: any): Promise<boolean> => {
+  if (!page) throw new Error('page_not_initialized');
+  const targetHandle = String(task.target_handle || '').replace(/^@/, '').trim();
+  let scriptContent = '';
+  try {
+    const parsed = typeof task.script_content === 'string' ? JSON.parse(task.script_content) : task.script_content;
+    scriptContent = parsed?.template || parsed?.content || task.script_content;
+  } catch {
+    scriptContent = String(task.script_content || '');
+  }
+  if (!targetHandle || !scriptContent) return false;
+
+  logBehavior('dm_start', { targetHandle, taskId: task.id });
+  try {
+    // Step 1: Navigate to DM new message
+    await page.goto(`${IG_BASE}/direct/new/`, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await page.waitForTimeout(jitter(2000, 4000));
+
+    // Step 2: Type target handle in search
+    const searchInput = page.locator('input[type="text"]').first();
+    await searchInput.waitFor({ timeout: 10000 }).catch(() => {});
+    await searchInput.fill('');
+    // Type slowly like a human
+    for (const char of targetHandle) {
+      await page.keyboard.type(char, { delay: jitter(60, 180) });
+    }
+    await page.waitForTimeout(jitter(1500, 3000));
+
+    // Step 3: Click the matching user result
+    const userResult = page.locator(`[role="button"]:has-text("${targetHandle}")`).first();
+    const clicked = await userResult.click({ timeout: 8000 }).then(() => true).catch(() => false);
+    if (!clicked) {
+      // Try alternative selector
+      const altResult = page.locator(`a[href="/${targetHandle}/"]`).first();
+      await altResult.click({ timeout: 5000 }).catch(() => {});
+    }
+    await page.waitForTimeout(jitter(1000, 2500));
+
+    // Step 4: Click "Chat" or "Next" button
+    const chatBtn = page.locator('button:has-text("Chat"), button:has-text("Next"), div[role="button"]:has-text("Chat")').first();
+    await chatBtn.click({ timeout: 8000 }).catch(() => {});
+    await page.waitForTimeout(jitter(2000, 3500));
+
+    // Step 5: Type message with human-like typing
+    const msgArea = page.locator('div[role="textbox"], textarea, div[contenteditable="true"]').first();
+    await msgArea.waitFor({ timeout: 10000 }).catch(() => {});
+    await msgArea.click();
+    await page.waitForTimeout(jitter(500, 1200));
+    // Type word by word with pauses
+    const words = scriptContent.split(/(\s+)/);
+    for (const word of words) {
+      await page.keyboard.type(word, { delay: jitter(40, 120) });
+      if (Math.random() < 0.15) await page.waitForTimeout(jitter(300, 800)); // occasional mid-msg pause
+    }
+    await page.waitForTimeout(jitter(800, 2000));
+
+    // Step 6: Send
+    const sendBtn = page.locator('button:has-text("Send"), button[type="submit"], div[role="button"]:has-text("Send")').first();
+    const sent = await sendBtn.click({ timeout: 8000 }).then(() => true).catch(() => false);
+    if (!sent) {
+      // Fallback: press Enter
+      await page.keyboard.press('Enter');
+      await page.waitForTimeout(1000);
+    }
+    await page.waitForTimeout(jitter(2000, 4000));
+
+    logBehavior('dm_sent', { targetHandle, taskId: task.id });
+    reportDmChat(targetHandle, 'agent', scriptContent, 'contacted').catch(() => {});
+    return true;
+  } catch (err: any) {
+    logBehavior('dm_failed', { targetHandle, taskId: task.id, error: String(err?.message || '') });
+    return false;
+  }
+};
+
+/** Check for and execute a pending DM marketing task */
+const tryExecuteDmTask = async (): Promise<boolean> => {
+  try {
+    const data = await getJson(`/api/marketing/tasks/poll?botId=${encodeURIComponent(BOT_ID)}&limit=1`);
+    const tasks: any[] = Array.isArray(data?.tasks) ? data.tasks : [];
+    if (!tasks.length) return false;
+    const task = tasks[0];
+    logBehavior('dm_task_acquired', { taskId: task.id, targetHandle: task.target_handle });
+    const success = await executeDmTask(task);
+    await postJson('/api/marketing/tasks/report', {
+      taskId: task.id,
+      status: success ? 'sent' : 'failed',
+      botId: BOT_ID
+    }).catch(() => {});
+    return success;
+  } catch (err: any) {
+    logBehavior('dm_poll_error', { error: String(err?.message || '') });
+    return false;
+  }
+};
+
+// =====================================================================
+// DM Auto-Reply — check incoming DMs, classify intent, auto-respond
+// =====================================================================
+
+const classifyIntent = (text: string): { intent: string; category: string } => {
+  const lower = String(text || '').toLowerCase();
+  // Post-purchase signals — check before generic "buy/order" to avoid false match
+  if (/\border\s*(number|[#＃]|id|no\.?|placed|confirmed|received|status|track|已下单|已付款|收到了|订单号|已收到|确认订单)|tracking|shipped|delivered|收到货|payment\s*(made|sent|done|confirm)|just\s*(ordered|paid|bought)|已经(下单|付款)|已[经]?付/i.test(lower))
+    return { intent: 'purchase_confirmed', category: 'after_sales' };
+  if (/how much|\$|price|cost|多少钱|报价|价格/i.test(lower))
+    return { intent: 'pricing', category: 'product_intro' };
+  if (/what brand|which (product|machine|ink)|推荐|suggest|型号/i.test(lower))
+    return { intent: 'product_inquiry', category: 'product_intro' };
+  if (/collab|合作|partner|wholesale|批发|代理/i.test(lower))
+    return { intent: 'collaboration', category: 'collaboration' };
+  if (/buy|purchase|want|interested|order|下单|想买|需要/i.test(lower))
+    return { intent: 'purchase', category: 'after_sales' };
+  if (/thanks|thank you|nice|great|awesome/i.test(lower))
+    return { intent: 'casual_chat', category: 'industry_talk' };
+  return { intent: 'casual_chat', category: 'industry_talk' };
+};
+
+const pickAutoReply = async (targetHandle: string, intent: string, category: string): Promise<string> => {
+  try {
+    const data = await postJson('/api/marketing/scripts/select', {
+      category,
+      intent,
+      targetHandle,
+      profileFacts: {}  // bot doesn't have profile facts at this point
+    });
+    const content = data?.selected?.content;
+    if (content) return content;
+    // Fallback: use category-appropriate template
+    const fallbacks: Record<string, string> = {
+      product_intro: `Thanks @${targetHandle}! Check our website for more details on our tattoo supplies.`,
+      collaboration: `Thanks @${targetHandle}! We'd love to explore collaboration opportunities.`,
+      industry_talk: `Thanks @${targetHandle}! Always great to connect with fellow industry pros.`,
+      after_sales: `Thanks @${targetHandle}! We're glad you're happy with our products.`,
+    };
+    return fallbacks[category] || `Thanks @${targetHandle}! We'd love to help. Feel free to ask any questions.`;
+  } catch {
+    return `Thanks @${targetHandle}! We'd love to help. Feel free to ask any questions.`;
+  }
+};
+
+// Extract the conversation partner's IG handle from the opened DM thread header.
+// Best-effort: the opened conversation pane links the partner's profile as a[href="/<handle>/"].
+// Left-side thread-list links are /direct/t/... (excluded) and our own profile is skipped.
+const extractThreadHandle = async (): Promise<string> => {
+  if (!page) return '';
+  try {
+    const selfHandle = String(ACCOUNT_IDS[0] || BOT_ID.replace('bot_', '')).toLowerCase();
+    const SKIP = new Set(['direct', 'explore', 'accounts', 'p', 'reel', 'tv', 'create', 'edit', 'settings', 'about', 'emails', 'logout', 'story']);
+    const links = page.locator('a[href^="/"]');
+    const n = await links.count();
+    for (let k = 0; k < n; k++) {
+      const href = (await links.nth(k).getAttribute('href') || '').trim();
+      const m = href.match(/^\/([a-zA-Z0-9._]{1,30})\/?$/);
+      if (m) {
+        const h = m[1].toLowerCase();
+        if (h && h !== selfHandle && !SKIP.has(h)) return h;
+      }
+    }
+  } catch {}
+  return '';
+};
+
+const checkDmReplies = async (): Promise<number> => {
+  if (!page) return 0;
+  let handled = 0;
+  try {
+    // Only check replies when no pending DM tasks
+    const data = await getJson(`/api/marketing/tasks/poll?botId=${encodeURIComponent(BOT_ID)}&limit=1`);
+    if ((data?.tasks || []).length > 0) return 0;
+
+    await page.goto(`${IG_BASE}/direct/inbox/`, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await page.waitForTimeout(jitter(3000, 5000));
+
+    const threads = page.locator('a[href*="/direct/t/"]');
+    const count = await threads.count();
+    if (count === 0) return 0;
+
+    const checkLimit = Math.min(count, 3);
+    for (let i = 0; i < checkLimit; i++) {
+      try {
+        await threads.nth(i).click();
+        await page.waitForTimeout(jitter(2000, 4000));
+
+        const msgSpan = page.locator('[role="row"] div[dir="auto"] span').last();
+        const latestText = await msgSpan.textContent().catch(() => '');
+        if (!latestText) continue;
+
+        const { intent, category } = classifyIntent(latestText);
+
+        const partnerHandle = await extractThreadHandle();
+
+        if (intent === 'purchase_confirmed') {
+          // Post-purchase: send thank-you directly, mark as converted (no marketing script)
+          const msg = `Thank you for your order @${partnerHandle || ''}! We appreciate your business. If you have any questions about your order, feel free to ask.`;
+          const input = page.locator('div[role="textbox"]').first();
+          await input.click();
+          await page.waitForTimeout(jitter(500, 1200));
+          for (const char of msg) {
+            await page.keyboard.type(char, { delay: jitter(30, 90) });
+            if (Math.random() < 0.1) await page.waitForTimeout(jitter(200, 600));
+          }
+          await page.waitForTimeout(jitter(800, 1800));
+          await page.keyboard.press('Enter');
+          await page.waitForTimeout(jitter(1500, 3000));
+          handled++;
+          logBehavior('dm_purchase_confirmed', { targetHandle: partnerHandle, text: latestText.slice(0, 80) });
+          reportDmChat(partnerHandle, 'customer', latestText, 'won').catch(() => {});
+          if (partnerHandle) {
+            postJson('/api/marketing/tasks/mark-converted', { targetHandle: partnerHandle }).catch(() => {});
+            logBehavior('dm_converted_reported', { targetHandle: partnerHandle, source: 'dm_keyword' });
+          }
+        } else {
+          // Normal auto-reply flow
+          const reply = await pickAutoReply(partnerHandle, intent, category);
+          const input = page.locator('div[role="textbox"]').first();
+          await input.click();
+          await page.waitForTimeout(jitter(500, 1200));
+          for (const char of reply) {
+            await page.keyboard.type(char, { delay: jitter(30, 90) });
+            if (Math.random() < 0.1) await page.waitForTimeout(jitter(200, 600));
+          }
+          await page.waitForTimeout(jitter(800, 1800));
+          await page.keyboard.press('Enter');
+          await page.waitForTimeout(jitter(1500, 3000));
+          handled++;
+          logBehavior('dm_reply_sent', { intent, category, targetHandle: partnerHandle });
+          // Sync incoming customer message + agent auto-reply to sales_chats
+          if (partnerHandle) {
+            reportDmChat(partnerHandle, 'customer', latestText).catch(() => {});
+            reportDmChat(partnerHandle, 'agent', reply).catch(() => {});
+          }
+
+          // Report "replied" so the Worker flips the lead's marketing_task.
+          // No-op on the Worker side if this handle has no engaged task.
+          if (partnerHandle) {
+            postJson('/api/marketing/tasks/report', {
+              targetHandle: partnerHandle,
+              status: 'replied',
+              botId: BOT_ID
+            }).catch(() => {});
+            logBehavior('dm_replied_reported', { targetHandle: partnerHandle });
+          }
+        }
+      } catch (err: any) {
+        logBehavior('dm_reply_error', { i, err: String(err?.message || '') });
+      }
+    }
+  } catch (err: any) {
+    logBehavior('dm_check_error', { err: String(err?.message || '') });
+  }
+  return handled;
+};
+
 const executeCommand = async (command: CommandPayload) => {
   const commandId = command.id;
   const handle = String(command.artistHandle || '').replace(/^@/, '').trim();
@@ -1851,9 +2180,20 @@ const executeCommand = async (command: CommandPayload) => {
   logBehavior('task_done', { commandId, handle, mode: execMode });
 };
 
+let dmReplyTick = 0;
 const pollLoop = async () => {
   while (running) {
     try {
+      // ── DM outreach: cheap task poll every cycle; inbox scan throttled ──
+      try {
+        const didDm = await tryExecuteDmTask();
+        if (!didDm) {
+          dmReplyTick = (dmReplyTick + 1) % 3;
+          if (dmReplyTick === 0) await checkDmReplies();
+        }
+      } catch {}
+      await sleep(jitter(1500, 3500));
+
       const data = await getJson(`/api/automation/poll?botId=${encodeURIComponent(BOT_ID)}&limit=${POLL_LIMIT}`);
       const commands: CommandPayload[] = Array.isArray(data?.commands) ? data.commands : [];
       if (!commands.length) {
