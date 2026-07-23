@@ -1,0 +1,35 @@
+{
+  "ourBrand": "peach",
+  "competitorBrands": [
+    "kwadron", "cheyennetattoo", "fkirons", "bishoprotary", "dragonhawktattoo",
+    "stigmarotary", "workhorseirons", "masttattoo", "solongtattoo", "needlejig",
+    "blackclawtattoo", "criticaltattoo", "eikondevice",
+    "worldfamousink", "eternalink", "solidinktattoo", "radiantcolorsink",
+    "kurosumi_ink", "wickedink", "intenzetattooink",
+    "hkmachines", "zeus_tattoo_machines", "wand_tattoo", "inkmachines_official",
+    "tatsoul", "painfulpleasures", "bnbtattoo", "truetattoosupply",
+    "fytsupplies", "papatattoosupply", "mavericktattoomercantile",
+    "disruptivetattoosupply", "goodguysupply", "berlintattoosupply",
+    "tattoogoo", "drmpickle", "madrabbit", "recoverytattoo", "hustlebutter",
+    "zoraypt", "inkintattoosupply", "inksoultattoosupply"
+  ],
+  "blockWords": [
+    "scam", "fake", "trash", "worst", "horrible", "stupid", "hate", "refund",
+    "complaint", "sucks", "garbage", "useless", "avoid", "ripoff", "fraud",
+    "shit", "fuck", "damn", "crap", "idiot", "scumbag", "lazy", "ugly",
+    "terrible", "awful", "disappointed", "broken", "defective", "cheap",
+    "knock off", "knockoff", "counterfeit", "don't buy", "do not buy"
+  ],
+  "spamSignals": [
+    "link in bio", "check my bio", "check bio", "dm me", "dm us", "follow me",
+    "follow for", "free follow", "giveaway", "promo code", "discount code",
+    "linktr.ee", "bit.ly", "collab?", "free shipping", "use code", "click here",
+    "shop now", "buy now", "paypal", "venmo", "cashapp"
+  ],
+  "minLen": 8,
+  "maxLen": 280,
+  "minLikes": 5,
+  "rejectAllCapsRatio": 0.6,
+  "rejectUrls": true,
+  "llmFitCheck": false
+}

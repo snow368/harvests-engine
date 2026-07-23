@@ -27,6 +27,7 @@ const BRANDS = [
 ];
 
 const DATA_FILE = 'data/brand_captions_dataset.json';
+const MIN_LIKES = parseInt(process.env.MIN_LIKES || '5', 10); // 只抓高赞留言, 提质
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
 function categorizeCaption(text: string): string {
@@ -141,6 +142,8 @@ async function main() {
           let comments: any[] = [];
           try {
             comments = await page.evaluate(EXTRACT_COMMENTS_FN);
+            // 只保留高赞留言 (提质 + 与 build-dm-scripts 的 minLikes 对齐)
+            if (MIN_LIKES > 0) comments = comments.filter(c => (Number(c.likes) || 0) >= MIN_LIKES);
           } catch {}
 
           dataset.push({
