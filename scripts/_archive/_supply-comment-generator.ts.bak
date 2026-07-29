@@ -1,0 +1,377 @@
+/**
+ * Supply 评论生成器 — 模仿品牌 IG 口吻回复纹身师帖子
+ * 用 brand_captions_dataset.json 做 few-shot 样本
+ * 支持截图 + Gemini Vision 识别图案
+ * 调用 DeepSeek 生成评论
+ */
+import fs from 'node:fs';
+import path from 'node:path';
+import 'dotenv/config';
+import { chromium } from 'playwright';
+
+const DEEPSEEK_API_KEY = (process.env.DEEPSEEK_API_KEY || '').trim();
+const DEEPSEEK_BASE = 'https://api.deepseek.com/v1';
+const GEMINI_API_KEY = (process.env.GEMINI_API_KEY || '').trim();
+
+const BRAND_DATASET_FILE = 'data/brand_captions_dataset.json';
+
+const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+
+interface BrandPost {
+  brand: string;
+  content: string;
+  category: string;
+  comments: Array<{ username: string; text: string; likes: number }>;
+}
+
+// ─── Brand few-shot samples ─────────────────────────
+
+function loadBrandDataset(): BrandPost[] {
+  if (!fs.existsSync(BRAND_DATASET_FILE)) return [];
+  try { return JSON.parse(fs.readFileSync(BRAND_DATASET_FILE, 'utf8')); }
+  catch { return []; }
+}
+
+function pickFewShot(brand: string, count = 3): BrandPost[] {
+  const all = loadBrandDataset();
+  const brandPosts = all.filter(p => p.brand === brand);
+  const shuffled = [...brandPosts].sort(() => Math.random() - 0.5);
+  return shuffled.slice(0, count);
+}
+
+// ─── Screenshot via Chrome CDP ──────────────────────
+
+async function capturePostScreenshot(postUrl: string): Promise<{ screenshotB64: string; pageCaption: string } | null> {
+  let browser;
+  try {
+    browser = await chromium.connectOverCDP('http://localhost:9222');
+    const context = browser.contexts()[0];
+    const page = await context.newPage();
+    await page.setViewportSize({ width: 390, height: 800 }); // phone-like view
+
+    await page.goto(postUrl, { waitUntil: 'domcontentloaded', timeout: 25000 });
+    await sleep(3000);
+
+    // Get the post caption from the page
+    const pageCaption = await page.evaluate(() => {
+      const scripts = document.querySelectorAll('script[type="application/json"]');
+      for (const s of scripts) {
+        const t = s.textContent || '';
+        if (!t.includes('xdt_api__v1__media__shortcode__web_info')) continue;
+        try {
+          const d = JSON.parse(t);
+          const raw = JSON.stringify(d);
+          const m = raw.match(/"text":"((?:[^"\\]|\\.)*)"/);
+          if (m) return m[1].replace(/\\n/g, ' ');
+        } catch {}
+        break;
+      }
+      return '';
+    });
+
+    // Take screenshot of the post area (roughly the top half)
+    const screenshotB64 = await page.screenshot({ type: 'png', fullPage: false });
+
+    await page.close();
+    return { screenshotB64: screenshotB64.toString('base64'), pageCaption };
+  } catch (err) {
+    console.error(`[capturePostScreenshot] error: ${(err as Error)?.message?.slice(0, 80)}`);
+    return null;
+  } finally {
+    if (browser) try { await browser.close(); } catch {}
+  }
+}
+
+// ─── Gemini Vision analysis ─────────────────────────
+
+async function analyzeImage(base64Image: string): Promise<string | null> {
+  if (!GEMINI_API_KEY) return null;
+
+  try {
+    const resp = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{
+            parts: [
+              {
+                text: 'Describe this tattoo post image briefly (2-3 sentences). Focus on: tattoo style, subject/design (e.g. snake, rose, skull, geometry, portrait, lettering, etc.), colors (black/grey vs color), technique quality visible. If there are multiple photos, describe the main tattoo image. Do NOT speculate about body parts or the artist. Output plain text only, no markdown.'
+              },
+              {
+                inline_data: {
+                  mime_type: 'image/png',
+                  data: base64Image,
+                },
+              },
+            ],
+          }],
+        }),
+      }
+    );
+
+    if (!resp.ok) {
+      const err = await resp.text().catch(() => '');
+      console.error(`[Gemini Vision] ${resp.status}: ${err.slice(0, 100)}`);
+      return null;
+    }
+
+    const data: any = await resp.json();
+    const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+    return text || null;
+  } catch (err) {
+    console.error(`[Gemini Vision] error: ${(err as Error)?.message?.slice(0, 80)}`);
+    return null;
+  }
+}
+
+// ─── Prompt building ────────────────────────────────
+
+function buildPrompt(
+  brand: string,
+  artistHandle: string,
+  postCaption: string,
+  visualDescription: string | null,
+  postCategory: string,
+  style: string,
+): string {
+  const examples = pickFewShot(brand, 3);
+
+  const fewShotBlock = examples.length > 0
+    ? `Here are examples of ${brand}'s own brand voice (from their IG captions):\n${examples.map((ex, i) =>
+        `\nExample ${i + 1}:\nCaption: "${(ex.content || '').slice(0, 180)}"\nCategory: ${ex.category}`
+      ).join('')}`
+    : '';
+
+  const visualBlock = visualDescription
+    ? `The actual tattoo in the post looks like: ${visualDescription}`
+    : '';
+
+  const styleGuides: Record<string, string> = {
+    technical: `Comment style: PROFESSIONAL CRAFTSMANSHIP
+- Focus on technique: linework, shading, saturation, contrast, composition
+- Sound like a knowledgeable industry professional
+- Mention specific technical aspects you notice from the caption/context`,
+    praise: `Comment style: SHORT ENTHUSIASTIC PRAISE
+- Quick, energetic compliment
+- 4-15 words, punchy
+- Sound genuinely excited, like "Beautiful work! 🔥" or "This is stunning 🔥"`,
+    engagement: `Comment style: ENGAGEMENT QUESTION
+- Ask a natural question about the work
+- Examples: "How many hours did this take?", "What colors did you use?", "What machine did you run this with?"
+- Creates conversation and boosts engagement
+- Can include a compliment before the question`,
+    design_ref: `Comment style: DESIGN-FOCUSED
+- Reference the specific tattoo subject/design if mentioned in the caption
+- Example: if caption says "snake and rose" → "The contrast between the soft rose and sharp snake scales is incredible 🔥"
+- If caption doesn't describe the subject, fall back to technical style instead`,
+  };
+
+  const styleGuide = styleGuides[style] || styleGuides.technical;
+
+  return `You are commenting on a tattoo artist's Instagram post as ${brand}, a tattoo supply brand on Instagram.
+
+Artist: @${artistHandle}
+Post caption: "${(postCaption || '').slice(0, 300)}"
+Post category: ${postCategory || 'general'}
+
+${visualBlock}
+
+${fewShotBlock}
+
+Generate a natural, authentic comment from ${brand} on this artist's tattoo.
+
+${styleGuide}
+
+General rules:
+- Read the CAPTION TEXT carefully — if the artist describes their tattoo design (e.g. "snake and rose", "lion portrait"), you CAN reference that subject naturally
+- If the caption does NOT describe the subject, stick to technique/execution comments only (don't guess)
+- If the post mentions ${brand} supplies, acknowledge that when relevant
+- 6-30 words
+- Include exactly 1 relevant emoji (can be 0 for engagement questions)
+- NEVER sound like a bot, sales pitch, or generic brand reply
+- NEVER say "DM us", "click link in bio", "check out our page"
+- Sound human — like a real brand rep who genuinely appreciates tattoo art
+
+Return ONLY valid JSON: {"text": "your comment", "brand": "${brand}", "style": "${style}"}`;
+}
+
+// ─── DeepSeek call ──────────────────────────────────
+
+const callDeepSeek = async (prompt: string): Promise<string> => {
+  const resp = await fetch(`${DEEPSEEK_BASE}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${DEEPSEEK_API_KEY}`,
+    },
+    body: JSON.stringify({
+      model: 'deepseek-chat',
+      messages: [
+        { role: 'system', content: 'You generate Instagram comments for tattoo supply brands. You output valid JSON only.' },
+        { role: 'user', content: prompt },
+      ],
+      temperature: 0.85,
+      max_tokens: 120,
+      top_p: 0.95,
+    }),
+  });
+
+  if (!resp.ok) {
+    const err = await resp.text().catch(() => '');
+    throw new Error(`DeepSeek API ${resp.status}: ${err.slice(0, 200)}`);
+  }
+
+  const data: any = await resp.json();
+  return data?.choices?.[0]?.message?.content || '';
+};
+
+const safeJsonParse = (text: string, fallback: any) => {
+  try {
+    const cleaned = text.replace(/```json\n?|\n?```/g, '').trim();
+    return JSON.parse(cleaned);
+  } catch {
+    return fallback;
+  }
+};
+
+// ─── Public API ─────────────────────────────────────
+
+export type SupplyCommentInput = {
+  brand: string;
+  artistHandle: string;
+  postUrl?: string;
+  postCaption?: string;
+  postCategory?: string;
+  style?: string;
+};
+
+export type SupplyCommentResult = {
+  text: string;
+  brand: string;
+  style: string;
+  visionUsed?: boolean;
+};
+
+const STYLE_WEIGHTS: [string, number][] = [
+  ['technical', 0.30],
+  ['praise', 0.30],
+  ['engagement', 0.20],
+  ['design_ref', 0.20],
+];
+
+function pickStyle(forced?: string): string {
+  if (forced && ['technical','praise','engagement','design_ref'].includes(forced)) return forced;
+  const r = Math.random();
+  let acc = 0;
+  for (const [style, weight] of STYLE_WEIGHTS) {
+    acc += weight;
+    if (r <= acc) return style;
+  }
+  return 'technical';
+}
+
+export const generateSupplyComment = async (input: SupplyCommentInput): Promise<SupplyCommentResult> => {
+  if (!DEEPSEEK_API_KEY) {
+    throw new Error('DEEPSEEK_API_KEY not set');
+  }
+  if (!input.brand || !input.artistHandle) {
+    throw new Error('brand and artistHandle required');
+  }
+
+  const style = pickStyle(input.style);
+
+  let visualDescription: string | null = null;
+  let visionUsed = false;
+  let caption = input.postCaption || '';
+
+  if (input.postUrl) {
+    const capture = await capturePostScreenshot(input.postUrl);
+    if (capture) {
+      if (capture.pageCaption && capture.pageCaption.length > 5) {
+        caption = capture.pageCaption;
+      }
+      visualDescription = await analyzeImage(capture.screenshotB64);
+      visionUsed = !!visualDescription;
+    }
+  }
+
+  const prompt = buildPrompt(
+    input.brand,
+    input.artistHandle,
+    caption,
+    visualDescription,
+    input.postCategory || 'general',
+    style,
+  );
+
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const raw = await callDeepSeek(prompt);
+      const parsed = safeJsonParse(raw, { text: raw.slice(0, 100), brand: input.brand });
+
+      let text = String(parsed.text || '').trim();
+      text = text.replace(/^(here's|here is|sure|okay|of course|absolutely)[,:!. ]+/i, '');
+      text = text.slice(0, 150);
+
+      if (text && text.length >= 3) {
+        return { text, brand: input.brand, style, visionUsed };
+      }
+    } catch {
+      // retry
+    }
+  }
+
+  // Fallback
+  const fallbacks: Record<string, string[]> = {
+    default: ['Beautiful work, love seeing artists push the craft 🔥', 'Clean execution, respect the dedication to the craft 🖤', 'Really nice work, appreciate the detail here 🔥'],
+    kwadron: ['Love seeing Kwadron ink in action — clean work 🔥'],
+    fkirons: ['Beautiful work with FK Irons — that machine is built for this 🔥'],
+    bishoprotary: ['Stunning work with Bishop — quality tools for quality art 🔥'],
+    eternalink: ['Eternal Ink colors really pop here, awesome work 🔥'],
+    eikondevice: ['Smooth work with Eikon Device — love the precision 🖤'],
+    fytsupplies: ['Great work with FYT supplies, keep killing it 🔥'],
+  };
+  const fbList = fallbacks[input.brand] || fallbacks.default;
+  return { text: fbList[Math.floor(Math.random() * fbList.length)], brand: input.brand, style, visionUsed: false };
+};
+
+// ─── CLI test ───────────────────────────────────────
+
+async function main() {
+  const args = process.argv.slice(2);
+  const brand = args[0] || 'kwadron';
+  const explicitUrl = args[1] || '';
+
+  let artistHandle = 'test_artist';
+  let postCaption = '';
+  let postCategory = '';
+  let postUrl = explicitUrl || undefined;
+
+  // If no explicit URL, try to pick from dataset
+  const artistFile = 'data/artist_captions_dataset.json';
+  if (fs.existsSync(artistFile)) {
+    try {
+      const artistData = JSON.parse(fs.readFileSync(artistFile, 'utf8'));
+      const relevant = artistData.filter((p: any) =>
+        Array.isArray(p.brands) && p.brands.map((b: string) => b.toLowerCase()).includes(brand.toLowerCase())
+      );
+      const pick = relevant.length > 0
+        ? relevant[Math.floor(Math.random() * relevant.length)]
+        : artistData[Math.floor(Math.random() * artistData.length)];
+      artistHandle = pick.handle;
+      postCaption = (pick.content || '').slice(0, 200);
+      postCategory = pick.category || 'general';
+      if (!postUrl && pick.postUrl) postUrl = pick.postUrl;
+    } catch {}
+  }
+
+  console.log(`[${brand}] @${artistHandle} ${postUrl ? postUrl : ''}`);
+  const result = await generateSupplyComment({ brand, artistHandle, postCaption, postCategory, postUrl });
+  console.log(`[${result.style}] ${result.visionUsed ? '✅Vision ' : ''}${result.text}`);
+}
+
+if (process.argv[1]?.includes('supply-comment-generator')) {
+  main().catch(e => { console.error('Fatal:', e); process.exit(1); });
+}

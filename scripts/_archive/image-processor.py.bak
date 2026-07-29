@@ -1,0 +1,403 @@
+"""
+Image Processor — content-pipeline 的图片处理模块
+支持多套视觉模板
+
+调用: python image-processor.py --input <path> --output <path> [options]
+
+功能:
+  1. 抠图 (rembg) — 去背景
+  2. 换背景 — 纯色/渐变/纹理
+  3. 加文字 — 标题 + 底部文案
+  4. 多套模板 — spotlight / minimal / magazine / tagged / dark_luxury
+"""
+import argparse
+import sys
+import os
+import io
+import math
+from PIL import Image, ImageDraw, ImageFont
+
+sys.stdout.reconfigure(encoding='utf-8')
+
+parser = argparse.ArgumentParser(description='Image processor for content pipeline')
+parser.add_argument('--input', required=True, help='Input image path')
+parser.add_argument('--output', required=True, help='Output image path')
+parser.add_argument('--bg-color', default='1a1a23', help='Background color (hex)')
+parser.add_argument('--bg-gradient', default='', help='Gradient: top_color-bottom_color')
+parser.add_argument('--title', default='', help='Title text overlay')
+parser.add_argument('--subtitle', default='', help='Subtitle text')
+parser.add_argument('--footer', default='', help='Footer text')
+parser.add_argument('--brand', default='', help='Brand name watermark')
+parser.add_argument('--size', default='1080x1080', help='Output size WxH')
+parser.add_argument('--template', default='spotlight', choices=['spotlight', 'minimal', 'magazine', 'tagged', 'dark_luxury'],
+                    help='Visual template')
+parser.add_argument('--no-rembg', action='store_true', help='Skip background removal')
+parser.add_argument('--padding', type=int, default=60, help='Padding around product')
+parser.add_argument('--accent-color', default='', help='Accent color for template (hex)')
+args = parser.parse_args()
+
+size = tuple(map(int, args.size.split('x')))
+W, H = size
+
+FONT_DIR = 'C:/Windows/Fonts'
+
+
+def hex_to_rgb(h: str):
+    h = h.lstrip('#')
+    return tuple(int(h[i:i+2], 16) for i in (0, 2, 4))
+
+
+def try_font(size_px, bold=False):
+    candidates = [
+        f'{FONT_DIR}/arial.ttf',
+        f'{FONT_DIR}/arialbd.ttf',
+        f'{FONT_DIR}/msyh.ttc',
+        f'{FONT_DIR}/msyhbd.ttc',
+        f'{FONT_DIR}/Impact.ttf',
+        f'{FONT_DIR}/segoeui.ttf',
+        f'{FONT_DIR}/segoeuib.ttf',
+        f'{FONT_DIR}/segoeuil.ttf',     # light
+        f'{FONT_DIR}/segoeuisb.ttf',    # semibold
+        f'{FONT_DIR}/calibri.ttf',
+        f'{FONT_DIR}/calibrib.ttf',
+        f'{FONT_DIR}/consola.ttf',
+    ]
+    if bold:
+        candidates = [c for c in candidates if 'bd' in c.lower() or 'b.' in c.lower()] + candidates
+    for fp in candidates:
+        if os.path.exists(fp):
+            try:
+                return ImageFont.truetype(fp, size_px)
+            except:
+                pass
+    return ImageFont.load_default()
+
+
+def text_size(text, font):
+    bbox = font.getbbox(text) if hasattr(font, 'getbbox') else font.getbbox(text)
+    return (bbox[2] - bbox[0], bbox[3] - bbox[1])
+
+
+def draw_centered_text(draw, text, y, font, color, max_w=None, shadow=True):
+    tw, th = text_size(text, font)
+    if max_w and tw > max_w:
+        # scale down font
+        ratio = max_w / tw
+        new_size = max(12, int(font.size * ratio))
+        font = try_font(new_size, 'bd' in str(font.path).lower() if hasattr(font, 'path') else False)
+        tw, th = text_size(text, font)
+    x = (W - tw) // 2
+    if shadow:
+        draw.text((x + 2, y + 2), text, font=font, fill=(0, 0, 0, 140))
+    draw.text((x, y), text, font=font, fill=color)
+
+
+def draw_right_text(draw, text, x_right, y, font, color, shadow=True):
+    tw, th = text_size(text, font)
+    x = x_right - tw
+    if shadow:
+        draw.text((x + 1, y + 1), text, font=font, fill=(0, 0, 0, 120))
+    draw.text((x, y), text, font=font, fill=color)
+
+
+def draw_left_text(draw, text, x, y, font, color, shadow=True):
+    if shadow:
+        draw.text((x + 1, y + 1), text, font=font, fill=(0, 0, 0, 120))
+    draw.text((x, y), text, font=font, fill=color)
+
+
+def draw_line(draw, x1, y1, x2, y2, color, width=2):
+    draw.line([(x1, y1), (x2, y2)], fill=color, width=width)
+
+
+# ─── Load product image ──────────────────────────────────────
+def load_product(path):
+    if not args.no_rembg:
+        from rembg import remove
+        with open(path, 'rb') as f:
+            img_data = f.read()
+        img = Image.open(io.BytesIO(remove(img_data))).convert('RGBA')
+    else:
+        img = Image.open(path).convert('RGBA')
+    return img
+
+
+def create_gradient_bg(top_color, bot_color):
+    bg = Image.new('RGBA', (W, H), (0, 0, 0, 0))
+    top_rgb = hex_to_rgb(top_color)
+    bot_rgb = hex_to_rgb(bot_color)
+    for y in range(H):
+        r = int(top_rgb[0] + (bot_rgb[0] - top_rgb[0]) * y / H)
+        g = int(top_rgb[1] + (bot_rgb[1] - top_rgb[1]) * y / H)
+        b = int(top_rgb[2] + (bot_rgb[2] - top_rgb[2]) * y / H)
+        for x in range(W):
+            bg.putpixel((x, y), (r, g, b, 255))
+    return bg
+
+
+def create_solid_bg(color):
+    rgb = hex_to_rgb(color)
+    return Image.new('RGBA', (W, H), (*rgb, 255))
+
+
+# ─── Template: Spotlight (current default) ───────────────────
+def template_spotlight(product):
+    if args.bg_gradient:
+        parts = args.bg_gradient.split('-')
+        bg = create_gradient_bg(parts[0], parts[1] if len(parts) > 1 else parts[0])
+    else:
+        bg = create_solid_bg(args.bg_color)
+    draw = ImageDraw.Draw(bg)
+
+    # Product centered
+    max_w = W - args.padding * 2
+    max_h = H - args.padding * 2 - 140
+    p = product.copy()
+    p.thumbnail((max_w, max_h), Image.LANCZOS)
+    px = (W - p.width) // 2
+    py = (H - p.height) // 2 - 30
+    bg.paste(p, (px, py), p)
+
+    # Title
+    if args.title:
+        fnt = try_font(50, bold=True)
+        draw_centered_text(draw, args.title, 40, fnt, (255, 255, 255, 245))
+
+    # Footer
+    if args.footer:
+        fnt = try_font(36)
+        draw_centered_text(draw, args.footer, H - 70, fnt, (200, 200, 200, 200))
+
+    # Brand
+    if args.brand:
+        fnt = try_font(28)
+        draw_right_text(draw, args.brand, W - args.padding, H - 48, fnt, (150, 150, 150, 180))
+
+    return bg
+
+
+# ─── Template: Minimal ───────────────────────────────────────
+def template_minimal(product):
+    bg_color = args.bg_color if not args.bg_gradient else 'f5f5f5'
+    bg = create_solid_bg(bg_color)
+    draw = ImageDraw.Draw(bg)
+
+    # Subtle border
+    border_color = hex_to_rgb('e0e0e0')
+    draw.rectangle([10, 10, W-11, H-11], outline=border_color, width=1)
+
+    # Product centered, larger
+    max_w = W - args.padding * 2 - 80
+    max_h = H - args.padding * 2 - 100
+    p = product.copy()
+    p.thumbnail((max_w, max_h), Image.LANCZOS)
+    px = (W - p.width) // 2
+    py = (H - p.height) // 2 - 20
+    bg.paste(p, (px, py), p)
+
+    # Title — thin, small, dark
+    if args.title:
+        fnt = try_font(32)
+        draw_centered_text(draw, args.title, 35, fnt, (50, 50, 50, 230), shadow=False)
+
+    # Subtitle
+    if args.subtitle:
+        fnt = try_font(22)
+        draw_centered_text(draw, args.subtitle, 75, fnt, (120, 120, 120, 200), shadow=False)
+
+    # Brand — bottom center, subtle
+    if args.brand:
+        fnt = try_font(22)
+        draw_centered_text(draw, args.brand, H - 45, fnt, (160, 160, 160, 180), shadow=False)
+
+    # Footer
+    if args.footer:
+        fnt = try_font(24)
+        draw_centered_text(draw, args.footer, H - 75, fnt, (100, 100, 100, 160), shadow=False)
+
+    return bg
+
+
+# ─── Template: Magazine ──────────────────────────────────────
+def template_magazine(product):
+    split_y = H * 40 // 100  # 40/60 split
+    accent = args.accent_color or '1a1a23'
+
+    # Split: top colored, bottom white
+    top_bg = create_solid_bg(accent)
+    bot_bg = create_solid_bg('ffffff')
+    bg = Image.new('RGBA', (W, H), (0, 0, 0, 0))
+    bg.paste(top_bg.crop((0, 0, W, split_y)), (0, 0))
+    bg.paste(bot_bg.crop((0, split_y, W, H)), (0, split_y))
+    draw = ImageDraw.Draw(bg)
+
+    # Divider line
+    line_color = hex_to_rgb(accent)
+    draw.line([(60, split_y), (W-60, split_y)], fill=(*line_color, 80), width=3)
+
+    # Accent bar
+    bar_color = hex_to_rgb('e63946')
+    draw.rectangle([(W//2-30, split_y-4), (W//2+30, split_y+4)], fill=(*bar_color, 255))
+
+    # Title on colored section
+    if args.title:
+        fnt = try_font(52, bold=True)
+        draw_centered_text(draw, args.title, 50, fnt, (255, 255, 255, 250))
+
+    if args.subtitle:
+        fnt = try_font(28)
+        draw_centered_text(draw, args.subtitle, 115, fnt, (200, 200, 200, 220))
+
+    # Product on white section
+    avail_h = H - split_y - args.padding * 2
+    max_w = W - args.padding * 4
+    p = product.copy()
+    p.thumbnail((max_w, min(avail_h, max_w)), Image.LANCZOS)
+    px = (W - p.width) // 2
+    py = split_y + (H - split_y - p.height) // 2
+    bg.paste(p, (px, py), p)
+
+    # Brand bottom
+    if args.brand:
+        fnt = try_font(24)
+        draw_centered_text(draw, args.brand, H - 40, fnt, (150, 150, 150, 180), shadow=False)
+
+    if args.footer:
+        fnt = try_font(22)
+        draw_centered_text(draw, args.footer, H - 70, fnt, (180, 180, 180, 180), shadow=False)
+
+    return bg
+
+
+# ─── Template: Tagged (ecommerce style) ──────────────────────
+def template_tagged(product):
+    bg = create_solid_bg(args.bg_color if args.bg_color != '1a1a23' else 'ffffff')
+    draw = ImageDraw.Draw(bg)
+
+    # Product on left side
+    max_w = W // 2 - args.padding
+    max_h = H - args.padding * 3 - 80
+    p = product.copy()
+    p.thumbnail((max_w, max_h), Image.LANCZOS)
+    px = args.padding + 20
+    py = (H - p.height) // 2 - 20
+    bg.paste(p, (px, py), p)
+
+    # Tags on right side
+    tag_x = W // 2 + 10
+    accent = args.accent_color or 'e63946'
+    accent_rgb = hex_to_rgb(accent)
+
+    if args.title:
+        fnt = try_font(42, bold=True)
+        draw_left_text(draw, args.title, tag_x, 200, fnt, (30, 30, 30, 240), shadow=False)
+
+    if args.subtitle:
+        fnt = try_font(26)
+        draw_left_text(draw, args.subtitle, tag_x, 260, fnt, (100, 100, 100, 220), shadow=False)
+
+    # Price tag badge
+    price = args.subtitle or ''
+    if price:
+        badge_y = 320
+        badge_text = f'  {price}  '
+        fnt_badge = try_font(30, bold=True)
+        tw, th = text_size(badge_text, fnt_badge)
+        badge_pad = 20
+        draw.rounded_rectangle(
+            [(tag_x, badge_y), (tag_x + tw + badge_pad*2, badge_y + th + 16)],
+            radius=8, fill=(*accent_rgb, 255))
+        draw_left_text(draw, badge_text, tag_x + badge_pad, badge_y + 8,
+                       fnt_badge, (255, 255, 255, 255), shadow=False)
+
+    # CTA
+    if args.footer:
+        fnt = try_font(28, bold=True)
+        cta_y = H - 120
+        draw_left_text(draw, args.footer, tag_x, cta_y, fnt, accent_rgb, shadow=False)
+
+    # Brand bottom-right
+    if args.brand:
+        fnt = try_font(24)
+        draw_right_text(draw, args.brand, W - args.padding, H - 45, fnt, (180, 180, 180, 180), shadow=False)
+
+    return bg
+
+
+# ─── Template: Dark Luxury ───────────────────────────────────
+def template_dark_luxury(product):
+    bg = create_solid_bg('0d0d0d')
+    draw = ImageDraw.Draw(bg)
+
+    # Subtle radial gradient overlay (vignette)
+    vignette = Image.new('RGBA', (W, H), (0, 0, 0, 0))
+    v_draw = ImageDraw.Draw(vignette)
+    center_x, center_y = W//2, H//2
+    max_radius = int(math.sqrt(W*W + H*H) // 2)
+    for r in range(max_radius, 0, -1):
+        alpha = int(80 * (1 - r / max_radius))
+        v_draw.ellipse([(center_x - r, center_y - r), (center_x + r, center_y + r)],
+                       fill=(20, 20, 20, alpha))
+    bg.paste(vignette, (0, 0), vignette)
+
+    # Gold accent line top
+    gold_rgb = hex_to_rgb(args.accent_color or 'c9a94e')
+    draw_line(draw, 100, 55, W-100, 55, (*gold_rgb, 180), 1)
+    draw_line(draw, 100, 58, W-100, 58, (*gold_rgb, 60), 1)
+
+    # Product center with glow
+    max_w = W - args.padding * 3
+    max_h = H - args.padding * 3 - 120
+    p = product.copy()
+    p.thumbnail((max_w, max_h), Image.LANCZOS)
+    px = (W - p.width) // 2
+    py = (H - p.height) // 2 - 20
+    bg.paste(p, (px, py), p)
+
+    # Title — gold, elegant
+    if args.title:
+        fnt = try_font(44, bold=True)
+        draw_centered_text(draw, args.title, 80, fnt, (*gold_rgb, 245))
+
+    if args.subtitle:
+        fnt = try_font(24)
+        draw_centered_text(draw, args.subtitle, 135, fnt, (180, 180, 180, 200))
+
+    # Gold accent line bottom
+    draw_line(draw, 200, H-80, W-200, H-80, (*gold_rgb, 60), 1)
+    draw_line(draw, 200, H-77, W-200, H-77, (*gold_rgb, 180), 1)
+
+    # Brand
+    if args.brand:
+        fnt = try_font(24)
+        draw_centered_text(draw, args.brand, H - 50, fnt, (*gold_rgb, 180))
+
+    if args.footer:
+        fnt = try_font(22)
+        draw_centered_text(draw, args.footer, H - 80, fnt, (150, 150, 150, 180))
+
+    return bg
+
+
+# ─── Main ────────────────────────────────────────────────────
+def main():
+    product = load_product(args.input)
+
+    templates = {
+        'spotlight': template_spotlight,
+        'minimal': template_minimal,
+        'magazine': template_magazine,
+        'tagged': template_tagged,
+        'dark_luxury': template_dark_luxury,
+    }
+
+    fn = templates.get(args.template, template_spotlight)
+    result = fn(product)
+
+    os.makedirs(os.path.dirname(args.output) or '.', exist_ok=True)
+    result.convert('RGB').save(args.output, 'PNG')
+    print(f'Done [{args.template}]: {args.output} ({result.size})')
+
+
+if __name__ == '__main__':
+    main()
