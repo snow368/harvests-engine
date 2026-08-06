@@ -163,6 +163,10 @@ const apps = [
       BOT_LIKE_MAX_PER_VISIT: '3',
       BOT_LIKE_INTERVAL_MIN_SEC: '45',
       BOT_LIKE_INTERVAL_MAX_SEC: '120',
+      // 今日已点赞数强制覆盖（0=清零，让今天能继续点赞；不设=读本地状态文件）。
+      // 2026-08-06: 旧 bot 把今天点赞额度刷满导致新任务被 like_skip_daily_limit 拦，
+      // 用环境变量清零，避免改 VPS 本地 json。
+      BOT_DAILY_LIKE_OVERRIDE: '0',
       BOT_LIKE_COOLDOWN_MIN_HOURS: '24',
       BOT_LIKE_COOLDOWN_MAX_HOURS: '72',
       // 评论：概率 0.2，每日上限 3 条（评论是最危险动作，先保守）

@@ -1716,10 +1716,15 @@ const tryLikeWithStrategy = async (handle: string, facts?: ProfileFacts, command
   if (!page) throw new Error('page_not_initialized');
   const policy = getLikePolicy(command);
   const dayKey = getDayKey();
-  const dayCount = Number(likeState.likes?.byDay?.[dayKey] || 0);
+  // 2026-08-06: BOT_DAILY_LIKE_OVERRIDE 强制指定"今日已点赞数"（0=清零），
+  // 用于绕过本地状态文件里旧 bot 刷满的计数（VPS 文件难改，用环境变量控制）。
+  const overrideRaw = String(process.env.BOT_DAILY_LIKE_OVERRIDE || '').trim();
+  const dayCount = overrideRaw !== ''
+    ? Math.max(0, Math.min(50, Number(overrideRaw) || 0))
+    : Number(likeState.likes?.byDay?.[dayKey] || 0);
   const dayCap = getDailyLikeCap(command);
   if (dayCount >= dayCap) {
-    logBehavior('like_skip_daily_limit', { handle, dayKey, dayCount, dayCap });
+    logBehavior('like_skip_daily_limit', { handle, dayKey, dayCount, dayCap, override: overrideRaw || null });
     return { attempted: 0, liked: 0, skippedCooldown: true, likedUrls: [] };
   }
 
