@@ -149,7 +149,7 @@ const apps = [
       BOT_CDP_URL: 'http://localhost:9222', // 仅 CDP 模式使用；persistent 模式忽略
       BOT_PROFILE_DIR: 'C:\\harvests\\profiles\\bot_ig_01', // 含 raiha8833 IG 登录态的 profile 目录
       HUMAN_MIMICRY_ENABLED: 'true',
-      BOT_LAUNCH_MODE: 'persistent', // 自起浏览器，不再依赖外部 Chrome / 9222，避免崩溃循环
+      BOT_LAUNCH_MODE: 'cdp', // 自起浏览器，不再依赖外部 Chrome / 9222，避免崩溃循环
       BOT_EXEC_MODE: 'browse_like',
       BOT_POLL_INTERVAL_MS: '4000',
       BOT_HEARTBEAT_INTERVAL_MS: '15000',
