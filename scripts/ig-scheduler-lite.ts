@@ -21,7 +21,7 @@ const BOT_ID = process.env.SCHEDULER_BOT_ID || 'bot_ig_01';
 const DAILY_LIMIT = Number(process.env.SCHEDULER_DAILY_LIMIT) || 50;
 const BATCH_SIZE = Math.min(20, Math.max(1, Number(process.env.SCHEDULER_BATCH_SIZE) || 10));
 const TARGET_STATE = (process.env.SCHEDULER_STATE || 'ALL').trim().toUpperCase();
-const CLOUD_API_BASE = (process.env.CLOUD_API_BASE || 'https://harvests-cloud-api.inkflowapp.workers.dev').replace(/\/+$/, '');
+const CLOUD_API_BASE = (process.env.CLOUD_API_BASE || 'https://harvests.pages.dev').replace(/\/+$/, '');
 const BOT_API_TOKEN = (process.env.BOT_API_TOKEN || 'vps-bot-secret-2024').trim();
 
 const ENV_PATH = path.resolve(process.cwd(), '.env');

@@ -57,13 +57,39 @@ const apps = [
     restart_delay: 10_000,
     env: {
       ...COMMON_ENV,
-      CLOUD_API_BASE: 'https://harvests-cloud-api.inkflowapp.workers.dev',
+      // pages.dev 同源代理（→ cloud-api Worker），VPS 国内/海外都能通；workers.dev 子域国内被 GFW 屏蔽
+      CLOUD_API_BASE: 'https://harvests.pages.dev',
       SCHEDULER_BOT_ID: 'bot_ig_01',
       SCHEDULER_DAILY_LIMIT: '50',
       SCHEDULER_STATE: 'ALL',
     },
     error_file: path.join(LOGS_DIR, 'scheduler-error.log'),
     out_file: path.join(LOGS_DIR, 'scheduler-out.log'),
+  },
+
+  // ── 1b. Maps Scrape Scheduler ───────────────────
+  // 消费 Maps Scrape 页面「加入队列」产生的 maps_scrape_jobs (pending)。
+  // 串行拉起 python_scraper.py（headless 自起浏览器），scraper 自己回报 running→completed。
+  // 让「前端选州 → 加入队列 → 系统自动抓取」闭环。
+  {
+    name: 'maps-scrape-scheduler',
+    cwd: ENGINE_DIR,
+    script: './scripts/maps-scrape-scheduler.ts',
+    interpreter: 'node.exe',
+    node_args: '--import tsx',
+    ...DEFAULTS,
+    restart_delay: 10_000,
+    env: {
+      ...COMMON_ENV,
+      CLOUD_API_BASE: 'https://harvests-cloud-api.inkflowapp.workers.dev',
+      SCRAPE_POLL_INTERVAL_MS: '60000',
+      SCRAPE_MAX_RUNTIME_MS: '21600000', // 6h 单州看门狗
+      SCRAPE_CDP_URL: '',                // 空=headless 自起浏览器（不抢 IG bot 的 Chrome）
+      SCRAPE_COUNTRY: 'USA',
+      // NEON_DATABASE_URL 由 VPS 系统环境 / .env 透传，无需在此硬编码
+    },
+    error_file: path.join(LOGS_DIR, 'maps-scrape-scheduler-error.log'),
+    out_file: path.join(LOGS_DIR, 'maps-scrape-scheduler-out.log'),
   },
 
   // ── 3. Backlink Scheduler ──────────────────────
@@ -115,21 +141,42 @@ const apps = [
     kill_timeout: 30_000,
     env: {
       ...COMMON_ENV,
-      BOT_API_BASE: 'https://harvests-cloud-api.inkflowapp.workers.dev',
+      // BOT_API_BASE 用 pages.dev（同源 /api/* 代理到 Worker），VPS/本机/国内都能通；
+      // workers.dev 子域在国内被 GFW 屏蔽，VPS 海外虽可直连但 pages.dev 更稳。
+      BOT_API_BASE: 'https://harvests.pages.dev',
       BOT_ACCOUNT_IDS: 'raiha8833',
       BOT_ID: 'bot_ig_01',
-      BOT_CDP_URL: 'http://localhost:9222',
+      BOT_CDP_URL: 'http://localhost:9222', // 仅 CDP 模式使用；persistent 模式忽略
+      BOT_PROFILE_DIR: 'C:\\harvests\\profiles\\bot_ig_01', // 含 raiha8833 IG 登录态的 profile 目录
       HUMAN_MIMICRY_ENABLED: 'true',
-      BOT_LAUNCH_MODE: 'cdp',
+      BOT_LAUNCH_MODE: 'persistent', // 自起浏览器，不再依赖外部 Chrome / 9222，避免崩溃循环
       BOT_EXEC_MODE: 'browse_like',
       BOT_POLL_INTERVAL_MS: '4000',
       BOT_HEARTBEAT_INTERVAL_MS: '15000',
       BOT_HUMAN_BREAK_MIN_MS: '300000',
       BOT_HUMAN_BREAK_MAX_MS: '900000',
       BOT_BREAK_EVERY_N: '4',
+      // ── 引流节奏（2026-08-06 安全版：先保守跑一周，确认无 action block 再逐步加量）──
+      // 点赞：每次访问 2-3 个，间隔 45-120s（拟人节奏，过快是 IG 检测 bot 最高信号），
+      //       每日总量由 bot 内置逻辑自动算（6-20/天×20%比率），单账号最多 2 赞，冷却 24-72h
+      BOT_LIKE_MIN_PER_VISIT: '2',
+      BOT_LIKE_MAX_PER_VISIT: '3',
+      BOT_LIKE_INTERVAL_MIN_SEC: '45',
+      BOT_LIKE_INTERVAL_MAX_SEC: '120',
+      BOT_LIKE_COOLDOWN_MIN_HOURS: '24',
+      BOT_LIKE_COOLDOWN_MAX_HOURS: '72',
+      // 评论：概率 0.2，每日上限 3 条（评论是最危险动作，先保守）
       BOT_COMMENT_ENABLED: 'true',
       BOT_COMMENT_CHANCE: '0.2',
-      BOT_COMMENT_DAILY_MAX: '2',
+      BOT_COMMENT_DAILY_MAX: '3',
+      // 关注：每日 3-5 个，需同账号访问 ≥2 次后才关注（不冲动关注防反噬）
+      BOT_FOLLOW_ENABLED: 'true',
+      BOT_FOLLOW_DAILY_MIN: '3',
+      BOT_FOLLOW_DAILY_MAX: '5',
+      BOT_FOLLOW_MIN_TOUCHES: '2',
+      // 只互动近 60 天内的新帖（引流价值高 + 显得活跃）
+      BOT_SKIP_OLD_POST_DAYS: '60',
+      BOT_PREFER_RECENT_DAYS: '30',
     },
     error_file: path.join(LOGS_DIR, 'bot-worker-error.log'),
     out_file: path.join(LOGS_DIR, 'bot-worker-out.log'),
