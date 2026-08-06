@@ -496,68 +496,87 @@ const ensureBrowser = async () => {
     context = null as any; page = null as any;
   }
 
-  if (BOT_LAUNCH_MODE === 'persistent') {
-    // Persistent context: Playwright's own browser, navigator.webdriver removed automatically.
-    // Login session is saved in the profile directory.
-    const profilePath = path.resolve(process.cwd(), PROFILE_DIR);
-    if (!fs.existsSync(profilePath)) fs.mkdirSync(profilePath, { recursive: true });
-    const userDataDir = profilePath;
-    context = await chromium.launchPersistentContext(userDataDir, {
-      headless: HEADLESS,
-      viewport: { width: 1280, height: 900 },
-      args: [
-        '--no-sandbox',
-        '--disable-blink-features=AutomationControlled',
-      ],
-    }) as any;
-    // Patch pages to hide automation
-    const existingPages = (context as any).pages?.() || [];
-    if (existingPages.length > 0) {
-      for (const p of existingPages) {
+  // Retry with backoff so a transiently-unavailable browser (e.g. external Chrome
+  // not yet up in CDP mode, or a slow first launch in persistent mode) does NOT
+  // crash the whole process. The process only exits after exhausting all retries,
+  // at which point pm2 restarts it and tries again.
+  const MAX_ATTEMPTS = 12;
+  const BACKOFF_MS = 15_000;
+  let lastErr: any;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      if (BOT_LAUNCH_MODE === 'persistent') {
+        // Persistent context: Playwright's own browser, navigator.webdriver removed automatically.
+        // Login session is saved in the profile directory.
+        const profilePath = path.resolve(process.cwd(), PROFILE_DIR);
+        if (!fs.existsSync(profilePath)) fs.mkdirSync(profilePath, { recursive: true });
+        const userDataDir = profilePath;
+        context = await chromium.launchPersistentContext(userDataDir, {
+          headless: HEADLESS,
+          viewport: { width: 1280, height: 900 },
+          args: [
+            '--no-sandbox',
+            '--disable-blink-features=AutomationControlled',
+          ],
+        }) as any;
+        // Patch pages to hide automation
+        const existingPages = (context as any).pages?.() || [];
+        if (existingPages.length > 0) {
+          for (const p of existingPages) {
+            try {
+              if (p.url().includes('instagram.com')) { page = p; break; }
+            } catch {}
+          }
+        }
+        if (!page) {
+          page = await (context as any).newPage();
+        }
+        await page.addInitScript(() => {
+          Object.defineProperty(navigator, 'webdriver', { get: () => false });
+        });
+        if (!page.url() || !page.url().includes('instagram.com')) {
+          await page.goto(IG_BASE, { waitUntil: 'domcontentloaded', timeout: 45000 });
+        }
+        await page.bringToFront().catch(() => {});
+        console.log('[bot-real] launched persistent browser (stealth mode)');
+        return;
+      }
+
+      // CDP mode (legacy): connect to an already-running Chrome.
+      if (!BOT_CDP_URL) throw new Error('cdp_required_set_BOT_CDP_URL_or_use_BOT_LAUNCH_MODE_persistent');
+      browser = await chromium.connectOverCDP(BOT_CDP_URL);
+      context = browser.contexts()[0] || await browser.newContext();
+      const existingPages = context.pages();
+      if (existingPages.length > 0) {
+        for (const p of existingPages) {
+          try {
+            const u = p.url();
+            if (u && u.includes('instagram.com')) { page = p; break; }
+          } catch {}
+        }
+      }
+      if (!page) {
+        page = await context.newPage();
+        // Attempt anti-detection before navigation (may not fully work in CDP mode).
         try {
-          if (p.url().includes('instagram.com')) { page = p; break; }
+          await page.addInitScript(() => {
+            Object.defineProperty(navigator, 'webdriver', { get: () => false });
+          });
         } catch {}
+        await page.goto(IG_BASE, { waitUntil: 'domcontentloaded', timeout: 45000 });
+      }
+      await page.bringToFront().catch(() => {});
+      console.log(`[bot-real] connected via CDP: ${BOT_CDP_URL}`);
+      return;
+    } catch (e) {
+      lastErr = e;
+      console.error(`[bot-real] browser ensure attempt ${attempt}/${MAX_ATTEMPTS} failed: ${e?.message || e}`);
+      if (attempt < MAX_ATTEMPTS) {
+        await sleep(BACKOFF_MS);
       }
     }
-    if (!page) {
-      page = await (context as any).newPage();
-    }
-    await page.addInitScript(() => {
-      Object.defineProperty(navigator, 'webdriver', { get: () => false });
-    });
-    if (!page.url() || !page.url().includes('instagram.com')) {
-      await page.goto(IG_BASE, { waitUntil: 'domcontentloaded', timeout: 45000 });
-    }
-    await page.bringToFront().catch(() => {});
-    console.log('[bot-real] launched persistent browser (stealth mode)');
-    return;
   }
-
-  // CDP mode (legacy): connect to an already-running Chrome.
-  if (!BOT_CDP_URL) throw new Error('cdp_required_set_BOT_CDP_URL_or_use_BOT_LAUNCH_MODE_persistent');
-  browser = await chromium.connectOverCDP(BOT_CDP_URL);
-  context = browser.contexts()[0] || await browser.newContext();
-  const existingPages = context.pages();
-  if (existingPages.length > 0) {
-    for (const p of existingPages) {
-      try {
-        const u = p.url();
-        if (u && u.includes('instagram.com')) { page = p; break; }
-      } catch {}
-    }
-  }
-  if (!page) {
-    page = await context.newPage();
-    // Attempt anti-detection before navigation (may not fully work in CDP mode).
-    try {
-      await page.addInitScript(() => {
-        Object.defineProperty(navigator, 'webdriver', { get: () => false });
-      });
-    } catch {}
-    await page.goto(IG_BASE, { waitUntil: 'domcontentloaded', timeout: 45000 });
-  }
-  await page.bringToFront().catch(() => {});
-  console.log(`[bot-real] connected via CDP: ${BOT_CDP_URL}`);
+  throw new Error(`ensureBrowser failed after ${MAX_ATTEMPTS} attempts: ${lastErr?.message || lastErr}`);
 };
 
 const reportObservation = async (command: CommandPayload, summary: BrowseSummary, profileFacts?: Record<string, any>) => {
@@ -2085,6 +2104,21 @@ const executeCommand = async (command: CommandPayload) => {
   const commandId = command.id;
   const handle = String(command.artistHandle || '').replace(/^@/, '').trim();
   if (!handle) throw new Error('missing_artist_handle');
+  // 2026-08-06：任务 payload 里的前台动作偏好 → 动态覆盖本进程默认值。
+  // 前台「动作偏好」面板设置的 点赞/评论/关注 次数，由 ig-scheduler 写进任务 payload，
+  // 这里在本次任务执行期间生效（不污染全局 env，进程级开关保持原样）。
+  const pLikes = Number((command as any).likesPerSession ?? NaN);
+  const pComments = Number((command as any).commentsPerSession ?? NaN);
+  const pFollows = Number((command as any).followsPerSession ?? NaN);
+  const actionOverrides = {
+    likesEnabled: Number.isFinite(pLikes) && pLikes > 0,
+    commentsEnabled: Number.isFinite(pComments) && pComments > 0,
+    followsEnabled: Number.isFinite(pFollows) && pFollows > 0,
+    likesMin: Number.isFinite(pLikes) ? Math.max(1, Math.min(5, Math.round(pLikes))) : 0,
+  };
+  if (actionOverrides.likesEnabled || actionOverrides.commentsEnabled || actionOverrides.followsEnabled) {
+    console.log(`[bot-real] action prefs from task: likes=${pLikes} comments=${pComments} follows=${pFollows}`);
+  }
   const taskModeRaw = String(command?.suggestedExecMode || '').trim().toLowerCase();
   const execMode = (taskModeRaw === 'browse_only' || taskModeRaw === 'browse_like') ? taskModeRaw : BOT_EXEC_MODE;
   const stage = String(command?.accountStage || '').trim().toLowerCase() || 'stable';
@@ -2148,12 +2182,31 @@ const executeCommand = async (command: CommandPayload) => {
   if (execMode === 'browse_like') {
     summary = await browseProfileDeep();
     await sleep(jitter(1200, 2600));
-    likeSummary = await tryLikeWithStrategy(handle, profileFacts, command);
-    if (likeSummary.liked > 0) {
+    // 任务 payload 偏好覆盖：前台设置 likes/comments/follows 次数后，
+    // 点赞用 payload 次数（likePerVisitMin/Max），评论/关注按 payload 开关执行。
+    const cmdWithPrefs = {
+      ...(command || {}),
+      suggestedExecMode: 'browse_like',
+      ...(actionOverrides.likesMin > 0 ? {
+        protocol: {
+          ...((command as any)?.protocol || {}),
+          warmupPolicy: {
+            ...((command as any)?.protocol?.warmupPolicy || {}),
+            likePerVisitMin: actionOverrides.likesMin,
+            likePerVisitMax: Math.max(actionOverrides.likesMin, Number((command as any)?.likePerVisitMax) || actionOverrides.likesMin),
+          },
+        },
+      } : {}),
+    } as CommandPayload;
+    likeSummary = await tryLikeWithStrategy(handle, profileFacts, cmdWithPrefs);
+    // 评论/关注总开关按 payload 偏好动态开关（不污染全局 env）
+    const commentsOn = actionOverrides.commentsEnabled ? true : (BOT_COMMENT_ENABLED && (actionOverrides.likesEnabled || BOT_COMMENT_ENABLED));
+    const followsOn = actionOverrides.followsEnabled ? true : BOT_FOLLOW_ENABLED;
+    if (likeSummary.liked > 0 && (commentsOn || followsOn)) {
       await sleep(jitter(1400, 2600));
-      commentSummary = await tryCommentWithStrategy(handle, profileFacts, likeSummary);
+      if (commentsOn) commentSummary = await tryCommentWithStrategy(handle, profileFacts, likeSummary);
       await sleep(jitter(1200, 2400));
-      followSummary = await tryFollowOnProfile(handle, likeSummary, command);
+      if (followsOn) followSummary = await tryFollowOnProfile(handle, likeSummary, command);
     } else {
       commentSummary = { attempted: 0, posted: 0, skipped: true, reason: 'no_like_this_visit' };
       followSummary = { attempted: 0, followed: 0, skipped: true, reason: 'no_like_this_visit' };
@@ -2204,8 +2257,14 @@ const pollLoop = async () => {
       for (const cmd of commands) {
         if (!running) break;
         await humanBreak(); // wait if currently in a break period
+        // 任务级看门狗：单任务执行上限（默认 8 分钟），超时视为 failed 继续下一个，
+        // 防止 IG 页面慢/选择器卡死导致 bot 挂死不再消费队列（2026-08-06 修复）
+        const TASK_TIMEOUT_MS = Math.max(60_000, Number(process.env.BOT_TASK_TIMEOUT_MS || 8 * 60_000));
         try {
-          await executeCommand(cmd);
+          await Promise.race([
+            executeCommand(cmd),
+            new Promise((_, reject) => setTimeout(() => reject(new Error(`task_timeout_${Math.round(TASK_TIMEOUT_MS / 1000)}s`)), TASK_TIMEOUT_MS)),
+          ]);
           await reportCommand(cmd.id, 'done');
           console.log(`[bot-real] done ${cmd.id}`);
           tasksSinceLastLearn++;
@@ -2222,6 +2281,10 @@ const pollLoop = async () => {
           if (cmd?.id) {
             try { await reportCommand(cmd.id, 'failed', reason); } catch {}
           }
+          // 超时/异常后重建浏览器上下文，避免脏状态传染下一个任务
+          try {
+            if (page) { await page.context().close().catch(() => {}); page = null as any; }
+          } catch {}
         }
       }
     } catch (err: any) {

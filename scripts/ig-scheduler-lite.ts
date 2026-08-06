@@ -72,6 +72,26 @@ async function main() {
   const effectiveLimit = Number(process.env.SCHEDULER_DAILY_LIMIT) || autoLimit;
   const acctSpeed = Number(process.env.SCHEDULER_SPEED_FACTOR) || dbSpeed || autoSpeed;
 
+  // 2026-08-06：从 D1 读该 bot 的用户动作偏好（前台「动作偏好」面板保存的），
+  // 生成任务时写进 payload，bot 按 likes/comments/follows 次数执行 → 前台设置真正生效。
+  // 读不到偏好时回退：likes=2, comments=1, follows=0（默认），且按账号阶段定模式。
+  let prefs: any = null;
+  try {
+    const pRes = await fetch(`${CLOUD_API_BASE}/api/automation/bot-prefs/by-bot?botId=${encodeURIComponent(BOT_ID)}&token=${BOT_API_TOKEN}`);
+    if (pRes.ok) {
+      const pData = await pRes.json() as any;
+      if (pData?.prefs) prefs = pData.prefs;
+    }
+  } catch (e: any) {
+    console.error('[ig-scheduler] fetch bot-prefs failed:', e?.message?.slice(0, 80));
+  }
+  const likesPer = prefs ? (Number(prefs.likesPerSession) || 0) : 2;
+  const commentsPer = prefs ? (Number(prefs.commentsPerSession) || 0) : 1;
+  const followsPer = prefs ? (Number(prefs.followsPerSession) || 0) : 0;
+  // 互动总开关：全 0 或未配置 → browse_only（只浏览）；任一 > 0 → browse_like（真互动）
+  const hasInteraction = likesPer > 0 || commentsPer > 0 || followsPer > 0;
+  console.log(`[ig-scheduler] bot-prefs: likes=${likesPer} comments=${commentsPer} follows=${followsPer} → ${hasInteraction ? 'browse_like' : 'browse_only'}`);
+
   const today = new Date().toISOString().slice(0, 10);
   const startOfDay = new Date(today).getTime();
 
@@ -117,7 +137,8 @@ async function main() {
     if (!handle || !isValidHandle(handle)) continue;
 
     const taskId = `ig_scheduled_${handle}_${now}_${Math.random().toString(36).slice(2, 6)}`;
-    const execMode = acctStage === 'new' ? 'browse_only' : 'browse_like';
+    // 模式由「前台偏好是否有互动」决定：全 0 → browse_only；任一 >0 → browse_like
+    const execMode = hasInteraction ? 'browse_like' : 'browse_only';
     const payload = {
       id: taskId, taskType: 'ig_outreach', botId: BOT_ID,
       artistHandle: handle, shopName: String(artist.shop_name || ''),
@@ -128,6 +149,10 @@ async function main() {
       accountStage: acctStage, accountAgeDays: acctAgeDays,
       dailyTaskLimit: effectiveLimit, speedFactor: acctSpeed,
       mode: execMode, suggestedExecMode: execMode, desiredOpenCount: 3,
+      // 前台动作偏好（bot-worker 按这些次数执行点赞/评论/关注）
+      likesPerSession: likesPer, commentsPerSession: commentsPer, followsPerSession: followsPer,
+      likePerVisitMin: Math.max(1, Math.min(5, likesPer || 2)),
+      likePerVisitMax: Math.max(1, Math.min(5, Math.max(likesPer || 2, 2))),
       source: 'ig_scheduler_lite', state: String(artist.state || TARGET_STATE),
       scheduledAt: new Date().toISOString(),
     };
