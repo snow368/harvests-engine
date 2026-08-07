@@ -389,26 +389,26 @@ const OFFERS: Array<{
   cta: Record<string, string>;
 }> = [
   // ── 主推：针 + 转印纸 常备套装（2026-08-07 用户确认：墨水暂不推，主推 needles + stencil paper）
-  // 钩子策略（按铁律用 🟢 弱钩子）：不提墨水/REACH/认证——只讲"针纸是每周必补耗材 + 艺术家价格 + 稳定补货"，
-  // 均是可兑现的服务承诺；等确认灭菌认证/价格/规格等真实能力后再升级强钩子。
+  // 钩子策略：🟡 中钩子——「灭菌 + 独立无菌包装」(2026-08-07 用户确认真实能力) + 每周必补耗材 + 艺术家价格；
+  // 未确认的强声明(认证编号/价格对比/时效)仍未写入，等确认后再升级 🔴。
   {
     id: 'needles_paper_kit',
     label: '针 + 转印纸 常备套装',
     active: true,
     pitch: {
-      en: 'For a studio, needles and stencil paper are the things you re-order every week. We carry a solid range of cartridges and transfer paper with artist pricing — so you can restock in one place without hunting around.',
-      de: 'Für Studios sind Nadeln und Stencil-Papier die Verbrauchsmaterialien, die jede Woche nachbestellt werden. Wir führen Cartridges und Transfer-Papier in guter Auswahl zu Künstlerkonditionen — so deckst du dich an einem Ort ein, ohne lange zu suchen.',
-      nl: 'Voor studio\'s zijn naalden en stencilpapier de verbruiksartikelen die elke week worden bijbesteld. Wij hebben een ruim assortiment cartridges en transferpapier tegen artiestenprijzen — zo bevoorraad je op één plek, zonder lang te zoeken.',
-      fr: 'Pour un studio, les aiguilles et le papier stencil sont les consommables réapprovisionnés chaque semaine. Nous avons une bonne gamme de cartouches et de papier transfert à tarif artiste — pour te réapprovisionner au même endroit, sans chercher partout.',
-      ja: 'スタジオにとって、ニードルとステンシルペーパーは毎週補充が必要な消耗品です。InkFlow ではカートリッジと転写紙を幅広く、アーティスト価格でご用意しております。まとめて補充でき、探し回る手間がありません。',
-      es: 'Para un estudio, las agujas y el papel stencil son lo que se repone cada semana. Tenemos una buena gama de cartuchos y papel de transferencia con precio de artista — para que repongas en un solo sitio, sin andar buscando.',
-      it: 'Per uno studio, aghi e carta stencil sono i consumabili da riordinare ogni settimana. Abbiamo una buona gamma di cartucce e carta transfer a prezzo da artista — per rifornirti in un unico posto, senza cercare in giro.',
-      pt: 'Para um estúdio, agulhas e papel stencil são o que se repõe toda semana. Temos uma boa linha de cartuchos e papel de transferência com preço de artista — para repor em um lugar só, sem ficar procurando.',
-      pl: 'Dla studia igły i papier stencil to rzeczy zamawiane co tydzień. Mamy szeroki wybór kartridży i papieru transferowego w cenach artystycznych — zaopatrzysz się w jednym miejscu, bez szukania.',
-      tr: 'Bir stüdyo için iğneler ve stencil kağıdı her hafta yenilenen malzemelerdir. Sanatçı fiyatıyla geniş kartuş ve transfer kağıdı yelpazemiz var — tek yerden stok yaparsınız, aramanıza gerek kalmaz.',
-      cs: 'Pro studio jsou jehly a stencil papír věci, které se objednávají každý týden. Máme širokou nabídku cartridge a transferového papíru za umělecké ceny — doplníš vše na jednom místě, bez shánění.',
-      ru: 'Для студии иглы и стенсиль-бумага — это то, что заказывают каждую неделю. У нас широкий ассортимент картриджей и трансферной бумаги по ценам для мастеров — пополняй запас в одном месте, без поисков.',
-      sv: 'För en studio är nålar och stencilpapper det som beställs varje vecka. Vi har ett brett sortiment av cartridges och transferpapper till artistpriser — så fyller du på på ett ställe, utan att leta.'
+      en: 'For a studio, needles and stencil paper are the things you re-order every week. Our needles are sterile, individually sealed — plus a solid range of transfer paper, all at artist pricing, so you can restock in one place without hunting around.',
+      de: 'Für Studios sind Nadeln und Stencil-Papier die Verbrauchsmaterialien, die jede Woche nachbestellt werden. Unsere Nadeln sind steril und einzeln versiegelt — dazu ein breites Sortiment Transfer-Papier, alles zu Künstlerkonditionen. So deckst du dich an einem Ort ein, ohne lange zu suchen.',
+      nl: 'Voor studio\'s zijn naalden en stencilpapier de verbruiksartikelen die elke week worden bijbesteld. Onze naalden zijn steriel en individueel verzegeld — plus een ruim assortiment transferpapier, alles tegen artiestenprijzen. Zo bevoorraad je op één plek, zonder lang te zoeken.',
+      fr: 'Pour un studio, les aiguilles et le papier stencil sont les consommables réapprovisionnés chaque semaine. Nos aiguilles sont stériles, scellées individuellement — avec une bonne gamme de papier transfert, le tout à tarif artiste. Pour te réapprovisionner au même endroit, sans chercher partout.',
+      ja: 'スタジオにとって、ニードルとステンシルペーパーは毎週補充が必要な消耗品です。当社のニードルは滅菌済み・個別密封包装。転写紙も豊富に取り揃え、すべてアーティスト価格。まとめて補充でき、探し回る手間がありません。',
+      es: 'Para un estudio, las agujas y el papel stencil son lo que se repone cada semana. Nuestras agujas son estériles, selladas individualmente — con una buena gama de papel de transferencia, todo a precio de artista. Para reponer en un solo sitio, sin andar buscando.',
+      it: 'Per uno studio, aghi e carta stencil sono i consumabili da riordinare ogni settimana. I nostri aghi sono sterili, sigillati singolarmente — con una buona gamma di carta transfer, tutto a prezzo da artista. Per rifornirti in un unico posto, senza cercare in giro.',
+      pt: 'Para um estúdio, agulhas e papel stencil são o que se repõe toda semana. Nossas agulhas são estéreis, embaladas individualmente — com uma boa linha de papel de transferência, tudo a preço de artista. Para repor em um lugar só, sem ficar procurando.',
+      pl: 'Dla studia igły i papier stencil to rzeczy zamawiane co tydzień. Nasze igły są sterylne, pakowane pojedynczo — z szerokim wyborem papieru transferowego, wszystko w cenach artystycznych. Zaopatrzysz się w jednym miejscu, bez szukania.',
+      tr: 'Bir stüdyo için iğneler ve stencil kağıdı her hafta yenilenen malzemelerdir. İğnelerimiz steril ve tek tek paketlenmiştir — geniş transfer kağıdı yelpazemiz de var, hepsi sanatçı fiyatıyla. Tek yerden stok yaparsınız, aramanıza gerek kalmaz.',
+      cs: 'Pro studio jsou jehly a stencil papír věci, které se objednávají každý týden. Naše jehly jsou sterilní, jednotlivě balené — se širokou nabídkou transferového papíru, vše za umělecké ceny. Doplníš vše na jednom místě, bez shánění.',
+      ru: 'Для студии иглы и стенсиль-бумага — это то, что заказывают каждую неделю. Наши иглы стерильные, в индивидуальной упаковке — плюс широкий выбор трансферной бумаги, всё по ценам для мастеров. Пополняй запас в одном месте, без поисков.',
+      sv: 'För en studio är nålar och stencilpapper det som beställs varje vecka. Våra nålar är sterila och individuellt förpackade — med ett brett sortiment transferpapper, allt till artistpriser. Fyll på på ett ställe, utan att leta.'
     },
     cta: {
       en: 'Want our needle + transfer paper price list? Just reply "stock" and I\'ll send it over — no pressure at all.',
