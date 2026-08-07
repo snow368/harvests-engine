@@ -296,7 +296,10 @@ const inferCountryFromHandle = (handle: string): string => {
   const m = (handle || '').toLowerCase().match(/\.([a-z]{2,3})(?:[/?#]|$)/);
   return (m && TLD_TO_COUNTRY[m[1]]) || '';
 };
-const langFor = (handle: string, country?: string, city?: string): string => {
+const langFor = (handle: string, country?: string, city?: string, detectedLang?: string): string => {
+  // 2026-08-07 用户拍板：对方帖子实际用的语言最准 → detectedLang 优先
+  const dl = String(detectedLang || '').trim();
+  if (dl) return dl;
   const c = String(country || '').toUpperCase();
   if (c === 'BE') {
     const cc = String(city || '').toLowerCase();
@@ -306,6 +309,63 @@ const langFor = (handle: string, country?: string, city?: string): string => {
   const tld = inferCountryFromHandle(handle);
   if (tld === 'BE') return 'nl';
   return (tld && COUNTRY_TO_LANG[tld]) || 'en';
+};
+
+// ── 帖子语言检测（2026-08-07 用户拍板：看对方发的帖子语言决定说什么语言）──
+// 轻量启发式：先字符级判 CJK/西里尔/希腊，再按特征词判拉丁语系。不依赖大模型。
+const LANG_FEATURES: Record<string, string[]> = {
+  de: ['und', 'der', 'die', 'das', 'für', 'ich', 'nicht', 'ist', 'mit', 'ein'],
+  nl: ['ik', 'het', 'een', 'voor', 'niet', 'geen', 'van', 'met', 'ben', 'zijn'],
+  fr: ['le', 'la', 'les', 'vous', 'pour', 'avec', 'une', 'des', 'est', 'nous'],
+  es: ['el', 'la', 'los', 'para', 'con', 'que', 'como', 'por', 'una', 'estoy'],
+  it: ['il', 'la', 'che', 'per', 'con', 'non', 'sono', 'una', 'questo', 'molto'],
+  pt: ['para', 'com', 'que', 'não', 'uma', 'muito', 'tudo', 'vou', 'está'],
+  pl: ['nie', 'się', 'jest', 'do', 'co', 'tak', 'ale', 'bardzo', 'moje'],
+  tr: ['ve', 'bir', 'için', 'bu', 'ile', 'değil', 'gibi', 'çok', 'daha'],
+  sv: ['och', 'att', 'det', 'som', 'för', 'inte', 'med', 'men', 'har'],
+  cs: ['pro', 'jsem', 'na', 'se', 'je', 'že', 'mám', 'vše', 'hezké'],
+  ru: ['и', 'в', 'не', 'что', 'для', 'это', 'меня', 'очень', 'мои']
+};
+const detectLangFromText = (text: string): string => {
+  const t = String(text || '');
+  if (!t.trim()) return '';
+  if (/[\u3040-\u30ff]/.test(t)) return 'ja';      // 假名 → 日语
+  if (/[\uac00-\ud7af]/.test(t)) return 'ko';      // 谚文 → 韩语
+  if (/[\u4e00-\u9fff]/.test(t)) return 'zh';      // 汉字 → 中文
+  if (/[\u0400-\u04ff]/.test(t)) return 'ru';      // 西里尔 → 俄语
+  if (/[\u0370-\u03ff]/.test(t)) return 'el';      // 希腊字母 → 希腊语
+  const lower = ` ${t.toLowerCase()} `;
+  let best = ''; let bestScore = 0;
+  for (const [lang, feats] of Object.entries(LANG_FEATURES)) {
+    let score = 0;
+    for (const f of feats) {
+      const low = f.toLowerCase();
+      let idx = lower.indexOf(low);
+      while (idx !== -1) { score++; idx = lower.indexOf(low, idx + low.length); }
+    }
+    if (score > bestScore) { bestScore = score; best = lang; }
+  }
+  return bestScore >= 2 ? best : '';
+};
+// 每个 handle 只检测一次（内存缓存 + 状态文件 st.detectedLang 持久化）
+const langCache: Record<string, string> = {};
+// 打开对方主页时抓 bio + 帖子文本判语言。需在 openProfile 导航完成后调用。
+const detectLangForHandle = async (handle: string): Promise<string> => {
+  if (langCache[handle]) return langCache[handle];
+  if (!page) return '';
+  try {
+    const texts = await page.locator('h1, h2, span[dir="auto"]').evaluateAll((els: any[]) =>
+      els.map((e: any) => (e.textContent || '').trim()).filter((x: string) => x.length > 1)
+    ).catch(() => []);
+    const joined = (texts || []).join(' ').slice(0, 2000);
+    const lang = detectLangFromText(joined);
+    if (lang) {
+      langCache[handle] = lang;
+      const st = likeState.follows?.byHandle?.[handle] as any;
+      if (st) { st.detectedLang = lang; saveLikeState(likeState); }
+    }
+    return lang;
+  } catch { return ''; }
 };
 // 任务/回关号的位置缓存：handle -> { country, city }。任务 payload 有就用，否则 TLD 推断。
 const countryCache: Record<string, { country?: string; city?: string }> = {};
@@ -730,7 +790,7 @@ const syncFollowBackDmQueue = async (): Promise<boolean> => {
       if (BOT_DM_DAILY_MAX > 0 && dmSentToday() >= BOT_DM_DAILY_MAX) break;
       logBehavior('dm_direct_start', { targetHandle: handle });
       const cc = countryCache[handle] || {};
-      const lang = langFor(handle, cc.country || st.country, cc.city || st.city);
+      const lang = langFor(handle, cc.country || st.country, cc.city || st.city, st.detectedLang);
       // 2026-08-07：产品库模式——按客户情况(市场/语言/回赞)组装 DM；OFFERS 空则走固定池
       const scriptContent = buildDmScript(handle, lang, st);
       const ok = await Promise.race([
@@ -884,7 +944,7 @@ const syncFollowBackRapport = async (): Promise<void> => {
       // 阶段2：已点赞 ≥2 篇且隔 ≥18h，留 1 条真诚评论（用对方语言）
       if (rp.likedPosts >= 2 && !rp.commentedAt && now - (rp.firstLikeAt || now) > RAPPORT_COMMENT_AFTER_HOURS * 3600_000) {
         const cc = countryCache[handle] || {};
-        const lang = langFor(handle, cc.country || st.country, cc.city || st.city);
+        const lang = langFor(handle, cc.country || st.country, cc.city || st.city, st.detectedLang);
         const ok = await rapportCommentPost(handle, pickRapportComment(handle, lang));
         if (ok) {
           rp.commentedAt = now;
@@ -1296,6 +1356,12 @@ const openProfile = async (handle: string) => {
       }
     } catch {}
   }
+  // 2026-08-07：帖子语言检测（回关相关号、未缓存才做）——看对方帖子实际用什么语言，DM/评论优先用它
+  try {
+    if (!langCache[handle] && (likeState.follows?.byHandle?.[handle] || countryCache[handle])) {
+      await detectLangForHandle(handle);
+    }
+  } catch {}
 };
 
 const isInvalidProfilePage = async () => {
