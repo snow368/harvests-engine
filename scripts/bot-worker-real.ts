@@ -145,7 +145,31 @@ try { if (process.env.BOT_DM_SCRIPTS_JSON) BOT_DM_SCRIPTS = JSON.parse(process.e
 if (!Array.isArray(BOT_DM_SCRIPTS) || !BOT_DM_SCRIPTS.length) BOT_DM_SCRIPTS = BOT_DM_SCRIPTS_DEFAULT;
 const hashStr = (s: string) => { let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0; return Math.abs(h); };
 const pickFromPool = (pool: string[], key: string) => pool[hashStr(key || 'anon') % pool.length];
-const pickDmScript = (handle: string, lang: string) => pickFromPool(DM_SCRIPTS_BY_LANG[lang] || DM_SCRIPTS_BY_LANG.en, handle);
+// 本地化优先层（2026-08-07）：基于 WebSearch 调研的本地商务话术，含本地痛点钩子
+// （EU REACH 墨水禁令 / 日本先信任后生意）。无本地化版的语言 fallback 到翻译版。
+// 完整档案见 D:\harvests\_tools\localized-dm-playbook.md
+const LOCALIZED_DM_BY_LANG: Record<string, string[]> = {
+  nl: [
+    "Hoi — ik volg je werk al even, die recente pieces zijn echt strak. Ik zit bij InkFlow, groothandel in tattoobenenodigdheden (inkt, cartridges, aftercare). Ik weet dat de EU-inktverordening (REACH) veel studio's onder druk zet — wij leveren alleen REACH-conforme kleuren met volledige veiligheidsbladen. Wil je een sample-kit of de prijslijst vergelijken? Stuur gerust een berichtje, totaal zonder verplichting 🙌",
+    "Hoi! Je lijnwerk is proper. Korte vraag: ik help studio's bevoorraad via InkFlow — groothandel inkt + naalden + aftercare, alles REACH-conform. Mocht je ooit een betrouwbare backup-bron nodig hebben, antwoord dan gewoon 'catalogus' en ik stuur je de lijst. Geen druk 👍"
+  ],
+  fr: [
+    "Salut — je suis ton travail depuis un moment, tes dernières pièces sont vraiment propres. Je suis chez InkFlow, fournisseur en gros pour studios de tatouage (encre, cartouches, aftercare). Je sais que la réglementation européenne (REACH) met beaucoup de studios sous pression — nous ne fournissons que des encres conformes, avec fiches de sécurité complètes. Si tu veux comparer les prix ou tester un kit d'échantillons, écris-moi, sans aucun engagement 🙌",
+    "Salut ! Ton trait est propre. Petite question : j'aide les studios à rester approvisionnés via InkFlow (encre + aiguilles + aftercare en gros, tout conforme REACH). Si tu cherches une source fiable, réponds 'catalogue' et je t'envoie la liste. Zéro pression 👍"
+  ],
+  de: [
+    "Hey — ich schaue mir deine Arbeiten schon eine Weile an, die neueren Stücke sind richtig stark. Ich bin bei InkFlow, Großhandel für Tattoo-Bedarf (Farben, Cartridges, Aftercare). Ich weiß, dass die EU-Farbenverordnung (REACH) viele Studios unter Druck setzt — wir führen nur konforme Farben mit vollständigen Sicherheitsdatenblättern. Falls du Preise vergleichen oder ein Sample-Kit testen willst, schreib mir einfach — ich schicke dir unsere Künstlerkonditionen. Ganz ohne Verpflichtung 🙌",
+    "Hi! Deine Linienführung ist sauber. Kurze Frage: ich helfe Studios, über InkFlow zuverlässig versorgt zu bleiben (Großhandel Farben + Nadeln + Aftercare, alles REACH-konform). Falls du eine stabile Backup-Quelle brauchst, antworte einfach 'Katalog' und ich schicke dir die Liste. Null Druck 👍"
+  ],
+  ja: [
+    "こんにちは。突然のご連絡、失礼いたします。作品を拝見し、特にラインの美しさに感銘を受けました。私は InkFlow というタトゥー用品の海外卸売を担当しております（インク・カートリッジ・アフターケア）。日本のタトゥー文化に敬意を持っておりますので、もしよろしければサンプルのご案内をさせてください。お返事いただけましたら幸いです。",
+    "こんにちは。お忙しいところ失礼いたします。作品が素晴らしく、ぜひ一度ご挨拶したくご連絡いたしました。InkFlow ではタトゥー用品の卸売（インク・カートリッジ・アフターケア）をしております。ご興味がございましたら、アーティスト価格のリストをお送りいたします。どうぞお気軽にご連絡ください。"
+  ]
+};
+const pickDmScript = (handle: string, lang: string) => {
+  const pool = LOCALIZED_DM_BY_LANG[lang] || DM_SCRIPTS_BY_LANG[lang] || DM_SCRIPTS_BY_LANG.en;
+  return pickFromPool(pool, handle);
+};
 
 // ── 多语言文案池（2026-08-07：按对方国家语言发 DM/评论，真人感翻倍）──
 // DM 池：每语言 2 条软性 B2B 供货开场白；评论池：每语言 2 条真诚作品赞美（无推广）；
