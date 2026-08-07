@@ -327,25 +327,42 @@ const OFFERS: Array<{
   pitch: Record<string, string>;
   cta: Record<string, string>;
 }> = [
-  // ── 示例：样品套装。⚠️ 含 REACH 合规声明——仅当产品已确认 REACH 合规后置 active:true，
-  //    当前保持 active:false（未确认前不发送，防止 bot 发出虚假合规声明）。──
+  // ── 主推：针 + 转印纸 常备套装（2026-08-07 用户确认：墨水暂不推，主推 needles + stencil paper）
+  // 钩子策略（按铁律用 🟢 弱钩子）：不提墨水/REACH/认证——只讲"针纸是每周必补耗材 + 艺术家价格 + 稳定补货"，
+  // 均是可兑现的服务承诺；等确认灭菌认证/价格/规格等真实能力后再升级强钩子。
   {
-    id: 'sample_kit',
-    label: '样品套装（艺术家体验）',
-    active: false,
+    id: 'needles_paper_kit',
+    label: '针 + 转印纸 常备套装',
+    active: true,
     pitch: {
-      en: 'We put together a sample kit for tattoo studios — inks, cartridges and aftercare, so you can test the quality before committing to a supplier.',
-      de: 'Wir haben ein Sample-Kit für Studios zusammengestellt — Farben, Cartridges und Aftercare, damit du die Qualität vorab testen kannst, bevor du dich festlegst.',
-      nl: 'We stelden een sample-kit samen voor tattoo-studio\'s — inkt, cartridges en aftercare, zodat je de kwaliteit eerst kan testen voor je een vaste leverancier kiest.',
-      fr: 'Nous avons préparé un kit d\'échantillons pour les studios — encre, cartouches et aftercare, pour que tu puisses tester la qualité avant de t\'engager.',
-      ja: 'スタジオ向けのサンプルキットをご用意しました — インク・カートリッジ・アフターケア。ご契約前に品質をお試しいただけます。'
+      en: 'For a studio, needles and stencil paper are the things you re-order every week. We carry a solid range of cartridges and transfer paper with artist pricing — so you can restock in one place without hunting around.',
+      de: 'Für Studios sind Nadeln und Stencil-Papier die Verbrauchsmaterialien, die jede Woche nachbestellt werden. Wir führen Cartridges und Transfer-Papier in guter Auswahl zu Künstlerkonditionen — so deckst du dich an einem Ort ein, ohne lange zu suchen.',
+      nl: 'Voor studio\'s zijn naalden en stencilpapier de verbruiksartikelen die elke week worden bijbesteld. Wij hebben een ruim assortiment cartridges en transferpapier tegen artiestenprijzen — zo bevoorraad je op één plek, zonder lang te zoeken.',
+      fr: 'Pour un studio, les aiguilles et le papier stencil sont les consommables réapprovisionnés chaque semaine. Nous avons une bonne gamme de cartouches et de papier transfert à tarif artiste — pour te réapprovisionner au même endroit, sans chercher partout.',
+      ja: 'スタジオにとって、ニードルとステンシルペーパーは毎週補充が必要な消耗品です。InkFlow ではカートリッジと転写紙を幅広く、アーティスト価格でご用意しております。まとめて補充でき、探し回る手間がありません。',
+      es: 'Para un estudio, las agujas y el papel stencil son lo que se repone cada semana. Tenemos una buena gama de cartuchos y papel de transferencia con precio de artista — para que repongas en un solo sitio, sin andar buscando.',
+      it: 'Per uno studio, aghi e carta stencil sono i consumabili da riordinare ogni settimana. Abbiamo una buona gamma di cartucce e carta transfer a prezzo da artista — per rifornirti in un unico posto, senza cercare in giro.',
+      pt: 'Para um estúdio, agulhas e papel stencil são o que se repõe toda semana. Temos uma boa linha de cartuchos e papel de transferência com preço de artista — para repor em um lugar só, sem ficar procurando.',
+      pl: 'Dla studia igły i papier stencil to rzeczy zamawiane co tydzień. Mamy szeroki wybór kartridży i papieru transferowego w cenach artystycznych — zaopatrzysz się w jednym miejscu, bez szukania.',
+      tr: 'Bir stüdyo için iğneler ve stencil kağıdı her hafta yenilenen malzemelerdir. Sanatçı fiyatıyla geniş kartuş ve transfer kağıdı yelpazemiz var — tek yerden stok yaparsınız, aramanıza gerek kalmaz.',
+      cs: 'Pro studio jsou jehly a stencil papír věci, které se objednávají každý týden. Máme širokou nabídku cartridge a transferového papíru za umělecké ceny — doplníš vše na jednom místě, bez shánění.',
+      ru: 'Для студии иглы и стенсиль-бумага — это то, что заказывают каждую неделю. У нас широкий ассортимент картриджей и трансферной бумаги по ценам для мастеров — пополняй запас в одном месте, без поисков.',
+      sv: 'För en studio är nålar och stencilpapper det som beställs varje vecka. Vi har ett brett sortiment av cartridges och transferpapper till artistpriser — så fyller du på på ett ställe, utan att leta.'
     },
     cta: {
-      en: 'Want the artist price list? Just reply "sample" and I\'ll send it over — no pressure at all.',
-      de: 'Lust auf die Künstler-Preisliste? Antworte einfach "Sample" und ich schicke sie dir — ganz ohne Druck.',
-      nl: 'Zin in de artiestenprijslijst? Antwoord gewoon "sample" en ik stuur ze door — totaal zonder druk.',
-      fr: 'Tu veux la grille tarifaire artiste ? Réponds simplement "sample" et je te l\'envoie — sans aucune pression.',
-      ja: 'アーティスト価格表をご希望でしたら、「sample」とご返信ください。お送りいたします。どうぞご負担なく。'
+      en: 'Want our needle + transfer paper price list? Just reply "stock" and I\'ll send it over — no pressure at all.',
+      de: 'Lust auf unsere Nadel- und Papier-Preisliste? Antworte einfach "Stock" und ich schicke sie dir — ganz ohne Druck.',
+      nl: 'Zin in onze prijslijst voor naalden en papier? Antwoord gewoon "stock" en ik stuur ze door — totaal zonder druk.',
+      fr: 'Tu veux notre grille de prix aiguilles + papier ? Réponds simplement "stock" et je te l\'envoie — sans aucune pression.',
+      ja: 'ニードルとペーパーの価格表をご希望でしたら、「stock」とご返信ください。お送りいたします。どうぞご負担なく。',
+      es: '¿Quieres nuestra lista de precios de agujas + papel? Responde "stock" y te la envío — sin presión.',
+      it: 'Vuoi la nostra lista prezzi aghi + carta? Rispondi "stock" e te la mando — nessuna pressione.',
+      pt: 'Quer nossa lista de preços de agulhas + papel? Responda "stock" e eu te envio — sem pressão.',
+      pl: 'Chcesz naszą listę cen igieł + papieru? Odpowiedz "stock", a wyślę ją — bez presji.',
+      tr: 'İğne + kağıt fiyat listemizi ister misiniz? "stock" yazın, göndereyim — hiçbir baskı yok.',
+      cs: 'Chceš naši ceník jehel + papíru? Odepiš "stock" a pošlu ti ho — bez tlaku.',
+      ru: 'Хотите наш прайс на иглы + бумагу? Напишите "stock" — и я пришлю. Без давления.',
+      sv: 'Vill du ha vår prislista på nålar + papper? Svara "stock" så skickar jag den — ingen press.'
     }
   }
 ];
