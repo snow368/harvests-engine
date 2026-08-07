@@ -136,15 +136,34 @@ const BOT_DM_WARMUP_HOURS = Math.max(0, Number(process.env.BOT_DM_WARMUP_HOURS |
 // 不依赖 cloud-api 的 marketing_scripts 表（该表写入被 Firebase 中间件拦截，需部署才能改）。
 // 可用 BOT_DM_SCRIPTS_JSON 环境变量覆盖（JSON 字符串数组）。
 const BOT_DM_SCRIPTS_DEFAULT = [
-  "Hey — been checking out your work, that linework and shading is clean. I run InkFlow (wholesale tattoo supplies: ink, cartridges, aftercare). If you ever want to test a sample kit or compare pricing, just reply — happy to sort you artist rates 🙌",
-  "Noticed your pieces and figured I'd say hi. I supply tattoo studios with InkFlow wholesale (ink, needles, aftercare) — reliable restocks and artist pricing. No pressure, but if you need a solid backup source, just let me know 👍",
-  "Your style's dope. I help tattoo artists keep stocked through InkFlow (ink + cartridges + aftercare, wholesale). If a steady supply matters to you, reply and I'll send over the artist price list ✌️"
+  "Hey — been quietly enjoying your work for a bit (that recent piece is fire 🔥). I run InkFlow, a wholesale supply house for tattoo studios — ink, cartridges, aftercare. If you ever want to compare pricing or grab a sample kit, just reply and I'll send our artist price list over. No rush at all 🙌",
+  "Hi! Been following your work — your linework's clean. Quick one: I help studios stay stocked through InkFlow (wholesale ink + needles + aftercare). Whenever you need a reliable backup source, reply 'catalog' and I'll shoot you the list. Zero pressure 👍",
+  "Love what you've been putting out. I'm with InkFlow — we supply tattoo studios wholesale (ink, carts, aftercare). If keeping stocked ever becomes a hassle, just hit reply and I'll send our artist rates. Glad to have you in the circle ✌️"
 ];
 let BOT_DM_SCRIPTS: string[] = BOT_DM_SCRIPTS_DEFAULT;
 try { if (process.env.BOT_DM_SCRIPTS_JSON) BOT_DM_SCRIPTS = JSON.parse(process.env.BOT_DM_SCRIPTS_JSON); } catch {}
 if (!Array.isArray(BOT_DM_SCRIPTS) || !BOT_DM_SCRIPTS.length) BOT_DM_SCRIPTS = BOT_DM_SCRIPTS_DEFAULT;
 const hashStr = (s: string) => { let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0; return Math.abs(h); };
 const pickDmScript = (handle: string) => BOT_DM_SCRIPTS[hashStr(handle || 'anon') % BOT_DM_SCRIPTS.length];
+
+// ── 回关 rapport 阶梯（先建立熟悉感，再软性 DM，绝不硬推广）──
+// 流程：detect → 点赞 1-2 篇帖子(≥6h 间隔) → 隔 ~18h 后真诚评论 1 条 → 预热窗口后发软性供货 DM
+// 这样对方是先被"同行欣赏"，再收到一条像朋友介绍的供货信息，自然转化而非被推销。
+const BOT_RAPPORT_DAILY_MAX = Math.max(0, Number(process.env.BOT_RAPPORT_DAILY_MAX || 15));
+const RAPPORT_LIKE_GAP_HOURS = Math.max(1, Number(process.env.RAPPORT_LIKE_GAP_HOURS || 6));
+const RAPPORT_COMMENT_AFTER_HOURS = Math.max(1, Number(process.env.RAPPORT_COMMENT_AFTER_HOURS || 18));
+// 软性 rapport 评论池（真诚赞美同行作品，绝不带任何推广/链接）
+const BOT_RAPPORT_COMMENTS_DEFAULT = [
+  "clean linework, love it 🔥",
+  "this shading is so smooth",
+  "your style is unique — been enjoying your posts",
+  "that piece is sick 💯",
+  "mad respect for the detail here",
+];
+let BOT_RAPPORT_COMMENTS: string[] = BOT_RAPPORT_COMMENTS_DEFAULT;
+try { if (process.env.BOT_RAPPORT_COMMENTS_JSON) BOT_RAPPORT_COMMENTS = JSON.parse(process.env.BOT_RAPPORT_COMMENTS_JSON); } catch {}
+if (!Array.isArray(BOT_RAPPORT_COMMENTS) || !BOT_RAPPORT_COMMENTS.length) BOT_RAPPORT_COMMENTS = BOT_RAPPORT_COMMENTS_DEFAULT;
+const pickRapportComment = (handle: string) => BOT_RAPPORT_COMMENTS[hashStr(handle || 'anon') % BOT_RAPPORT_COMMENTS.length];
 
 // ── AI Core (sales_chats D1 sync for triangulation) ───────────────────
 // Bot pushes DM conversations into the sales_chats + chat_messages tables
@@ -459,6 +478,10 @@ const syncFollowBackDmQueue = async (): Promise<boolean> => {
     for (const [handle, raw] of Object.entries(byHandle)) {
       const st = raw as any;
       if (!st?.followBackDetected || st.dmSent) continue;
+      // 熟悉度门槛：先点赞(≥2)或留过评论，再发 DM —— 不硬推广，先建立关系
+      const rp = st.rapport || {};
+      const rapportReady = BOT_COMMENT_ENABLED ? (rp.commentedAt > 0) : (rp.likedPosts >= 2);
+      if (!rapportReady) continue;
       if (now < (st.dmEligibleAt || 0)) continue;
       if (BOT_DM_DAILY_MAX > 0 && dmSentToday() >= BOT_DM_DAILY_MAX) break;
       logBehavior('dm_direct_start', { targetHandle: handle });
@@ -481,6 +504,106 @@ const syncFollowBackDmQueue = async (): Promise<boolean> => {
     }
   } catch {}
   return sentAny;
+};
+
+// ── 回关 rapport 阶梯实现 ────────────────────────────────────────────
+const getRapportToday = () => Number((likeState as any).rapportByDay?.[getTodayKey()] || 0);
+const recordRapport = () => {
+  const k = getTodayKey();
+  if (!(likeState as any).rapportByDay) (likeState as any).rapportByDay = {};
+  (likeState as any).rapportByDay[k] = ((likeState as any).rapportByDay[k] || 0) + 1;
+};
+
+// 给某号近期帖子点 n 篇赞（建立"同行在关注你"的好感信号）。返回实际点赞数。
+const rapportLikePosts = async (handle: string, n: number): Promise<number> => {
+  if (!page) return 0;
+  try {
+    await openProfile(handle);
+    await page.waitForTimeout(jitter(1500, 3000));
+    const posts = page.locator('a[href*="/p/"]');
+    const total = await posts.count();
+    let liked = 0;
+    for (let i = 0; i < Math.min(n, total); i++) {
+      try {
+        await posts.nth(i).click({ timeout: 8000 });
+        await page.waitForTimeout(jitter(1500, 3000));
+        const likeBtn = page.locator('svg[aria-label="Like"]').first();
+        if ((await likeBtn.count()) > 0) {
+          await likeBtn.click({ timeout: 6000 }).catch(() => {});
+          liked++;
+          recordRapport();
+          recordInteraction(handle, 'like', { rapport: true, reason: 'follow_back_ladder' }).catch(() => {});
+        }
+        await page.keyboard.press('Escape').catch(() => {});
+        await page.waitForTimeout(jitter(800, 1800));
+      } catch {}
+    }
+    return liked;
+  } catch { return 0; }
+};
+
+// 给某号最新一篇帖子留一条真诚评论（同行赞美，不带任何推广）。
+const rapportCommentPost = async (handle: string, text: string): Promise<boolean> => {
+  if (!page) return false;
+  try {
+    await openProfile(handle);
+    await page.waitForTimeout(jitter(1500, 3000));
+    const firstPost = page.locator('a[href*="/p/"]').first();
+    if ((await firstPost.count()) === 0) return false;
+    await firstPost.click({ timeout: 8000 });
+    await page.waitForTimeout(jitter(1500, 3000));
+    const ta = page.locator('textarea[aria-label*="comment" i], textarea[placeholder*="comment" i], textarea').first();
+    if ((await ta.count()) === 0) { await page.keyboard.press('Escape').catch(() => {}); return false; }
+    await ta.click({ timeout: 4000 });
+    await page.waitForTimeout(jitter(400, 1000));
+    for (const ch of text) { await ta.press(ch); await page.waitForTimeout(jitter(50, 200)); }
+    await page.waitForTimeout(jitter(500, 1200));
+    await ta.press('Enter');
+    await page.waitForTimeout(jitter(1500, 3000));
+    await page.keyboard.press('Escape').catch(() => {});
+    recordRapport();
+    recordInteraction(handle, 'comment', { rapport: true, text, reason: 'follow_back_ladder' }).catch(() => {});
+    return true;
+  } catch { return false; }
+};
+
+// 每轮推进回关号的熟悉度阶梯：点赞 →（隔天）评论。DM 由 syncFollowBackDmQueue 在预热后发。
+// 每个号每轮最多做 1 个 rapport 动作，且全局受 BOT_RAPPORT_DAILY_MAX 限制，确保"慢慢来"。
+const syncFollowBackRapport = async (): Promise<void> => {
+  try {
+    if (BOT_RAPPORT_DAILY_MAX > 0 && getRapportToday() >= BOT_RAPPORT_DAILY_MAX) return;
+    const byHandle = likeState.follows?.byHandle || {};
+    const now = Date.now();
+    for (const [handle, raw] of Object.entries(byHandle)) {
+      if (BOT_RAPPORT_DAILY_MAX > 0 && getRapportToday() >= BOT_RAPPORT_DAILY_MAX) break;
+      const st = raw as any;
+      if (!st?.followBackDetected || st.dmSent) continue; // DM 发完即停止 ladder
+      if (!st.rapport) st.rapport = { likedPosts: 0, lastLikeAt: 0, firstLikeAt: 0, commentedAt: 0 };
+      const rp = st.rapport;
+      // 阶段1：点赞 1-2 篇，≥6h 间隔，每次只补 1 篇（自然分散）
+      if (rp.likedPosts < 2 && now - (rp.lastLikeAt || 0) > RAPPORT_LIKE_GAP_HOURS * 3600_000) {
+        const got = await rapportLikePosts(handle, 1);
+        if (got > 0) {
+          rp.likedPosts += got;
+          rp.lastLikeAt = now;
+          if (!rp.firstLikeAt) rp.firstLikeAt = now;
+          saveLikeState(likeState);
+          await sleep(jitter(4000, 9000));
+        }
+        continue;
+      }
+      // 阶段2：已点赞且隔 ≥18h，留 1 条真诚评论
+      if (rp.likedPosts >= 1 && !rp.commentedAt && now - (rp.firstLikeAt || now) > RAPPORT_COMMENT_AFTER_HOURS * 3600_000) {
+        const ok = await rapportCommentPost(handle, pickRapportComment(handle));
+        if (ok) {
+          rp.commentedAt = now;
+          saveLikeState(likeState);
+          await sleep(jitter(4000, 9000));
+        }
+        continue;
+      }
+    }
+  } catch {}
 };
 
 // 回关主动复检：bot 关注某号后该号任务即 done，7 天内不会重访，若不主动回访则永远检测不到回关。
@@ -810,6 +933,12 @@ const openProfile = async (handle: string) => {
             await page.keyboard.press('Escape').catch(() => {});
             await page.waitForTimeout(jitter(500, 1200));
             recordInteraction(handle, 'like', { rapport: true, reason: 'follow_back' }).catch(() => {});
+            // 同步计入 rapport 阶梯，使 syncFollowBackDmQueue 的"熟悉度门槛"能识别到已点赞
+            if (!st.rapport) st.rapport = { likedPosts: 0, lastLikeAt: 0, firstLikeAt: 0, commentedAt: 0 };
+            st.rapport.likedPosts = (st.rapport.likedPosts || 0) + 1;
+            st.rapport.lastLikeAt = Date.now();
+            if (!st.rapport.firstLikeAt) st.rapport.firstLikeAt = Date.now();
+            saveLikeState(likeState);
           }
         } catch {}
         // 写入 harvests DB：前台可见「已回关」阶段 + follow_back 时间线
@@ -2475,7 +2604,11 @@ const pollLoop = async () => {
       try {
         await checkIncomingFollowBacks();
       } catch {}
-      // ── 回关号直接发 DM：每轮扫描，受预热窗口 + 日上限节流（内部已判断）──
+      // ── 回关 rapport 阶梯：先点赞→(隔天)评论 建立熟悉感，再发 DM（内部已判断进度）──
+      try {
+        await syncFollowBackRapport();
+      } catch {}
+      // ── 回关号直接发 DM：每轮扫描，受"熟悉度门槛 + 预热窗口 + 日上限"节流（内部已判断）──
       try {
         await syncFollowBackDmQueue();
       } catch {}
