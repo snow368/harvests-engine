@@ -487,15 +487,18 @@ const syncFollowBackDmQueue = async (): Promise<boolean> => {
       if (now < (st.dmEligibleAt || 0)) continue;
       if (BOT_DM_DAILY_MAX > 0 && dmSentToday() >= BOT_DM_DAILY_MAX) break;
       logBehavior('dm_direct_start', { targetHandle: handle });
+      const baseScript = pickDmScript(handle);
+      // 对方赞过我们 → DM 以"看到你赞了我的作品"开头，像真人回应而非群发
+      const scriptContent = (st as any).likedUsDetected ? `Saw you liked one of my pieces — appreciate it! ${baseScript}` : baseScript;
       const ok = await Promise.race([
-        executeDmTask({ target_handle: handle, script_content: pickDmScript(handle) }),
+        executeDmTask({ target_handle: handle, script_content: scriptContent }),
         new Promise<boolean>((_, rej) => setTimeout(() => rej(new Error('dm_direct_timeout_120s')), 120_000)),
       ]).catch(() => false);
       if (ok) {
         st.dmSent = true;
         recordDmSent();
         sentAny = true;
-        recordInteraction(handle, 'dm', { scriptContent: pickDmScript(handle), followback: true }).catch(() => {});
+        recordInteraction(handle, 'dm', { scriptContent, followback: true }).catch(() => {});
         // best-effort 服务端记录（云端队列当前不可用，仅作 CRM/跨 bot 可见性）
         postJson('/api/marketing/tasks/report', { targetHandle: handle, status: 'sent', botId: BOT_ID }).catch(() => {});
       } else {
@@ -713,7 +716,51 @@ const checkIncomingFollowBacks = async () => {
   } catch {}
 };
 
-const logBehavior = (event: string, data: Record<string, any> = {}) => {
+// 2026-08-07: 检测「对方赞过我们」——互赞是比互关更强的兴趣信号。
+// 打开自己主页最新帖子的点赞者列表，对"已知回关号"标记 likedUsDetected；
+// 若对方已回关+已回赞（兴趣明确），把预热窗口提前到 1h 内（比默认 4h 更早、也更自然）。
+// 仅覆盖最新一篇帖子的赞者（IG 无公开"谁赞了我全部帖子"接口）；失败静默，不影响主链路。
+let likedUsTick = 0;
+const checkWhoLikedUs = async (): Promise<void> => {
+  try {
+    likedUsTick = (likedUsTick + 1) % 20;
+    if (likedUsTick !== 0) return;
+    const me = (ACCOUNT_IDS && ACCOUNT_IDS[0]) || '';
+    if (!me || !page) return;
+    const known = new Set(Object.keys(likeState.follows?.byHandle || {}));
+    if (!known.size) return;
+    await page.goto(`${IG_BASE}/${me}/`, { waitUntil: 'domcontentloaded', timeout: 45000 });
+    await page.waitForTimeout(jitter(1500, 3000));
+    const firstPost = page.locator('a[href*="/p/"]').first();
+    if ((await firstPost.count()) === 0) return;
+    await firstPost.click({ timeout: 8000 });
+    await page.waitForTimeout(jitter(1800, 3200));
+    const likedBy = page.locator('a[href*="/liked_by/"]').first();
+    if ((await likedBy.count()) === 0) { await page.keyboard.press('Escape').catch(() => {}); return; }
+    await likedBy.click({ timeout: 8000 });
+    await page.waitForTimeout(jitter(2000, 3500));
+    const handles = await page.locator('a[href^="/"]').evaluateAll((els: any[]) =>
+      els.map((e) => (e.getAttribute('href') || '').replace(/[?#].*$/, '').replace(/^\/+|\/+$/g, ''))
+        .filter((h: string) => known.has(h))
+    ).catch(() => []);
+    const uniq = Array.from(new Set(handles || []));
+    for (const h of uniq) {
+      const st = likeState.follows!.byHandle![h] as any;
+      if (!st || st.likedUsDetected) continue;
+      st.likedUsDetected = true;
+      st.likedUsDetectedAt = Date.now();
+      if (st.followBackDetected) {
+        st.dmEligibleAt = Math.min(st.dmEligibleAt || Infinity, Date.now() + 3600_000);
+      }
+      saveLikeState(likeState);
+      recordInteraction(h, 'liked_us', { likedUsDetectedAt: st.likedUsDetectedAt }).catch(() => {});
+      logBehavior('liked_us_detected', { handle: h });
+    }
+    await page.keyboard.press('Escape').catch(() => {});
+    await page.waitForTimeout(jitter(800, 1500));
+  } catch {}
+};
+
   try {
     behaviorBuffer.push({ ...data, ts: new Date().toISOString(), botId: BOT_ID, event });
   } catch {}
@@ -2656,6 +2703,10 @@ const pollLoop = async () => {
       // ── 捕获主动关注我们的回流粉（如 tattooshops.be）：每 20 轮查一次 Followers 列表 ──
       try {
         await checkIncomingFollowBacks();
+      } catch {}
+      // ── 检测「对方赞过我们」：每 20 轮查一次最新帖子点赞者列表，互赞则提前预热窗口 ──
+      try {
+        await checkWhoLikedUs();
       } catch {}
       // ── 回关 rapport 阶梯：先点赞→(隔天)评论 建立熟悉感，再发 DM（内部已判断进度）──
       try {
