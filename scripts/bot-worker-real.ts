@@ -313,27 +313,32 @@ const countryCache: Record<string, { country?: string; city?: string }> = {};
 // ═══════════════════════════════════════════════════════════════════
 // 产品/套餐库（2026-08-07 用户拍板：老板定产品 → AI 本地化 → bot 按客户组装）
 // 用法：在 OFFERS 里加一条，label 是展示名，markets 限定国家（空=全部），
-// pitch/cta 是每语言的本地化话术（含本地痛点钩子，见 _tools/localized-dm-playbook.md）。
-// 没有对应语言的 offer 会 fallback 到 en；OFFERS 为空时走原固定文案池。
-// ⚠️ 每语言文案须由 AI 按市场本地化撰写，禁止机翻直发。
+// pitch/cta 是每语言的本地化话术。active=false 的 offer 不参与发送（示例默认关）。
+// 没有对应语言的 offer 会 fallback 到 en；OFFERS 无可用项时走原固定文案池。
+// ⚠️ 钩子匹配铁律（2026-08-07 用户纠偏）：话术里的每个"本地痛点钩子"（如 REACH 合规）
+//    必须是我们产品【真实解决】的痛点，且已核实产品能力后才可写进 DM。
+//    未确认产品能力前，禁止使用任何合规/资质类强声明钩子。禁止机翻直发。
 // ═══════════════════════════════════════════════════════════════════
 const OFFERS: Array<{
   id: string;
   label: string;
+  active?: boolean;
   markets?: string[];
   pitch: Record<string, string>;
   cta: Record<string, string>;
 }> = [
-  // ── 示例：样品套装（等你确认主推产品后替换/扩充）──
+  // ── 示例：样品套装。⚠️ 含 REACH 合规声明——仅当产品已确认 REACH 合规后置 active:true，
+  //    当前保持 active:false（未确认前不发送，防止 bot 发出虚假合规声明）。──
   {
     id: 'sample_kit',
     label: '样品套装（艺术家体验）',
+    active: false,
     pitch: {
-      en: 'We put together a sample kit for tattoo studios — inks, cartridges and aftercare, all REACH-compliant, so you can test the quality before committing to a supplier.',
-      de: 'Wir haben ein Sample-Kit für Studios zusammengestellt — Farben, Cartridges und Aftercare, alles REACH-konform, damit du die Qualität vorab testen kannst, bevor du dich festlegst.',
-      nl: 'We stelden een sample-kit samen voor tattoo-studio\'s — inkt, cartridges en aftercare, allemaal REACH-conform, zodat je de kwaliteit eerst kan testen voor je een vaste leverancier kiest.',
-      fr: 'Nous avons préparé un kit d\'échantillons pour les studios — encre, cartouches et aftercare, tout conforme REACH, pour que tu puisses tester la qualité avant de t\'engager.',
-      ja: 'スタジオ向けのサンプルキットをご用意しました — インク・カートリッジ・アフターケア、すべて EU 規制（REACH）に適合した製品です。ご契約前に品質をお試しいただけます。'
+      en: 'We put together a sample kit for tattoo studios — inks, cartridges and aftercare, so you can test the quality before committing to a supplier.',
+      de: 'Wir haben ein Sample-Kit für Studios zusammengestellt — Farben, Cartridges und Aftercare, damit du die Qualität vorab testen kannst, bevor du dich festlegst.',
+      nl: 'We stelden een sample-kit samen voor tattoo-studio\'s — inkt, cartridges en aftercare, zodat je de kwaliteit eerst kan testen voor je een vaste leverancier kiest.',
+      fr: 'Nous avons préparé un kit d\'échantillons pour les studios — encre, cartouches et aftercare, pour que tu puisses tester la qualité avant de t\'engager.',
+      ja: 'スタジオ向けのサンプルキットをご用意しました — インク・カートリッジ・アフターケア。ご契約前に品質をお試しいただけます。'
     },
     cta: {
       en: 'Want the artist price list? Just reply "sample" and I\'ll send it over — no pressure at all.',
@@ -346,13 +351,14 @@ const OFFERS: Array<{
 ];
 
 // 按客户情况组装 DM：个性化钩子（回赞）→ 产品 pitch（按市场+语言）→ CTA（同语言）。
-// OFFERS 为空或未匹配时 fallback 到原固定文案池（pickDmScript）。
+// 仅使用 active 的 offer（未核实产品能力前示例保持关闭）；无可用 offer 时 fallback 到原固定文案池。
 const buildDmScript = (handle: string, lang: string, st: any): string => {
   const country = String(st?.country || countryCache[handle]?.country || '').toUpperCase();
   const offer = OFFERS.find((o) => {
+    const activeOk = o.active !== false;
     const langOk = !!o.pitch[lang] && !!o.cta[lang];
     const marketOk = !o.markets || !o.markets.length || o.markets.includes(country);
-    return langOk && marketOk;
+    return activeOk && langOk && marketOk;
   });
   if (offer) {
     const opener = st?.likedUsDetected ? (LIKED_US_OPENERS_BY_LANG[lang] || LIKED_US_OPENERS_BY_LANG.en) : '';
