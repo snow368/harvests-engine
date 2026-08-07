@@ -6,20 +6,26 @@
  *   N 个触达小号（bot_ig_02~05）          = 跑 bot 主动联系纹身师（关注/点赞/评论）
  *   触达号 bio 挂 SUPPLY 号、评论 @SUPPLY 号 → 流量导向主号
  *
- * 部署（VPS，Windows）：
- *   1. 每号先手动开一次 Chrome 登录 IG 保留登录态：
+ * 部署（VPS，Windows）— 自运维模式（BOT_LAUNCH_MODE=persistent，bot 自己开浏览器）：
+ *   1. 首登（每号仅一次）：手动开 Chrome 登录 IG 保留登录态到 profile：
  *        chrome.exe --remote-debugging-port=922x --user-data-dir=C:\harvests\profiles\bot_ig_0x
  *      （9222=主号，9223~9226=触达号，端口/profile 一一对应，勿混用）
- *   2. 填下方 TOUCH_ACCOUNTS 里各号的 ig 用户名（CHANGE_ME_x）
- *   3. 启动（逐个，或全量）：
- *        pm2 start ecosystem.matrix.config.cjs --only bot-worker-2
- *        pm2 start ecosystem.matrix.config.cjs            # 全部
- *   4. 验证：pm2 logs bot-worker-2 --lines 5  → connected via CDP: http://localhost:9223
+ *   2. 装一次 chromium（VPS 缺这个，装完 bot 才能自起浏览器）：
+ *        cd C:\harvests\harvests-engine && npx playwright install chromium
+ *   3. 填下方 TOUCH_ACCOUNTS 里各号的 ig 用户名（CHANGE_ME_x）
+ *   4. 启动 + 开机自启（之后 VPS 重启全自动，无需手动开 Chrome）：
+ *        pm2 delete all
+ *        pm2 start ecosystem.matrix.config.cjs
+ *        pm2 save
+ *        pm2 startup
+ *   5. 验证：pm2 logs bot-worker --lines 5  → "launched persistent browser" / "profile ready"
  *
  * 注意：
+ *   - persistent 模式：bot 自己 launchPersistentContext 打开 profile 里的已登录 IG，
+ *     外部 922x Chrome 不再需要，关掉也无所谓；profile 登录态跨启动保留。
  *   - BOT_ID 全局唯一；bot_ig_01 是 SUPPLY 主号，勿删
  *   - 新号先养 7-14 天再跑 bot（防关联封号）；5 个号分批登录，别同一 IP 批量操作
- *   - 本文件基于 VPS 线上 cdp 版（commit 5617c66）扩展
+ *   - 本文件基于 VPS 线上 cdp 版（commit 5617c66）扩展；outreach 主号+触达号已转 persistent
  */
 
 // @ts-check
@@ -76,7 +82,7 @@ const makeTouchWorker = ({ botId, ig, port, profile }) => ({
     BOT_CDP_URL: `http://localhost:${port}`,
     BOT_PROFILE_DIR: `C:\\harvests\\profiles\\${profile}`,
     HUMAN_MIMICRY_ENABLED: 'true',
-    BOT_LAUNCH_MODE: 'cdp',
+    BOT_LAUNCH_MODE: 'persistent',
     BOT_EXEC_MODE: 'browse_like',
     BOT_POLL_INTERVAL_MS: '4000',
     BOT_HEARTBEAT_INTERVAL_MS: '15000',
@@ -203,7 +209,7 @@ const apps = [
       BOT_CDP_URL: 'http://localhost:9222',
       BOT_PROFILE_DIR: 'C:\\harvests\\profiles\\bot_ig_01',
       HUMAN_MIMICRY_ENABLED: 'true',
-      BOT_LAUNCH_MODE: 'cdp',
+      BOT_LAUNCH_MODE: 'persistent',
       BOT_EXEC_MODE: 'browse_like',
       BOT_POLL_INTERVAL_MS: '4000',
       BOT_HEARTBEAT_INTERVAL_MS: '15000',
