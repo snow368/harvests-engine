@@ -310,6 +310,60 @@ const langFor = (handle: string, country?: string, city?: string): string => {
 // 任务/回关号的位置缓存：handle -> { country, city }。任务 payload 有就用，否则 TLD 推断。
 const countryCache: Record<string, { country?: string; city?: string }> = {};
 
+// ═══════════════════════════════════════════════════════════════════
+// 产品/套餐库（2026-08-07 用户拍板：老板定产品 → AI 本地化 → bot 按客户组装）
+// 用法：在 OFFERS 里加一条，label 是展示名，markets 限定国家（空=全部），
+// pitch/cta 是每语言的本地化话术（含本地痛点钩子，见 _tools/localized-dm-playbook.md）。
+// 没有对应语言的 offer 会 fallback 到 en；OFFERS 为空时走原固定文案池。
+// ⚠️ 每语言文案须由 AI 按市场本地化撰写，禁止机翻直发。
+// ═══════════════════════════════════════════════════════════════════
+const OFFERS: Array<{
+  id: string;
+  label: string;
+  markets?: string[];
+  pitch: Record<string, string>;
+  cta: Record<string, string>;
+}> = [
+  // ── 示例：样品套装（等你确认主推产品后替换/扩充）──
+  {
+    id: 'sample_kit',
+    label: '样品套装（艺术家体验）',
+    pitch: {
+      en: 'We put together a sample kit for tattoo studios — inks, cartridges and aftercare, all REACH-compliant, so you can test the quality before committing to a supplier.',
+      de: 'Wir haben ein Sample-Kit für Studios zusammengestellt — Farben, Cartridges und Aftercare, alles REACH-konform, damit du die Qualität vorab testen kannst, bevor du dich festlegst.',
+      nl: 'We stelden een sample-kit samen voor tattoo-studio\'s — inkt, cartridges en aftercare, allemaal REACH-conform, zodat je de kwaliteit eerst kan testen voor je een vaste leverancier kiest.',
+      fr: 'Nous avons préparé un kit d\'échantillons pour les studios — encre, cartouches et aftercare, tout conforme REACH, pour que tu puisses tester la qualité avant de t\'engager.',
+      ja: 'スタジオ向けのサンプルキットをご用意しました — インク・カートリッジ・アフターケア、すべて EU 規制（REACH）に適合した製品です。ご契約前に品質をお試しいただけます。'
+    },
+    cta: {
+      en: 'Want the artist price list? Just reply "sample" and I\'ll send it over — no pressure at all.',
+      de: 'Lust auf die Künstler-Preisliste? Antworte einfach "Sample" und ich schicke sie dir — ganz ohne Druck.',
+      nl: 'Zin in de artiestenprijslijst? Antwoord gewoon "sample" en ik stuur ze door — totaal zonder druk.',
+      fr: 'Tu veux la grille tarifaire artiste ? Réponds simplement "sample" et je te l\'envoie — sans aucune pression.',
+      ja: 'アーティスト価格表をご希望でしたら、「sample」とご返信ください。お送りいたします。どうぞご負担なく。'
+    }
+  }
+];
+
+// 按客户情况组装 DM：个性化钩子（回赞）→ 产品 pitch（按市场+语言）→ CTA（同语言）。
+// OFFERS 为空或未匹配时 fallback 到原固定文案池（pickDmScript）。
+const buildDmScript = (handle: string, lang: string, st: any): string => {
+  const country = String(st?.country || countryCache[handle]?.country || '').toUpperCase();
+  const offer = OFFERS.find((o) => {
+    const langOk = !!o.pitch[lang] && !!o.cta[lang];
+    const marketOk = !o.markets || !o.markets.length || o.markets.includes(country);
+    return langOk && marketOk;
+  });
+  if (offer) {
+    const opener = st?.likedUsDetected ? (LIKED_US_OPENERS_BY_LANG[lang] || LIKED_US_OPENERS_BY_LANG.en) : '';
+    const pitch = (offer.pitch[lang] || offer.pitch.en || '').trim();
+    const cta = (offer.cta[lang] || offer.cta.en || '').trim();
+    return [opener, pitch, cta].filter(Boolean).join(' ');
+  }
+  const baseScript = pickDmScript(handle, lang);
+  return st?.likedUsDetected ? `${LIKED_US_OPENERS_BY_LANG[lang] || LIKED_US_OPENERS_BY_LANG.en}${baseScript}` : baseScript;
+};
+
 
 // ── 回关 rapport 阶梯（先建立熟悉感，再软性 DM，绝不硬推广）──
 // 流程：detect → 点赞 3 篇帖子(每天最多 1 篇，横跨 3 天) → 隔 ~18h 后真诚评论 1 条 → 再赞对方 1 条评论
@@ -654,9 +708,8 @@ const syncFollowBackDmQueue = async (): Promise<boolean> => {
       logBehavior('dm_direct_start', { targetHandle: handle });
       const cc = countryCache[handle] || {};
       const lang = langFor(handle, cc.country || st.country, cc.city || st.city);
-      const baseScript = pickDmScript(handle, lang);
-      // 对方赞过我们 → DM 以本地语言的"看到你赞了我的作品"开头，像真人回应而非群发
-      const scriptContent = (st as any).likedUsDetected ? `${LIKED_US_OPENERS_BY_LANG[lang] || LIKED_US_OPENERS_BY_LANG.en}${baseScript}` : baseScript;
+      // 2026-08-07：产品库模式——按客户情况(市场/语言/回赞)组装 DM；OFFERS 空则走固定池
+      const scriptContent = buildDmScript(handle, lang, st);
       const ok = await Promise.race([
         executeDmTask({ target_handle: handle, script_content: scriptContent }),
         new Promise<boolean>((_, rej) => setTimeout(() => rej(new Error('dm_direct_timeout_120s')), 120_000)),
