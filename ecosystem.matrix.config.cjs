@@ -1,0 +1,304 @@
+/**
+ * PM2 Ecosystem — Bot Workers 矩阵版（1 SUPPLY 号 + N 触达号）
+ *
+ * 架构（2026-08-07 用户拍板）：
+ *   1 个 SUPPLY 号（bot_ig_01 / raiha8833）= 信任背书 + 承接询价（发内容、bio 正规）
+ *   N 个触达小号（bot_ig_02~05）          = 跑 bot 主动联系纹身师（关注/点赞/评论）
+ *   触达号 bio 挂 SUPPLY 号、评论 @SUPPLY 号 → 流量导向主号
+ *
+ * 部署（VPS，Windows）：
+ *   1. 每号先手动开一次 Chrome 登录 IG 保留登录态：
+ *        chrome.exe --remote-debugging-port=922x --user-data-dir=C:\harvests\profiles\bot_ig_0x
+ *      （9222=主号，9223~9226=触达号，端口/profile 一一对应，勿混用）
+ *   2. 填下方 TOUCH_ACCOUNTS 里各号的 ig 用户名（CHANGE_ME_x）
+ *   3. 启动（逐个，或全量）：
+ *        pm2 start ecosystem.matrix.config.cjs --only bot-worker-2
+ *        pm2 start ecosystem.matrix.config.cjs            # 全部
+ *   4. 验证：pm2 logs bot-worker-2 --lines 5  → connected via CDP: http://localhost:9223
+ *
+ * 注意：
+ *   - BOT_ID 全局唯一；bot_ig_01 是 SUPPLY 主号，勿删
+ *   - 新号先养 7-14 天再跑 bot（防关联封号）；5 个号分批登录，别同一 IP 批量操作
+ *   - 本文件基于 VPS 线上 cdp 版（commit 5617c66）扩展
+ */
+
+// @ts-check
+/* eslint-env node */
+
+const path = require('node:path');
+
+// ── 目录配置 ────────────────────────────────────
+const ENGINE_DIR = __dirname;
+const HARVESTS_DIR = process.env.HARVESTS_DIR || path.resolve(ENGINE_DIR, '..');
+const LOGS_DIR = path.join(HARVESTS_DIR, 'logs');
+
+// ── 公共 env ────────────────────────────────────
+const COMMON_ENV = {
+  NODE_ENV: 'production',
+  BOT_API_TOKEN: 'vps-bot-secret-2024',
+};
+
+// ── 进程默认配置 ──────────────────────────────
+const DEFAULTS = {
+  instances: 1,
+  exec_mode: 'fork',
+  autorestart: true,
+  max_restarts: 10,
+  watch: false,
+  merge_logs: true,
+  log_date_format: 'YYYY-MM-DD HH:mm:ss Z',
+};
+
+// ── 触达号清单（填用户名后启用）────────────────
+// port 与 profile 一一对应：9223→bot_ig_02，9224→bot_ig_03 …
+const TOUCH_ACCOUNTS = [
+  { botId: 'bot_ig_02', ig: 'CHANGE_ME_2', port: 9223, profile: 'bot_ig_02' },
+  { botId: 'bot_ig_03', ig: 'CHANGE_ME_3', port: 9224, profile: 'bot_ig_03' },
+  { botId: 'bot_ig_04', ig: 'CHANGE_ME_4', port: 9225, profile: 'bot_ig_04' },
+  { botId: 'bot_ig_05', ig: 'CHANGE_ME_5', port: 9226, profile: 'bot_ig_05' },
+];
+
+// 触达号 worker 生成器：与主号 bot-worker 同配置，仅账号/端口/profile 不同
+const makeTouchWorker = ({ botId, ig, port, profile }) => ({
+  name: `bot-worker-${botId.replace('bot_ig_', '')}`,
+  cwd: ENGINE_DIR,
+  script: './scripts/bot-worker-real.ts',
+  interpreter: 'node.exe',
+  node_args: '--import tsx',
+  ...DEFAULTS,
+  restart_delay: 15_000,
+  kill_timeout: 30_000,
+  env: {
+    ...COMMON_ENV,
+    BOT_API_BASE: 'https://harvests.pages.dev',
+    BOT_ACCOUNT_IDS: ig,
+    BOT_ID: botId,
+    BOT_CDP_URL: `http://localhost:${port}`,
+    BOT_PROFILE_DIR: `C:\\harvests\\profiles\\${profile}`,
+    HUMAN_MIMICRY_ENABLED: 'true',
+    BOT_LAUNCH_MODE: 'cdp',
+    BOT_EXEC_MODE: 'browse_like',
+    BOT_POLL_INTERVAL_MS: '4000',
+    BOT_HEARTBEAT_INTERVAL_MS: '15000',
+    BOT_HUMAN_BREAK_MIN_MS: '300000',
+    BOT_HUMAN_BREAK_MAX_MS: '900000',
+    BOT_BREAK_EVERY_N: '4',
+    // 引流节奏（安全版）：先保守跑一周，确认无 action block 再逐步加量
+    BOT_LIKE_MIN_PER_VISIT: '2',
+    BOT_LIKE_MAX_PER_VISIT: '3',
+    BOT_LIKE_INTERVAL_MIN_SEC: '45',
+    BOT_LIKE_INTERVAL_MAX_SEC: '120',
+    BOT_DAILY_LIKE_OVERRIDE: '0',
+    BOT_LIKE_COOLDOWN_MIN_HOURS: '24',
+    BOT_LIKE_COOLDOWN_MAX_HOURS: '72',
+    BOT_COMMENT_ENABLED: 'true',
+    BOT_COMMENT_CHANCE: '0.2',
+    BOT_COMMENT_DAILY_MAX: '3',
+    BOT_FOLLOW_ENABLED: 'true',
+    BOT_FOLLOW_DAILY_MIN: '3',
+    BOT_FOLLOW_DAILY_MAX: '5',
+    BOT_FOLLOW_MIN_TOUCHES: '2',
+    BOT_SKIP_OLD_POST_DAYS: '60',
+    BOT_PREFER_RECENT_DAYS: '30',
+  },
+  error_file: path.join(LOGS_DIR, `${botId}-error.log`),
+  out_file: path.join(LOGS_DIR, `${botId}-out.log`),
+});
+
+// ── 应用列表 ────────────────────────────────────
+const apps = [
+  // ── 1. 调度器 ──────────────────────────────────
+  {
+    name: 'ig-scheduler',
+    cwd: ENGINE_DIR,
+    script: './scripts/ig-scheduler-lite.ts',
+    interpreter: 'node.exe',
+    node_args: '--import tsx',
+    ...DEFAULTS,
+    restart_delay: 10_000,
+    env: {
+      ...COMMON_ENV,
+      CLOUD_API_BASE: 'https://harvests.pages.dev',
+      SCHEDULER_BOT_ID: 'bot_ig_01',
+      SCHEDULER_DAILY_LIMIT: '50',
+      SCHEDULER_STATE: 'ALL',
+    },
+    error_file: path.join(LOGS_DIR, 'scheduler-error.log'),
+    out_file: path.join(LOGS_DIR, 'scheduler-out.log'),
+  },
+
+  // ── 1b. Maps Scrape Scheduler ───────────────────
+  {
+    name: 'maps-scrape-scheduler',
+    cwd: ENGINE_DIR,
+    script: './scripts/maps-scrape-scheduler.ts',
+    interpreter: 'node.exe',
+    node_args: '--import tsx',
+    ...DEFAULTS,
+    restart_delay: 10_000,
+    env: {
+      ...COMMON_ENV,
+      CLOUD_API_BASE: 'https://harvests-cloud-api.inkflowapp.workers.dev',
+      SCRAPE_POLL_INTERVAL_MS: '60000',
+      SCRAPE_MAX_RUNTIME_MS: '21600000',
+      SCRAPE_CDP_URL: '',
+      SCRAPE_COUNTRY: 'USA',
+    },
+    error_file: path.join(LOGS_DIR, 'maps-scrape-scheduler-error.log'),
+    out_file: path.join(LOGS_DIR, 'maps-scrape-scheduler-out.log'),
+  },
+
+  // ── 3. Backlink Scheduler ──────────────────────
+  {
+    name: 'backlink-scheduler',
+    cwd: ENGINE_DIR,
+    script: './scripts/backlink-scheduler.ts',
+    interpreter: 'node.exe',
+    node_args: '--import tsx',
+    ...DEFAULTS,
+    restart_delay: 30_000,
+    cron_restart: '0 9 * * *',
+    env: {
+      ...COMMON_ENV,
+      BOT_BACKLINK_DAILY_QUOTA: '20',
+    },
+    error_file: path.join(LOGS_DIR, 'backlink-scheduler-error.log'),
+    out_file: path.join(LOGS_DIR, 'backlink-scheduler-out.log'),
+  },
+
+  // ── 4. Backlink Worker ──────────────────────────
+  {
+    name: 'backlink-worker',
+    cwd: ENGINE_DIR,
+    script: './scripts/backlink-worker.ts',
+    interpreter: 'node.exe',
+    node_args: '--import tsx',
+    ...DEFAULTS,
+    restart_delay: 15_000,
+    env: {
+      ...COMMON_ENV,
+      BOT_CDP_URL: 'http://localhost:9222',
+      BOT_BACKLINK_QUOTA: '10',
+      BOT_API_BASE: 'https://harvests-cloud-api.inkflowapp.workers.dev',
+    },
+    error_file: path.join(LOGS_DIR, 'backlink-worker-error.log'),
+    out_file: path.join(LOGS_DIR, 'backlink-worker-out.log'),
+  },
+
+  // ── 2. Bot Worker（SUPPLY 主号 = 信任背书 + 承接）────
+  {
+    name: 'bot-worker',
+    cwd: ENGINE_DIR,
+    script: './scripts/bot-worker-real.ts',
+    interpreter: 'node.exe',
+    node_args: '--import tsx',
+    ...DEFAULTS,
+    restart_delay: 15_000,
+    kill_timeout: 30_000,
+    env: {
+      ...COMMON_ENV,
+      BOT_API_BASE: 'https://harvests.pages.dev',
+      BOT_ACCOUNT_IDS: 'raiha8833',
+      BOT_ID: 'bot_ig_01',
+      BOT_CDP_URL: 'http://localhost:9222',
+      BOT_PROFILE_DIR: 'C:\\harvests\\profiles\\bot_ig_01',
+      HUMAN_MIMICRY_ENABLED: 'true',
+      BOT_LAUNCH_MODE: 'cdp',
+      BOT_EXEC_MODE: 'browse_like',
+      BOT_POLL_INTERVAL_MS: '4000',
+      BOT_HEARTBEAT_INTERVAL_MS: '15000',
+      BOT_HUMAN_BREAK_MIN_MS: '300000',
+      BOT_HUMAN_BREAK_MAX_MS: '900000',
+      BOT_BREAK_EVERY_N: '4',
+      BOT_LIKE_MIN_PER_VISIT: '2',
+      BOT_LIKE_MAX_PER_VISIT: '3',
+      BOT_LIKE_INTERVAL_MIN_SEC: '45',
+      BOT_LIKE_INTERVAL_MAX_SEC: '120',
+      BOT_DAILY_LIKE_OVERRIDE: '0',
+      BOT_LIKE_COOLDOWN_MIN_HOURS: '24',
+      BOT_LIKE_COOLDOWN_MAX_HOURS: '72',
+      BOT_COMMENT_ENABLED: 'true',
+      BOT_COMMENT_CHANCE: '0.2',
+      BOT_COMMENT_DAILY_MAX: '3',
+      BOT_FOLLOW_ENABLED: 'true',
+      BOT_FOLLOW_DAILY_MIN: '3',
+      BOT_FOLLOW_DAILY_MAX: '5',
+      BOT_FOLLOW_MIN_TOUCHES: '2',
+      BOT_SKIP_OLD_POST_DAYS: '60',
+      BOT_PREFER_RECENT_DAYS: '30',
+    },
+    error_file: path.join(LOGS_DIR, 'bot-worker-error.log'),
+    out_file: path.join(LOGS_DIR, 'bot-worker-out.log'),
+  },
+
+  // ── 2b. 触达号矩阵（生成）──────────────────────
+  ...TOUCH_ACCOUNTS.map(makeTouchWorker),
+
+  // ── 5. Competitor IG Monitor ──────────────────
+  {
+    name: 'competitor-ig-monitor',
+    cwd: ENGINE_DIR,
+    script: './scripts/bot-competitor-ig-monitor.ts',
+    interpreter: 'node.exe',
+    node_args: '--import tsx',
+    ...DEFAULTS,
+    restart_delay: 30_000,
+    env: {
+      ...COMMON_ENV,
+      BOT_CDP_URL: 'http://localhost:9222',
+      AI_CORE_BASE: 'https://harvests-ai-core-api.inkflowapp.workers.dev',
+      AI_CORE_AUTH: 'Bearer dev',
+      IG_BASE: 'https://www.instagram.com',
+    },
+    args: ['--loop', '--interval-min', '360'],
+    error_file: path.join(LOGS_DIR, 'competitor-ig-monitor-error.log'),
+    out_file: path.join(LOGS_DIR, 'competitor-ig-monitor-out.log'),
+  },
+
+  // ── 5b. 通用行业情报机器人 ──────────────────
+  {
+    name: 'general-intel',
+    cwd: ENGINE_DIR,
+    script: './scripts/bot-general-intel.ts',
+    interpreter: 'node.exe',
+    node_args: '--import tsx',
+    ...DEFAULTS,
+    restart_delay: 30_000,
+    env: {
+      ...COMMON_ENV,
+      AI_CORE_BASE: 'https://harvests-ai-core-api.inkflowapp.workers.dev',
+      AI_CORE_AUTH: 'Bearer dev',
+      BOT_CDP_URL: 'http://localhost:9222',
+      TARGET_INDUSTRY: '',
+      TARGET_BRANDS: '',
+      SOURCE_URLS: '',
+      KEYWORDS: '',
+      INTEL_FOCUS: 'all',
+      GENERAL_TENANT: 'competitors:general',
+    },
+    args: ['--loop', '--interval-min', '360'],
+    error_file: path.join(LOGS_DIR, 'general-intel-error.log'),
+    out_file: path.join(LOGS_DIR, 'general-intel-out.log'),
+  },
+
+  // ── 6. Control-plane listener ──────────────────
+  {
+    name: 'bot-control-listener',
+    cwd: ENGINE_DIR,
+    script: './scripts/bot-control-listener.ts',
+    interpreter: 'node.exe',
+    node_args: '--import tsx',
+    ...DEFAULTS,
+    restart_delay: 5000,
+    env: {
+      ...COMMON_ENV,
+      CLOUD_API_BASE: 'https://harvests-cloud-api.inkflowapp.workers.dev',
+      BOT_API_TOKEN: 'vps-bot-secret-2024',
+      LISTENER_INTERVAL_MS: '10000',
+    },
+    error_file: path.join(LOGS_DIR, 'bot-control-listener-error.log'),
+    out_file: path.join(LOGS_DIR, 'bot-control-listener-out.log'),
+  },
+];
+
+module.exports = { apps };
