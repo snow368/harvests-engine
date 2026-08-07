@@ -147,10 +147,11 @@ const hashStr = (s: string) => { let h = 0; for (let i = 0; i < s.length; i++) h
 const pickDmScript = (handle: string) => BOT_DM_SCRIPTS[hashStr(handle || 'anon') % BOT_DM_SCRIPTS.length];
 
 // ── 回关 rapport 阶梯（先建立熟悉感，再软性 DM，绝不硬推广）──
-// 流程：detect → 点赞 1-2 篇帖子(≥6h 间隔) → 隔 ~18h 后真诚评论 1 条 → 预热窗口后发软性供货 DM
-// 这样对方是先被"同行欣赏"，再收到一条像朋友介绍的供货信息，自然转化而非被推销。
+// 流程：detect → 点赞 3 篇帖子(每天最多 1 篇，横跨 3 天) → 隔 ~18h 后真诚评论 1 条 → 再赞对方 1 条评论
+// → 预热窗口后发软性供货 DM。对方先被"同行持续欣赏"，再收到一条像朋友介绍的供货信息，自然转化而非被推销。
 const BOT_RAPPORT_DAILY_MAX = Math.max(0, Number(process.env.BOT_RAPPORT_DAILY_MAX || 15));
-const RAPPORT_LIKE_GAP_HOURS = Math.max(1, Number(process.env.RAPPORT_LIKE_GAP_HOURS || 6));
+const RAPPORT_LIKE_TARGET = Math.max(2, Number(process.env.RAPPORT_LIKE_TARGET || 3));
+const RAPPORT_LIKE_GAP_HOURS = Math.max(1, Number(process.env.RAPPORT_LIKE_GAP_HOURS || 24));
 const RAPPORT_COMMENT_AFTER_HOURS = Math.max(1, Number(process.env.RAPPORT_COMMENT_AFTER_HOURS || 18));
 // 软性 rapport 评论池（真诚赞美同行作品，绝不带任何推广/链接）
 const BOT_RAPPORT_COMMENTS_DEFAULT = [
@@ -458,6 +459,7 @@ if (!likeState.dm) likeState.dm = { byDay: {} };
 if (!likeState.dm.byDay) likeState.dm.byDay = {};
 
 const getTodayKey = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+const isSameDay = (a?: number, b?: number) => { if (!a || !b) return false; return getTodayKey(new Date(a)) === getTodayKey(new Date(b)); };
 const dmSentToday = () => Number(likeState.dm?.byDay?.[getTodayKey()] || 0);
 const recordDmSent = () => {
   const k = getTodayKey();
@@ -478,9 +480,9 @@ const syncFollowBackDmQueue = async (): Promise<boolean> => {
     for (const [handle, raw] of Object.entries(byHandle)) {
       const st = raw as any;
       if (!st?.followBackDetected || st.dmSent) continue;
-      // 熟悉度门槛：先点赞(≥2)或留过评论，再发 DM —— 不硬推广，先建立关系
+      // 熟悉度门槛：评论开启时需 ≥2 赞 + 1 条真实评论；评论关闭时需 ≥3 赞。先建立关系，不硬推广。
       const rp = st.rapport || {};
-      const rapportReady = BOT_COMMENT_ENABLED ? (rp.commentedAt > 0) : (rp.likedPosts >= 2);
+      const rapportReady = BOT_COMMENT_ENABLED ? (rp.likedPosts >= 2 && rp.commentedAt > 0) : (rp.likedPosts >= 3);
       if (!rapportReady) continue;
       if (now < (st.dmEligibleAt || 0)) continue;
       if (BOT_DM_DAILY_MAX > 0 && dmSentToday() >= BOT_DM_DAILY_MAX) break;
@@ -567,7 +569,48 @@ const rapportCommentPost = async (handle: string, text: string): Promise<boolean
   } catch { return false; }
 };
 
-// 每轮推进回关号的熟悉度阶梯：点赞 →（隔天）评论。DM 由 syncFollowBackDmQueue 在预热后发。
+// 给对方评论点个赞（比赞帖子更私密的熟悉信号：说明你连 TA 说了什么都看了）。
+// 打开对方最新帖子的评论区，找到作者(handle)自己的评论行，点赞它。
+const rapportLikeComment = async (handle: string): Promise<boolean> => {
+  if (!page) return false;
+  try {
+    await openProfile(handle);
+    await page.waitForTimeout(jitter(1500, 3000));
+    const firstPost = page.locator('a[href*="/p/"]').first();
+    if ((await firstPost.count()) === 0) return false;
+    await firstPost.click({ timeout: 8000 });
+    await page.waitForTimeout(jitter(1800, 3200));
+    // 若评论被折叠，先展开全部评论
+    const viewAll = page.locator('button, div[role="button"]').filter({ hasText: /view all/i }).first();
+    if ((await viewAll.count()) > 0) await viewAll.click({ timeout: 5000 }).catch(() => {});
+    await page.waitForTimeout(jitter(800, 1600));
+    // 找到「作者 handle 的评论行」里的 Like 按钮并标记，随后用 Playwright 真实点击
+    const found = await page.evaluate((h) => {
+      const svgs = Array.from(document.querySelectorAll('svg[aria-label="Like"]'));
+      for (const svg of svgs) {
+        let el = svg.parentElement;
+        while (el && el !== document.body) {
+          if (el.querySelector(`a[href^="/${h}/"]`)) {
+            (svg as SVGElement).setAttribute('data-rap-clike', '1');
+            return true;
+          }
+          el = el.parentElement;
+        }
+      }
+      return false;
+    }, handle);
+    if (!found) { await page.keyboard.press('Escape').catch(() => {}); return false; }
+    const likeBtn = page.locator('svg[data-rap-clike="1"]').first();
+    await likeBtn.click({ timeout: 6000 }).catch(() => {});
+    await page.waitForTimeout(jitter(1200, 2200));
+    await page.keyboard.press('Escape').catch(() => {});
+    recordRapport();
+    recordInteraction(handle, 'comment_like', { rapport: true, reason: 'follow_back_ladder' }).catch(() => {});
+    return true;
+  } catch { return false; }
+};
+
+// 每轮推进回关号的熟悉度阶梯：点赞 3 篇(每天 1 篇) → 真诚评论 → 赞对方评论。DM 由 syncFollowBackDmQueue 在预热后发。
 // 每个号每轮最多做 1 个 rapport 动作，且全局受 BOT_RAPPORT_DAILY_MAX 限制，确保"慢慢来"。
 const syncFollowBackRapport = async (): Promise<void> => {
   try {
@@ -578,10 +621,10 @@ const syncFollowBackRapport = async (): Promise<void> => {
       if (BOT_RAPPORT_DAILY_MAX > 0 && getRapportToday() >= BOT_RAPPORT_DAILY_MAX) break;
       const st = raw as any;
       if (!st?.followBackDetected || st.dmSent) continue; // DM 发完即停止 ladder
-      if (!st.rapport) st.rapport = { likedPosts: 0, lastLikeAt: 0, firstLikeAt: 0, commentedAt: 0 };
+      if (!st.rapport) st.rapport = { likedPosts: 0, lastLikeAt: 0, firstLikeAt: 0, commentedAt: 0, commentLikedAt: 0 };
       const rp = st.rapport;
-      // 阶段1：点赞 1-2 篇，≥6h 间隔，每次只补 1 篇（自然分散）
-      if (rp.likedPosts < 2 && now - (rp.lastLikeAt || 0) > RAPPORT_LIKE_GAP_HOURS * 3600_000) {
+      // 阶段1：点赞帖子。目标 RAPPORT_LIKE_TARGET(默认3) 篇，每天最多 1 篇（同天不重复），横跨多天显得是持续关注
+      if (rp.likedPosts < RAPPORT_LIKE_TARGET && !isSameDay(rp.lastLikeAt, now) && now - (rp.lastLikeAt || 0) > RAPPORT_LIKE_GAP_HOURS * 3600_000) {
         const got = await rapportLikePosts(handle, 1);
         if (got > 0) {
           rp.likedPosts += got;
@@ -592,11 +635,21 @@ const syncFollowBackRapport = async (): Promise<void> => {
         }
         continue;
       }
-      // 阶段2：已点赞且隔 ≥18h，留 1 条真诚评论
-      if (rp.likedPosts >= 1 && !rp.commentedAt && now - (rp.firstLikeAt || now) > RAPPORT_COMMENT_AFTER_HOURS * 3600_000) {
+      // 阶段2：已点赞 ≥2 篇且隔 ≥18h，留 1 条真诚评论
+      if (rp.likedPosts >= 2 && !rp.commentedAt && now - (rp.firstLikeAt || now) > RAPPORT_COMMENT_AFTER_HOURS * 3600_000) {
         const ok = await rapportCommentPost(handle, pickRapportComment(handle));
         if (ok) {
           rp.commentedAt = now;
+          saveLikeState(likeState);
+          await sleep(jitter(4000, 9000));
+        }
+        continue;
+      }
+      // 阶段3：已评论且隔 ≥6h，再给 TA 的评论点个赞（"你连 TA 说的话都认真看过"的私密信号）
+      if (rp.commentedAt && !rp.commentLikedAt && now - rp.commentedAt > RAPPORT_LIKE_GAP_HOURS * 3600_000) {
+        const ok = await rapportLikeComment(handle);
+        if (ok) {
+          rp.commentLikedAt = now;
           saveLikeState(likeState);
           await sleep(jitter(4000, 9000));
         }
@@ -934,7 +987,7 @@ const openProfile = async (handle: string) => {
             await page.waitForTimeout(jitter(500, 1200));
             recordInteraction(handle, 'like', { rapport: true, reason: 'follow_back' }).catch(() => {});
             // 同步计入 rapport 阶梯，使 syncFollowBackDmQueue 的"熟悉度门槛"能识别到已点赞
-            if (!st.rapport) st.rapport = { likedPosts: 0, lastLikeAt: 0, firstLikeAt: 0, commentedAt: 0 };
+            if (!st.rapport) st.rapport = { likedPosts: 0, lastLikeAt: 0, firstLikeAt: 0, commentedAt: 0, commentLikedAt: 0 };
             st.rapport.likedPosts = (st.rapport.likedPosts || 0) + 1;
             st.rapport.lastLikeAt = Date.now();
             if (!st.rapport.firstLikeAt) st.rapport.firstLikeAt = Date.now();
