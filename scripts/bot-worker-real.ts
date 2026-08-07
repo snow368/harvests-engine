@@ -144,7 +144,148 @@ let BOT_DM_SCRIPTS: string[] = BOT_DM_SCRIPTS_DEFAULT;
 try { if (process.env.BOT_DM_SCRIPTS_JSON) BOT_DM_SCRIPTS = JSON.parse(process.env.BOT_DM_SCRIPTS_JSON); } catch {}
 if (!Array.isArray(BOT_DM_SCRIPTS) || !BOT_DM_SCRIPTS.length) BOT_DM_SCRIPTS = BOT_DM_SCRIPTS_DEFAULT;
 const hashStr = (s: string) => { let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0; return Math.abs(h); };
-const pickDmScript = (handle: string) => BOT_DM_SCRIPTS[hashStr(handle || 'anon') % BOT_DM_SCRIPTS.length];
+const pickFromPool = (pool: string[], key: string) => pool[hashStr(key || 'anon') % pool.length];
+const pickDmScript = (handle: string, lang: string) => pickFromPool(DM_SCRIPTS_BY_LANG[lang] || DM_SCRIPTS_BY_LANG.en, handle);
+
+// ── 多语言文案池（2026-08-07：按对方国家语言发 DM/评论，真人感翻倍）──
+// DM 池：每语言 2 条软性 B2B 供货开场白；评论池：每语言 2 条真诚作品赞美（无推广）；
+// opener 池：检测到对方回赞时 DM 的个性化开头。en 引用默认池（可被 env 覆盖）。
+const DM_SCRIPTS_BY_LANG: Record<string, string[]> = {
+  en: BOT_DM_SCRIPTS,
+  de: [
+    "Hey — ich hab mir deine Arbeiten angeschaut, die Lines und das Shading sind echt sauber. Ich mache InkFlow (Großhandel für Tattoo-Bedarf: Farben, Cartridges, Aftercare). Falls du mal ein Sample-Kit testen oder Preise vergleichen willst, schreib mir einfach — ich besorge dir Künstlerkonditionen 🙌",
+    "Deine Stücke sind stark. Ich versorge Tattoo-Studios über InkFlow mit Großhandels-Bedarf (Farben, Nadeln, Aftercare) — zuverlässige Lieferungen und Künstlerpreise. Kein Druck, aber falls du eine solide Backup-Quelle brauchst, sag einfach Bescheid 👍"
+  ],
+  fr: [
+    "Salut — j'ai regardé ton travail, tes traits et ton ombrage sont vraiment propres. Je suis chez InkFlow (fournitures de tatouage en gros : encre, cartouches, aftercare). Si tu veux tester un kit d'échantillons ou comparer les prix, réponds-moi — je m'occupe de te donner des tarifs artistes 🙌",
+    "Tes pièces sont top. J'approvisionne les studios via InkFlow (encre + cartouches + aftercare, en gros) — restocks fiables et tarifs artistes. Sans pression, mais si une source d'approvisionnement solide t'intéresse, fais-moi signe 👍"
+  ],
+  it: [
+    "Ciao — ho visto i tuoi lavori, linee e ombreggiature davvero pulite. Lavoro con InkFlow (forniture per tatuatori all'ingrosso: inchiostri, cartucce, aftercare). Se vuoi provare un kit campione o confrontare i prezzi, scrivimi — ti faccio avere prezzi da artista 🙌",
+    "I tuoi pezzi sono forti. Fornisco studi di tatuaggio con InkFlow (inchiostri + cartucce + aftercare, all'ingrosso) — rifornimenti affidabili e prezzi da artista. Nessuna pressione, ma se ti serve una fonte solida, fammi sapere 👍"
+  ],
+  es: [
+    "Hola — estuve viendo tu trabajo, el trazo y el sombreado están muy limpios. Trabajo con InkFlow (material para tatuadores al por mayor: tinta, cartuchos, aftercare). Si quieres probar un kit de muestra o comparar precios, escríbeme — te consigo tarifa de artista 🙌",
+    "Tus piezas están brutales. Suministro a estudios con InkFlow (tinta + cartuchos + aftercare, al por mayor) — reposiciones fiables y precio de artista. Sin presión, pero si necesitas una fuente sólida, dímelo 👍"
+  ],
+  pt: [
+    "Oi — vi seu trabalho, o traço e o sombreamento são muito limpos. Sou da InkFlow (materiais para tatuagem no atacado: tinta, cartuchos, aftercare). Se quiser testar um kit de amostra ou comparar preços, me chama — consigo preço de artista pra você 🙌",
+    "Suas peças são demais. Forneço estúdios com a InkFlow (tinta + cartuchos + aftercare, atacado) — reposição confiável e preço de artista. Sem pressão, mas se precisar de uma fonte sólida, é só falar 👍"
+  ],
+  nl: [
+    "Hoi — ik heb je werk bekeken, de lijnen en het shading zijn echt strak. Ik werk bij InkFlow (groothandel in tattoobenenodigdheden: inkt, cartridges, aftercare). Wil je een sample-kit testen of prijzen vergelijken? Stuur me gerust een berichtje — ik regel artiestenprijzen voor je 🙌",
+    "Je stukken zijn top. Ik bevoorraad tattoo-studio's via InkFlow (inkt + cartridges + aftercare, groothandel) — betrouwbare aanvulling en artiestenprijzen. Geen druk, maar mocht je een solide backup-bron nodig hebben, laat het me weten 👍"
+  ],
+  pl: [
+    "Cześć — oglądałem twoje prace, kreska i cieniowanie są naprawdę czyste. Pracuję z InkFlow (hurtownia artykułów do tatuażu: tusze, kartridże, aftercare). Jeśli chcesz przetestować zestaw próbny albo porównać ceny, napisz — załatwię Ci ceny artystyczne 🙌",
+    "Twoje prace są świetne. Zaopatruję studia przez InkFlow (tusze + kartridże + aftercare, hurtowo) — pewne dostawy i ceny artystyczne. Bez presji, ale jeśli potrzebujesz solidnego źródła, daj znać 👍"
+  ],
+  tr: [
+    "Selam — çalışmalarına baktım, çizgiler ve gölgeleme gerçekten temiz. InkFlow'dayım (dövme malzemeleri toptan: mürekkep, kartuş, aftercare). Örnek kit denemek ya da fiyat karşılaştırmak istersen yaz — sana sanatçı fiyatı ayarlarım 🙌",
+    "Parçaların harika. Stüdyolara InkFlow ile toptan malzeme sağlıyorum (mürekkep + kartuş + aftercare) — güvenilir stok ve sanatçı fiyatı. Baskı yok, ama sağlam bir tedarik kaynağı ararsan haber ver 👍"
+  ],
+  cs: [
+    "Ahoj — koukal jsem na tvoje práce, linky i stínování jsou fakt čisté. Jsem z InkFlow (velkoobchod s tatérským materiálem: barvy, cartridge, aftercare). Jestli chceš vyzkoušet vzorkový kit nebo porovnat ceny, napiš — zařídím ti umělecké ceny 🙌",
+    "Tvoje kousky jsou super. Zásobuji studia přes InkFlow (barvy + cartridge + aftercare, velkoobchod) — spolehlivé doplňování a umělecké ceny. Žádný tlak, ale kdybys potřeboval solidní zdroj, dej vědět 👍"
+  ],
+  ja: [
+    "こんにちは。作品を拝見しました。ラインとシェーディングが本当にきれいです。InkFlow（タトゥー用品卸売：インク・カートリッジ・アフターケア）をやっています。サンプルキットを試したい、価格を比較したい、という時は気軽にメッセージください。アーティスト価格でご案内します🙌",
+    "作品がすごくいいですね。InkFlowでスタジオ向けにタトゥー用品（インク＋カートリッジ＋アフターケア）を卸しています。安定した補充とアーティスト価格で。プレッシャーはありませんが、頼れる仕入れ先が欲しい時は声をかけてください👍"
+  ],
+  ko: [
+    "안녕하세요. 작품을 봤는데 라인과 셰이딩이 정말 깔끔하네요. InkFlow(문신 용품 도매: 잉크, 카트리지, 애프터케어)를 운영하고 있습니다. 샘플 키트를 테스트하거나 가격을 비교하고 싶으시면 편하게 연락 주세요. 아티스트 가격으로 도와드릴게요 🙌",
+    "작품이 정말 멋집니다. InkFlow로 스튜디오에 문신 용품(잉크+카트리지+애프터케어)을 도매 공급하고 있어요. 안정적인 보충과 아티스트 가격으로요. 부담 없이, 믿을 만한 공급처가 필요하시면 말씀해 주세요 👍"
+  ],
+  zh: [
+    "你好，看了你的作品，线条和阴影处理得很干净。我在做 InkFlow（纹身用品批发：色料、针头、术后护理）。如果想试试样品套装或对比价格，随时回复我，给你艺术家价格 🙌",
+    "你的作品很棒。我通过 InkFlow 给工作室供货（色料+针头+术后护理，批发）。补货稳定、艺术家价格。没有压力，但如果你需要可靠的货源，说一声 👍"
+  ],
+  ru: [
+    "Привет — смотрел твои работы, линии и штриховка реально чистые. Я в InkFlow (оптом материалы для тату: чернила, картриджи, афтеркейр). Если хочешь попробовать пробный набор или сравнить цены — напиши, сделаю тебе цены для мастеров 🙌",
+    "Твои работы топ. Поставляю студиям через InkFlow (чернила + картриджи + афтеркейр, опт) — стабильные поставки и цены для мастеров. Без давления, но если нужен надёжный источник — дай знать 👍"
+  ],
+  sv: [
+    "Hej — jag har tittat på dina jobb, linjerna och skuggningen är riktigt rena. Jag jobbar med InkFlow (grossist för tatueringsmaterial: bläck, cartridges, aftercare). Om du vill testa ett provkit eller jämföra priser — skriv bara, jag fixar artistpriser åt dig 🙌",
+    "Dina grejer är grymma. Jag förser studior via InkFlow (bläck + cartridges + aftercare, grossist) — pålitliga leveranser och artistpriser. Ingen press, men om du behöver en stabil backup-källa, hör av dig 👍"
+  ]
+};
+const RAPPORT_COMMENTS_BY_LANG: Record<string, string[]> = {
+  en: BOT_RAPPORT_COMMENTS,
+  de: ["saubere Linienführung, gefällt mir 🔥", "dieses Shading ist so weich"],
+  fr: ["traits bien propres, j'adore 🔥", "ce dégradé est super doux"],
+  it: ["linee pulite, mi piace 🔥", "questo sfumato è morbidissimo"],
+  es: ["trazo limpio, me encanta 🔥", "este sombreado es muy suave"],
+  pt: ["traço limpo, amei 🔥", "esse sombreamento é muito suave"],
+  nl: ["strakke lijnen, top 🔥", "die shading is echt zacht"],
+  pl: ["czysta kreska, podoba mi się 🔥", "to cieniowanie jest takie miękkie"],
+  tr: ["temiz çizgiler, bayıldım 🔥", "bu gölgeleme çok yumuşak"],
+  cs: ["čisté linky, líbí se mi 🔥", "to stínování je tak jemné"],
+  ja: ["ラインがきれいですね 🔥", "このシェーディング、すごく柔らかい"],
+  ko: ["라인 깔끔하네요 🔥", "셰이딩이 정말 부드러워요"],
+  zh: ["线条很干净，喜欢 🔥", "这个阴影处理得好柔"],
+  ru: ["чистые линии, зашло 🔥", "эта штриховка такая мягкая"],
+  sv: ["rena linjer, gillar det 🔥", "det här skuggningen är så mjuk"]
+};
+const LIKED_US_OPENERS_BY_LANG: Record<string, string> = {
+  en: 'Saw you liked one of my pieces — appreciate it! ',
+  de: 'Hab gesehen, dass dir ein Beitrag von mir gefallen hat — danke! ',
+  fr: "J'ai vu que tu as aimé une de mes pièces — merci ! ",
+  it: 'Ho visto che ti è piaciuto un mio lavoro — grazie! ',
+  es: 'Vi que te gustó una de mis piezas — ¡gracias! ',
+  pt: 'Vi que você curtiu uma das minhas peças — obrigado! ',
+  nl: 'Zag dat je een van mijn stukken leuk vond — bedankt! ',
+  pl: 'Widziałem, że spodobał ci się mój post — dzięki! ',
+  tr: 'Gönderimi beğendiğini gördüm — teşekkürler! ',
+  cs: 'Viděl jsem, že se ti líbil můj příspěvek — díky! ',
+  ja: '私の作品にいいねをしてくれたのを見ました — ありがとうございます！ ',
+  ko: '제 작품에 좋아요를 눌러주셨네요 — 감사합니다! ',
+  zh: '看到你赞了我的作品 — 谢谢！ ',
+  ru: 'Увидел, что тебе понравился мой пост — спасибо! ',
+  sv: 'Såg att du gillade en av mina grejer — tack! '
+};
+
+// ── 国家/城市 → 语言 推断（2026-08-07）──
+// 优先用任务 payload 的 country/city；没有则从 handle 域名 TLD 推断（如 tattooshops.be → BE）。
+const COUNTRY_TO_LANG: Record<string, string> = {
+  US: 'en', GB: 'en', CA: 'en', AU: 'en', NZ: 'en', IE: 'en',
+  DE: 'de', AT: 'de', CH: 'de',
+  FR: 'fr', MC: 'fr',
+  IT: 'it', SM: 'it',
+  ES: 'es', MX: 'es', AR: 'es', CO: 'es', CL: 'es', PE: 'es', UY: 'es',
+  PT: 'pt', BR: 'pt', AO: 'pt', MZ: 'pt',
+  NL: 'nl',
+  PL: 'pl', CZ: 'cs', SK: 'sk',
+  TR: 'tr',
+  JP: 'ja', KR: 'ko', CN: 'zh', TW: 'zh', HK: 'zh',
+  RU: 'ru', UA: 'uk',
+  SE: 'sv', NO: 'no', DK: 'da', FI: 'fi',
+  GR: 'el', HU: 'hu', RO: 'ro'
+};
+// 比利时按城市分语言：瓦隆区(法) vs 佛兰德斯区(荷)。tattooshops.be 默认按 nl（佛兰德斯为主）。
+const BE_FR_CITIES = ['liège', 'liege', 'charleroi', 'namur', 'mons', 'tournai', 'bastogne', 'bruxelles', 'brussels', 'wavre', 'nivelles', 'la louvière', 'la louviere', 'verviers'];
+const TLD_TO_COUNTRY: Record<string, string> = {
+  be: 'BE', de: 'DE', fr: 'FR', it: 'IT', es: 'ES', pt: 'PT', nl: 'NL', pl: 'PL',
+  tr: 'TR', cz: 'CZ', jp: 'JP', kr: 'KR', cn: 'CN', ru: 'RU', uk: 'GB', ca: 'CA',
+  au: 'AU', ch: 'CH', at: 'AT', se: 'SE', no: 'NO', dk: 'DK', fi: 'FI', gr: 'GR', br: 'BR', mx: 'MX'
+};
+const inferCountryFromHandle = (handle: string): string => {
+  const m = (handle || '').toLowerCase().match(/\.([a-z]{2,3})(?:[/?#]|$)/);
+  return (m && TLD_TO_COUNTRY[m[1]]) || '';
+};
+const langFor = (handle: string, country?: string, city?: string): string => {
+  const c = String(country || '').toUpperCase();
+  if (c === 'BE') {
+    const cc = String(city || '').toLowerCase();
+    return BE_FR_CITIES.some((x) => cc.includes(x)) ? 'fr' : 'nl';
+  }
+  if (COUNTRY_TO_LANG[c]) return COUNTRY_TO_LANG[c];
+  const tld = inferCountryFromHandle(handle);
+  if (tld === 'BE') return 'nl';
+  return (tld && COUNTRY_TO_LANG[tld]) || 'en';
+};
+// 任务/回关号的位置缓存：handle -> { country, city }。任务 payload 有就用，否则 TLD 推断。
+const countryCache: Record<string, { country?: string; city?: string }> = {};
+
 
 // ── 回关 rapport 阶梯（先建立熟悉感，再软性 DM，绝不硬推广）──
 // 流程：detect → 点赞 3 篇帖子(每天最多 1 篇，横跨 3 天) → 隔 ~18h 后真诚评论 1 条 → 再赞对方 1 条评论
@@ -164,7 +305,7 @@ const BOT_RAPPORT_COMMENTS_DEFAULT = [
 let BOT_RAPPORT_COMMENTS: string[] = BOT_RAPPORT_COMMENTS_DEFAULT;
 try { if (process.env.BOT_RAPPORT_COMMENTS_JSON) BOT_RAPPORT_COMMENTS = JSON.parse(process.env.BOT_RAPPORT_COMMENTS_JSON); } catch {}
 if (!Array.isArray(BOT_RAPPORT_COMMENTS) || !BOT_RAPPORT_COMMENTS.length) BOT_RAPPORT_COMMENTS = BOT_RAPPORT_COMMENTS_DEFAULT;
-const pickRapportComment = (handle: string) => BOT_RAPPORT_COMMENTS[hashStr(handle || 'anon') % BOT_RAPPORT_COMMENTS.length];
+const pickRapportComment = (handle: string, lang: string) => pickFromPool(RAPPORT_COMMENTS_BY_LANG[lang] || RAPPORT_COMMENTS_BY_LANG.en, handle);
 
 // ── AI Core (sales_chats D1 sync for triangulation) ───────────────────
 // Bot pushes DM conversations into the sales_chats + chat_messages tables
@@ -487,9 +628,11 @@ const syncFollowBackDmQueue = async (): Promise<boolean> => {
       if (now < (st.dmEligibleAt || 0)) continue;
       if (BOT_DM_DAILY_MAX > 0 && dmSentToday() >= BOT_DM_DAILY_MAX) break;
       logBehavior('dm_direct_start', { targetHandle: handle });
-      const baseScript = pickDmScript(handle);
-      // 对方赞过我们 → DM 以"看到你赞了我的作品"开头，像真人回应而非群发
-      const scriptContent = (st as any).likedUsDetected ? `Saw you liked one of my pieces — appreciate it! ${baseScript}` : baseScript;
+      const cc = countryCache[handle] || {};
+      const lang = langFor(handle, cc.country || st.country, cc.city || st.city);
+      const baseScript = pickDmScript(handle, lang);
+      // 对方赞过我们 → DM 以本地语言的"看到你赞了我的作品"开头，像真人回应而非群发
+      const scriptContent = (st as any).likedUsDetected ? `${LIKED_US_OPENERS_BY_LANG[lang] || LIKED_US_OPENERS_BY_LANG.en}${baseScript}` : baseScript;
       const ok = await Promise.race([
         executeDmTask({ target_handle: handle, script_content: scriptContent }),
         new Promise<boolean>((_, rej) => setTimeout(() => rej(new Error('dm_direct_timeout_120s')), 120_000)),
@@ -498,7 +641,7 @@ const syncFollowBackDmQueue = async (): Promise<boolean> => {
         st.dmSent = true;
         recordDmSent();
         sentAny = true;
-        recordInteraction(handle, 'dm', { scriptContent, followback: true }).catch(() => {});
+        recordInteraction(handle, 'dm', { scriptContent, lang, followback: true }).catch(() => {});
         // best-effort 服务端记录（云端队列当前不可用，仅作 CRM/跨 bot 可见性）
         postJson('/api/marketing/tasks/report', { targetHandle: handle, status: 'sent', botId: BOT_ID }).catch(() => {});
       } else {
@@ -638,9 +781,11 @@ const syncFollowBackRapport = async (): Promise<void> => {
         }
         continue;
       }
-      // 阶段2：已点赞 ≥2 篇且隔 ≥18h，留 1 条真诚评论
+      // 阶段2：已点赞 ≥2 篇且隔 ≥18h，留 1 条真诚评论（用对方语言）
       if (rp.likedPosts >= 2 && !rp.commentedAt && now - (rp.firstLikeAt || now) > RAPPORT_COMMENT_AFTER_HOURS * 3600_000) {
-        const ok = await rapportCommentPost(handle, pickRapportComment(handle));
+        const cc = countryCache[handle] || {};
+        const lang = langFor(handle, cc.country || st.country, cc.city || st.city);
+        const ok = await rapportCommentPost(handle, pickRapportComment(handle, lang));
         if (ok) {
           rp.commentedAt = now;
           saveLikeState(likeState);
@@ -702,6 +847,8 @@ const checkIncomingFollowBacks = async () => {
     for (const h of sample) {
       const st = (likeState.follows!.byHandle![h] || (likeState.follows!.byHandle![h] = {})) as any;
       if (st.followBackDetected) continue; // 已处理过
+      if (!countryCache[h]) countryCache[h] = { country: inferCountryFromHandle(h) };
+      st.country = st.country || countryCache[h].country;
       st.followBackDetected = true;
       st.followBackDetectedAt = Date.now();
       st.followedAt = st.followedAt || 0; // 对方主动关注我们，我们不一定要回关
@@ -1015,6 +1162,8 @@ const openProfile = async (handle: string) => {
       const followsYou = await page.locator('text="Follows you"').first().isVisible({ timeout: 2000 }).catch(() => false);
       if (followsYou) {
         const st = likeState.follows!.byHandle![handle] as any;
+        if (!countryCache[handle]) countryCache[handle] = { country: inferCountryFromHandle(handle) };
+        st.country = st.country || countryCache[handle].country;
         st.followBackDetected = true;
         st.followBackDetectedAt = Date.now();
         // 预热窗口：回关后不秒发 DM，等 BOT_DM_WARMUP_HOURS 后再由 syncFollowBackDmQueue 直接发 DM
@@ -2557,6 +2706,13 @@ const executeCommand = async (command: CommandPayload) => {
   const commandId = command.id;
   const handle = String(command.artistHandle || '').replace(/^@/, '').trim();
   if (!handle) throw new Error('missing_artist_handle');
+  // 2026-08-07：任务 payload 的 country/city（create-from-artists 带出）→ 记入位置缓存，
+  // 供回关 DM/评论按对方国家语言发文案。
+  if ((command as any).country || (command as any).city) {
+    countryCache[handle] = { country: String((command as any).country || ''), city: String((command as any).city || '') };
+    const st = likeState.follows?.byHandle?.[handle] as any;
+    if (st) { st.country = st.country || String((command as any).country || ''); st.city = st.city || String((command as any).city || ''); }
+  }
   // 2026-08-06：任务 payload 里的前台动作偏好 → 动态覆盖本进程默认值。
   // 前台「动作偏好」面板设置的 点赞/评论/关注 次数，由 ig-scheduler 写进任务 payload，
   // 这里在本次任务执行期间生效（不污染全局 env，进程级开关保持原样）。
