@@ -761,6 +761,7 @@ const checkWhoLikedUs = async (): Promise<void> => {
   } catch {}
 };
 
+const logBehavior = (event: string, data: Record<string, any> = {}) => {
   try {
     behaviorBuffer.push({ ...data, ts: new Date().toISOString(), botId: BOT_ID, event });
   } catch {}
