@@ -339,9 +339,10 @@ const detectLangFromText = (text: string): string => {
   for (const [lang, feats] of Object.entries(LANG_FEATURES)) {
     let score = 0;
     for (const f of feats) {
-      const low = f.toLowerCase();
-      let idx = lower.indexOf(low);
-      while (idx !== -1) { score++; idx = lower.indexOf(low, idx + low.length); }
+      // 词边界匹配（2026-08-07 修复：子串匹配会把英文 latest 里的 est / available 里的 le 误判为法语）
+      const re = new RegExp(`(^|[^a-zà-ÿ0-9])${f}(?=[^a-zà-ÿ0-9])`, 'g');
+      const m = lower.match(re);
+      if (m) score += m.length;
     }
     if (score > bestScore) { bestScore = score; best = lang; }
   }
