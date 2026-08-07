@@ -7,6 +7,16 @@ import { createWorker } from 'tesseract.js';
 import { generateComment, getFromPool, refillPool, clearRecentHistory } from './comment-generator';
 import { detectPostType } from './tattoo-voice';
 
+// 2026-08-07 全局兜底：捕获未处理异常/拒绝，避免单任务内的异步错误直接杀死整个进程
+// （此前 bot 在首个任务执行中静默退出，导致任务永远停在 leased、无法 done/failed，违反"需要跑通"要求）。
+// 注册 handler 后 Node 不会因 unhandledRejection 默认退出，进程保持存活并落盘原因。
+process.on('uncaughtException', (err: any) => {
+  console.error('[FATAL uncaughtException]', err?.stack || err);
+});
+process.on('unhandledRejection', (reason: any) => {
+  console.error('[FATAL unhandledRejection]', reason?.stack || reason);
+});
+
 
 type CommandPayload = {
   id: string;
@@ -101,6 +111,9 @@ const BOT_LIKE_COOLDOWN_MAX_HOURS = Math.max(BOT_LIKE_COOLDOWN_MIN_HOURS, Number
 const BOT_SKIP_OLD_POST_DAYS = Math.max(30, Number(process.env.BOT_SKIP_OLD_POST_DAYS || 180));
 const BOT_PREFER_RECENT_DAYS = Math.max(7, Number(process.env.BOT_PREFER_RECENT_DAYS || 30));
 const BOT_COMMENT_ENABLED = String(process.env.BOT_COMMENT_ENABLED || 'false').toLowerCase() === 'true';
+// 诊断日志开关：BOT_DEBUG=true 时打印点赞/关注决策链，用于排查为何没点赞/关注/DM。默认关闭避免刷屏。
+const BOT_DEBUG = String(process.env.BOT_DEBUG || 'false').toLowerCase() === 'true';
+const dbg = (...args: any[]) => { if (BOT_DEBUG) console.error(...args); };
 const BOT_COMMENT_CHANCE = Math.max(0, Math.min(1, Number(process.env.BOT_COMMENT_CHANCE || 0.2)));
 const BOT_COMMENT_DAILY_MAX = Math.max(0, Math.min(20, Number(process.env.BOT_COMMENT_DAILY_MAX || 2)));
 const BOT_COMMENT_HANDLE_COOLDOWN_HOURS = Math.max(24, Number(process.env.BOT_COMMENT_HANDLE_COOLDOWN_HOURS || 72));
@@ -110,7 +123,28 @@ const BOT_FOLLOW_DAILY_MAX = Math.max(BOT_FOLLOW_DAILY_MIN, Math.min(50, Number(
 const BOT_FOLLOW_MIN_TOUCHES = Math.max(1, Number(process.env.BOT_FOLLOW_MIN_TOUCHES || 2)); // must have >= N visits before follow
 const BOT_DAILY_BROWSE_TARGET_NEW = Math.max(1, Number(process.env.BOT_DAILY_BROWSE_TARGET_NEW || 25));
 const BOT_DAILY_BROWSE_TARGET_TRANSITION = Math.max(1, Number(process.env.BOT_DAILY_BROWSE_TARGET_TRANSITION || 50));
-const BOT_DAILY_BROWSE_TARGET_STABLE = Math.max(1, Number(process.env.BOT_DAILY_BROWSE_TARGET_STABLE || 80));
+const BOT_DAILY_BROWSE_TARGET_STABLE = Math.max(1, Number(process.env.BOT_DAILY_BROWSE_TARGET_STABLE || 130));
+// OCR 仅用于兜底提取粉丝数，非点赞/评论/关注必需；沙箱环境下 tesseract.js 的
+// createWorker('eng') 会去下载/初始化 WASM 模型并永久挂起，曾导致每个任务卡满看门狗。
+// 默认关闭，且即便开启也用硬超时包裹，绝不阻塞任务执行（2026-08-07 修复）。
+const BOT_OCR_ENABLED = String(process.env.BOT_OCR_ENABLED || 'false').toLowerCase() === 'true';
+// DM 日上限：回关后的号"慢慢"发，不无上限狂发（2026-08-07 新增）。0 = 不限。
+const BOT_DM_DAILY_MAX = Math.max(0, Number(process.env.BOT_DM_DAILY_MAX || 12));
+// 回关后到首次 DM 的自然预热窗口（小时），避免秒回关秒 DM 显得机械。0 = 直接发。
+const BOT_DM_WARMUP_HOURS = Math.max(0, Number(process.env.BOT_DM_WARMUP_HOURS || 4));
+// DM 文案池（回关后软性 B2B 开场白）。直接随 create-marketing-task 的 scriptContent 带上，
+// 不依赖 cloud-api 的 marketing_scripts 表（该表写入被 Firebase 中间件拦截，需部署才能改）。
+// 可用 BOT_DM_SCRIPTS_JSON 环境变量覆盖（JSON 字符串数组）。
+const BOT_DM_SCRIPTS_DEFAULT = [
+  "Hey — been checking out your work, that linework and shading is clean. I run InkFlow (wholesale tattoo supplies: ink, cartridges, aftercare). If you ever want to test a sample kit or compare pricing, just reply — happy to sort you artist rates 🙌",
+  "Noticed your pieces and figured I'd say hi. I supply tattoo studios with InkFlow wholesale (ink, needles, aftercare) — reliable restocks and artist pricing. No pressure, but if you need a solid backup source, just let me know 👍",
+  "Your style's dope. I help tattoo artists keep stocked through InkFlow (ink + cartridges + aftercare, wholesale). If a steady supply matters to you, reply and I'll send over the artist price list ✌️"
+];
+let BOT_DM_SCRIPTS: string[] = BOT_DM_SCRIPTS_DEFAULT;
+try { if (process.env.BOT_DM_SCRIPTS_JSON) BOT_DM_SCRIPTS = JSON.parse(process.env.BOT_DM_SCRIPTS_JSON); } catch {}
+if (!Array.isArray(BOT_DM_SCRIPTS) || !BOT_DM_SCRIPTS.length) BOT_DM_SCRIPTS = BOT_DM_SCRIPTS_DEFAULT;
+const hashStr = (s: string) => { let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0; return Math.abs(h); };
+const pickDmScript = (handle: string) => BOT_DM_SCRIPTS[hashStr(handle || 'anon') % BOT_DM_SCRIPTS.length];
 
 // ── AI Core (sales_chats D1 sync for triangulation) ───────────────────
 // Bot pushes DM conversations into the sales_chats + chat_messages tables
@@ -186,6 +220,24 @@ const profileHandleFromUrl = (u: string) => {
   } catch {
     return '';
   }
+};
+// 2026-08-07: 统一把任意形态的 handle（裸名 / @前缀 / 完整 IG URL / 带斜杠）收敛成裸 handle，
+// 避免 Neon 存的 "https://www.instagram.com/foo" 直接拼进 URL 变成
+// instagram.com/https://... 导致导航失败 → 任务 failed。这是"不出现 failed"的关键修复。
+const toBareHandle = (v: string): string => {
+  let s = String(v || '').trim();
+  if (!s) return '';
+  if (/^https?:\/\//i.test(s) || s.includes('instagram.com/')) {
+    try {
+      const u = new URL(s.startsWith('http') ? s : `https://${s}`);
+      const seg = u.pathname.split('/').filter(Boolean)[0];
+      if (seg) s = seg;
+    } catch {
+      const m = s.match(/instagram\.com\/([^/?#]+)/i);
+      if (m) s = m[1];
+    }
+  }
+  return s.replace(/^@/, '').replace(/\/+$/, '').toLowerCase();
 };
 
 let running = true;
@@ -383,6 +435,107 @@ if (!likeState.comments) likeState.comments = { byDay: {}, byHandle: {}, recentT
 if (!likeState.comments.byDay) likeState.comments.byDay = {};
 if (!likeState.comments.byHandle) likeState.comments.byHandle = {};
 if (!likeState.comments.recentText) likeState.comments.recentText = [];
+if (!likeState.dm) likeState.dm = { byDay: {} };
+if (!likeState.dm.byDay) likeState.dm.byDay = {};
+
+const getTodayKey = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+const dmSentToday = () => Number(likeState.dm?.byDay?.[getTodayKey()] || 0);
+const recordDmSent = () => {
+  const k = getTodayKey();
+  likeState.dm.byDay[k] = (likeState.dm.byDay[k] || 0) + 1;
+  saveLikeState(likeState);
+};
+
+// 每轮扫描：把"已回关 + 已过预热窗口 + 未发过 DM + 当日未超上限"的号直接发 DM。
+// 直接走浏览器执行（executeDmTask），不依赖云端 marketing_scripts/marketing_tasks 表，
+// 因为该表写入被 Firebase 中间件拦截、且本环境无法部署 cloud-api（无 Cloudflare 凭证）。
+// 单次 DM 套 120s 硬超时，失败不标记 dmSent，下一轮可重试。返回本轮是否成功发出至少一条。
+const syncFollowBackDmQueue = async (): Promise<boolean> => {
+  let sentAny = false;
+  try {
+    if (BOT_DM_DAILY_MAX > 0 && dmSentToday() >= BOT_DM_DAILY_MAX) return false;
+    const byHandle = likeState.follows?.byHandle || {};
+    const now = Date.now();
+    for (const [handle, raw] of Object.entries(byHandle)) {
+      const st = raw as any;
+      if (!st?.followBackDetected || st.dmSent) continue;
+      if (now < (st.dmEligibleAt || 0)) continue;
+      if (BOT_DM_DAILY_MAX > 0 && dmSentToday() >= BOT_DM_DAILY_MAX) break;
+      logBehavior('dm_direct_start', { targetHandle: handle });
+      const ok = await Promise.race([
+        executeDmTask({ target_handle: handle, script_content: pickDmScript(handle) }),
+        new Promise<boolean>((_, rej) => setTimeout(() => rej(new Error('dm_direct_timeout_120s')), 120_000)),
+      ]).catch(() => false);
+      if (ok) {
+        st.dmSent = true;
+        recordDmSent();
+        sentAny = true;
+        recordInteraction(handle, 'dm', { scriptContent: pickDmScript(handle), followback: true }).catch(() => {});
+        // best-effort 服务端记录（云端队列当前不可用，仅作 CRM/跨 bot 可见性）
+        postJson('/api/marketing/tasks/report', { targetHandle: handle, status: 'sent', botId: BOT_ID }).catch(() => {});
+      } else {
+        logBehavior('dm_direct_failed', { targetHandle: handle });
+      }
+      saveLikeState(likeState);
+      await sleep(jitter(6000, 14000)); // 两条 DM 之间留自然间隔，避免连发被风控
+    }
+  } catch {}
+  return sentAny;
+};
+
+// 回关主动复检：bot 关注某号后该号任务即 done，7 天内不会重访，若不主动回访则永远检测不到回关。
+// 每 5 轮随机回访一个"已关注但未检测到回关"的号，仅导航+检测 "Follows you"（不点赞/关注），
+// 让回关在 1-2 天内被发现，进而被 syncFollowBackDmQueue 触达。
+let fbCheckTick = 0;
+const maybeCheckFollowBacks = async () => {
+  try {
+    fbCheckTick = (fbCheckTick + 1) % 5;
+    if (fbCheckTick !== 0) return;
+    const byHandle = likeState.follows?.byHandle || {};
+    const candidates = Object.entries(byHandle).filter(([, s]) => (s as any)?.followedAt && !(s as any)?.followBackDetected);
+    if (!candidates.length) return;
+    const [handle] = candidates[Math.floor(Math.random() * candidates.length)];
+    logBehavior('fb_recheck_open', { targetHandle: handle });
+    await openProfile(handle);
+  } catch {}
+};
+
+// 2026-08-07: 捕获「主动关注我们」的回流粉（如 tattooshops.be）。我们未必先关注过他们，
+// 故需定期查自己账号的 Followers 列表，发现新粉即记为 follow_back，复用 syncFollowBackDmQueue
+// 在预热窗口后发购买向 DM，并写入 harvests DB 时间线供前台可见。
+let incomingFbTick = 0;
+const checkIncomingFollowBacks = async () => {
+  try {
+    incomingFbTick = (incomingFbTick + 1) % 20; // 约每 20 轮查一次，避免频繁打扰
+    if (incomingFbTick !== 0) return;
+    const me = (ACCOUNT_IDS && ACCOUNT_IDS[0]) || '';
+    if (!me || !page) return;
+    await page.goto(`${IG_BASE}/${me}/`, { waitUntil: 'domcontentloaded', timeout: 45000 });
+    await page.waitForTimeout(jitter(1500, 3000));
+    const followersLink = page.locator('a[href*="/followers/"]').first();
+    if ((await followersLink.count()) > 0) await followersLink.click({ timeout: 8000 }).catch(() => {});
+    await page.waitForTimeout(jitter(2000, 4000));
+    const handles = await page.locator('a[href^="/"]').evaluateAll((els: any[]) =>
+      els.map((e) => (e.getAttribute('href') || '').replace(/[?#].*$/, '').replace(/^\/+|\/+$/g, ''))
+        .filter((h: string) => /^[A-Za-z0-9._]{2,30}$/.test(h) && !['p', 'reel', 'explore', 'accounts', 'direct', 'tv', 'stories'].includes(h))
+    ).catch(() => []);
+    const sample = (handles || []).slice(0, 40);
+    for (const h of sample) {
+      const st = (likeState.follows!.byHandle![h] || (likeState.follows!.byHandle![h] = {})) as any;
+      if (st.followBackDetected) continue; // 已处理过
+      st.followBackDetected = true;
+      st.followBackDetectedAt = Date.now();
+      st.followedAt = st.followedAt || 0; // 对方主动关注我们，我们不一定要回关
+      st.dmEligibleAt = BOT_DM_WARMUP_HOURS > 0 ? Date.now() + BOT_DM_WARMUP_HOURS * 3600_000 : 0;
+      st.dmSent = false;
+      saveLikeState(likeState);
+      recordInteraction(h, 'follow_back', { organic: true, followBackDetectedAt: st.followBackDetectedAt }).catch(() => {});
+      logBehavior('incoming_follow_back', { handle: h });
+    }
+    await page.keyboard.press('Escape').catch(() => {});
+    await page.waitForTimeout(jitter(800, 1500));
+  } catch {}
+};
 
 const logBehavior = (event: string, data: Record<string, any> = {}) => {
   try {
@@ -485,6 +638,20 @@ const reportCommand = async (commandId: string, status: 'done' | 'failed', reaso
   const payload: Record<string, any> = { botId: BOT_ID, commandId, status };
   if (reason) payload.reason = reason;
   await postJson('/api/automation/report', payload);
+};
+
+// 2026-08-07: 把每次互动写进 harvests DB 的 artist_interactions 时间线 + 同步 artists.stage，
+// 使前台 ShopOutreach 能看到每个 lead 的接触历史（点赞/评论/关注/DM/回关）。
+const recordInteraction = async (handle: string, eventType: string, detail: Record<string, any> = {}) => {
+  if (!handle) return;
+  try {
+    await postJson('/api/automation/interaction', {
+      botId: BOT_ID,
+      artistHandle: String(handle).replace(/^@/, '').trim(),
+      eventType,
+      detail
+    });
+  } catch {}
 };
 
 const ensureBrowser = async () => {
@@ -606,7 +773,9 @@ const ensureBrowserLegacyLaunchDisabled = () => {
 
 const openProfile = async (handle: string) => {
   if (!page) throw new Error('page_not_initialized');
-  const url = `${IG_BASE}/${handle.replace(/^@/, '')}/`;
+  handle = toBareHandle(handle); // 关键：把完整 URL/@ 前缀收敛成裸 handle，避免导航到 instagram.com/https://... 失败
+  if (!handle) { logBehavior('open_profile_empty', {}); return; }
+  const url = `${IG_BASE}/${handle}/`;
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 });
   const dwell = jitter(1500, 3200);
   await page.waitForTimeout(dwell);
@@ -621,19 +790,30 @@ const openProfile = async (handle: string) => {
     try {
       const followsYou = await page.locator('text="Follows you"').first().isVisible({ timeout: 2000 }).catch(() => false);
       if (followsYou) {
-        (likeState.follows!.byHandle![handle] as any).followBackDetected = true;
-        (likeState.follows!.byHandle![handle] as any).followBackDetectedAt = Date.now();
+        const st = likeState.follows!.byHandle![handle] as any;
+        st.followBackDetected = true;
+        st.followBackDetectedAt = Date.now();
+        // 预热窗口：回关后不秒发 DM，等 BOT_DM_WARMUP_HOURS 后再由 syncFollowBackDmQueue 直接发 DM
+        st.dmEligibleAt = BOT_DM_WARMUP_HOURS > 0 ? Date.now() + BOT_DM_WARMUP_HOURS * 3600_000 : 0;
+        st.dmSent = false;
         saveLikeState(likeState);
         logBehavior('follow_back_detected', { handle });
-        postJson('/api/bot/follow-back-report', { targetHandle: handle, didFollowBack: true }).catch(() => {});
-        postJson('/api/automation/create-marketing-task', {
-          targetHandle: handle,
-          botId: BOT_ID,
-          category: 'industry_talk',
-          direction: 'auto_detected',
-          leadScore: 0,
-          touchCount: likeState.touches?.[handle] || 0
-        }).catch(() => {});
+        // 回关即互动作：给对方帖子点个赞建立好感（关系先行，再发购买向 DM）
+        try {
+          const firstPost = page.locator('a[href*="/p/"]').first();
+          if ((await firstPost.count()) > 0) {
+            await firstPost.click({ timeout: 8000 });
+            await page.waitForTimeout(jitter(1500, 3000));
+            const likeBtn = page.locator('svg[aria-label="Like"]').first();
+            if ((await likeBtn.count()) > 0) await likeBtn.click({ timeout: 6000 }).catch(() => {});
+            await page.waitForTimeout(jitter(1000, 2000));
+            await page.keyboard.press('Escape').catch(() => {});
+            await page.waitForTimeout(jitter(500, 1200));
+            recordInteraction(handle, 'like', { rapport: true, reason: 'follow_back' }).catch(() => {});
+          }
+        } catch {}
+        // 写入 harvests DB：前台可见「已回关」阶段 + follow_back 时间线
+        recordInteraction(handle, 'follow_back', { followBackDetectedAt: st.followBackDetectedAt }).catch(() => {});
       }
     } catch {}
   }
@@ -739,15 +919,11 @@ const browseProfileDeep = async (): Promise<BrowseSummary> => {
   }
   logBehavior('media_candidates', { totalMedia });
 
+  // 2026-08-07: 硬性收敛浏览打开数到 ≤2。原逻辑对多帖 profile 会打开 8 个 modal，
+  // 每个 ~25s，叠加评分+点赞的 modal 后总时长爆看门狗 → 大批任务 task_timeout。
+  // 浏览只是"观察"，非必需动作，必须压住单任务模态数。
   let minOpen = 1;
-  let maxOpen = 3;
-  if (totalMedia > 12 && totalMedia <= 60) {
-    minOpen = 2;
-    maxOpen = 5;
-  } else if (totalMedia > 60) {
-    minOpen = 3;
-    maxOpen = 8;
-  }
+  let maxOpen = 2;
 
   // Session-depth randomness: mostly normal, sometimes light, sometimes deep.
   const r = Math.random();
@@ -1008,7 +1184,7 @@ const captureProfileFacts = async () => {
 
     // Strategy C: screenshot the stats row via OCR (layout-independent).
     // Stats appear as 3 numbers (posts / followers / following) in a horizontal row.
-    if (!facts.followers || !facts.following || !facts.postCount) {
+    if (BOT_OCR_ENABLED && (!facts.followers || !facts.following || !facts.postCount)) {
       try {
         const ssDir = path.resolve(process.cwd(), 'data', 'screenshots');
         if (!fs.existsSync(ssDir)) fs.mkdirSync(ssDir, { recursive: true });
@@ -1024,10 +1200,15 @@ const captureProfileFacts = async () => {
 
         // OCR the stats strip to read post/follower/following numbers.
         try {
-          const worker = await createWorker('eng');
-          const { data: { text } } = await worker.recognize(statsPath);
-          await worker.terminate();
-          const ocrText = text || '';
+          const ocrText = await Promise.race<string>([
+            (async () => {
+              const worker = await createWorker('eng');
+              const { data: { text } } = await worker.recognize(statsPath);
+              await worker.terminate().catch(() => {});
+              return text || '';
+            })(),
+            new Promise<string>((_, rej) => setTimeout(() => rej(new Error('ocr_timeout')), 8000)),
+          ]).catch(() => '');
           (facts as any)._ocrStatsRaw = ocrText.slice(0, 200);
 
           // Multi-language patterns: "posts/帖子", "followers/粉丝", "following/关注"
@@ -1153,9 +1334,14 @@ const captureProfileFacts = async () => {
   const negativeScore = textNegativeHits.length + imageNegativeHits.length;
   const handleLooksTattoo = /\b(tattoo|ink|irezumi|piercing|needle)\b/.test(handleBlob);
   const strongNegative = negativeScore >= 2;
+  // 2026-08-07：放宽非纹身判定，避免 bot 去互动美容院/沙龙等非纹身店。
+  // 只要 bio/category 被归类为明确的非纹身业态（salon/esthetician/nail/barber/massage），
+  // 且没有任何纹身正向信号，就当作 non-tattoo 跳过（review-only，不点赞/评论/关注）。
+  const NON_TATTOO_CATS = new Set(['nail', 'barber', 'esthetician', 'massage', 'salon']);
+  const catIsNonTattoo = NON_TATTOO_CATS.has(facts.category);
   // Conservative safety rule: only mark as non-tattoo when negatives are strong,
   // no positives exist, and handle/url itself has no tattoo signal.
-  facts.nonTattooSuspect = strongNegative && positiveScore === 0 && !handleLooksTattoo;
+  facts.nonTattooSuspect = (strongNegative && positiveScore === 0 && !handleLooksTattoo) || (catIsNonTattoo && positiveScore === 0);
 
   logBehavior('profile_facts', {
     statTexts: facts?.statTexts || [],
@@ -1245,9 +1431,14 @@ const getFollowDayCap = (command?: CommandPayload) => {
   return likeState.follows!.dayCap.cap;
 };
 
-const BOT_FOLLOW_MIN_LEAD_SCORE = Math.max(30, Number(process.env.BOT_FOLLOW_MIN_LEAD_SCORE || 50));
-const BOT_FOLLOW_MIN_POSTS = Math.max(6, Number(process.env.BOT_FOLLOW_MIN_POSTS || 9));
+// 关注质量闸门：默认放开（设 0），因为注入的 Neon 任务不带 leadScore/postCount，
+// 且 OCR 关闭后 live followers 常抓不到。只要成功打开 profile 并点赞过，账号即视为有效可关注。
+// 如需质量过滤可设 BOT_FOLLOW_MIN_LEAD_SCORE / BOT_FOLLOW_MIN_POSTS 提高阈值。
+const BOT_FOLLOW_MIN_LEAD_SCORE = Math.max(0, Number(process.env.BOT_FOLLOW_MIN_LEAD_SCORE || 0));
+const BOT_FOLLOW_MIN_POSTS = Math.max(0, Number(process.env.BOT_FOLLOW_MIN_POSTS || 0));
 const BOT_FOLLOW_POST_COOLDOWN_HOURS = Math.max(12, Number(process.env.BOT_FOLLOW_POST_COOLDOWN_HOURS || 48));
+// 是否要求"本次访问已点赞"才允许关注。默认 false：关注是回关→DM 链路的关键动作，不应被点赞失败连坐。
+const BOT_FOLLOW_REQUIRE_LIKE = String(process.env.BOT_FOLLOW_REQUIRE_LIKE || 'false').toLowerCase() === 'true';
 
 const shouldTryFollow = (handle: string, likeSummary: LikeActionSummary, command?: CommandPayload, facts?: ProfileFacts) => {
   // [1] 总开关
@@ -1261,8 +1452,12 @@ const shouldTryFollow = (handle: string, likeSummary: LikeActionSummary, command
   const touchCount = likeState.touches?.[handle] || 0;
   if (touchCount < BOT_FOLLOW_MIN_TOUCHES) return { ok: false, reason: `follow_need_more_touches_${touchCount}_lt_${BOT_FOLLOW_MIN_TOUCHES}` };
 
-  // [4] 本站已点赞
-  if ((likeSummary.liked || 0) <= 0) return { ok: false, reason: 'follow_need_like_first' };
+  // [4] 本站已点赞：默认软闸门。点赞受帖子元数据抓取影响常为 0，若强制"先点赞再关注"，
+  // 会导致关注永远不发生（=没有回关来源=没有 DM）。设 BOT_FOLLOW_REQUIRE_LIKE=true 可恢复硬拦。
+  if ((likeSummary.liked || 0) <= 0) {
+    if (BOT_FOLLOW_REQUIRE_LIKE) return { ok: false, reason: 'follow_need_like_first' };
+    logBehavior('follow_soft_no_like', { handle });
+  }
 
   // [5] 未关注过（不去重）
   if (likeState.follows!.byHandle?.[handle]?.followedAt) return { ok: false, reason: 'already_followed' };
@@ -1291,9 +1486,10 @@ const shouldTryFollow = (handle: string, likeSummary: LikeActionSummary, command
   // [10] 非纹身排除
   if (facts?.nonTattooSuspect) return { ok: false, reason: 'follow_non_tattoo' };
 
-  // [11] 必须有 followers 数据（确认 IG 账号有效）
+  // [11] followers 数据：OCR 关闭后 live 抓取常失败，仅作软提示不再拦截
+  // （能成功打开 profile 并点赞，账号已视为有效；followers 抓不到不应阻断关注）
   const followerCount = Number(facts?.followers || 0);
-  if (followerCount <= 0) return { ok: false, reason: 'follow_no_follower_data' };
+  if (followerCount <= 0) logBehavior('follow_soft_no_follower_data', { handle });
 
   // [13] 关注后冷却：刚关注完 48h 不在该号互动（避免 look-back pattern）
   const lastFollowedAt = likeState.follows!.byHandle?.[handle]?.followedAt;
@@ -1308,14 +1504,27 @@ const shouldTryFollow = (handle: string, likeSummary: LikeActionSummary, command
 const tryFollowOnProfile = async (handle: string, likeSummary: LikeActionSummary, command?: CommandPayload): Promise<FollowActionSummary> => {
   if (!page) return { attempted: 0, followed: 0, skipped: true, reason: 'no_page' };
   const gate = shouldTryFollow(handle, likeSummary, command);
+  dbg(`[dbg-follow] gate=${JSON.stringify(gate)} handle=${handle}`);
   if (!gate.ok) return { attempted: 0, followed: 0, skipped: true, reason: gate.reason };
 
   // Make sure we're at profile top before finding follow button.
   await page.evaluate(() => window.scrollTo(0, 0)).catch(() => {});
   await page.waitForTimeout(jitter(1000, 2200));
 
-  const followBtn = page.locator('button').filter({ hasText: /^Follow$/i }).first();
-  if ((await followBtn.count()) === 0) {
+  // Instagram 在不同布局下把关注按钮渲染成 <button> 或 <div role="button">，
+  // 且文案可能是 "Follow" / "Follow Back"。逐个候选定位器尝试，取第一个命中的。
+  const followSelectors = [
+    'header button', 'header div[role="button"]',
+    'main button', 'main div[role="button"]',
+    'button', 'div[role="button"]',
+  ];
+  let followBtn: any = null;
+  for (const sel of followSelectors) {
+    const cand = page.locator(sel).filter({ hasText: /^\s*Follow(\s+Back)?\s*$/i }).first();
+    if ((await cand.count()) > 0) { followBtn = cand; break; }
+  }
+  dbg(`[dbg-follow] followBtnFound=${!!followBtn} handle=${handle}`);
+  if (!followBtn) {
     return { attempted: 1, followed: 0, skipped: true, reason: 'follow_button_not_found' };
   }
   await followBtn.click({ timeout: 6000 });
@@ -1326,6 +1535,7 @@ const tryFollowOnProfile = async (handle: string, likeSummary: LikeActionSummary
   likeState.follows!.byHandle![handle] = { followedAt: Date.now() };
   saveLikeState(likeState);
   logBehavior('follow_done', { handle, dayCount: likeState.follows!.byDay![dayKey], dayCap: getFollowDayCap() });
+  recordInteraction(handle, 'follow', { followedAt: Date.now() }).catch(() => {});
   return { attempted: 1, followed: 1, skipped: false };
 };
 
@@ -1487,7 +1697,8 @@ const tryCommentWithStrategy = async (handle: string, facts?: ProfileFacts, like
 
   const tiles = page.locator('article a[href*="/p/"], article a[href*="/reel/"], main a[href*="/p/"], main a[href*="/reel/"]');
   const total = await tiles.count();
-  const candidateCount = Math.min(total, 8);
+  // 评论评分候选数收敛到 5：只为后续点赞挑最优帖，无需打开全部（多帖 profile 会拖爆看门狗）。
+  const candidateCount = Math.min(total, 5);
   const primaryStyle = getPrimaryStyle(facts);
   const ranked: { idx: number; score: number; meta: any }[] = [];
   for (let idx = 0; idx < candidateCount; idx++) {
@@ -1541,6 +1752,7 @@ const tryCommentWithStrategy = async (handle: string, facts?: ProfileFacts, like
       cta: Number(chosen.meta.cta || 0),
       pinnedLikelyBoost: Number(chosen.meta.pinnedLikelyBoost || 0)
     });
+    recordInteraction(handle, 'comment', { postUrl, text, score: chosen.score }).catch(() => {});
     return { attempted: 1, posted: 1, skipped: false, text, postUrl };
   } catch {
     await closeModal().catch(() => {});
@@ -1664,9 +1876,11 @@ const getLikePolicy = (command?: CommandPayload) => {
   const gapMax = Math.max(gapMin, Number(wp.likeGapSecMax || BOT_LIKE_INTERVAL_MAX_SEC));
   const cooldownMin = Math.max(4, Number(wp.revisitCooldownHoursMin || BOT_LIKE_COOLDOWN_MIN_HOURS));
   const cooldownMax = Math.max(cooldownMin, Number(wp.revisitCooldownHoursMax || BOT_LIKE_COOLDOWN_MAX_HOURS));
-  const dailyMin = Math.max(1, Number(wp.dailyLikeMin || 6));
-  const dailyMax = Math.max(dailyMin, Number(wp.dailyLikeMax || 20));
-  const likeRatio = Math.max(0, Math.min(1, Number(wp.likeRatio || 0.2)));
+  // 2026-08-07: 提量到 ~100-180 likes/day（用户要求 100-200 综合动作/天）。
+  // 默认值上调；个别任务仍可用 protocol.warmupPolicy 覆盖。
+  const dailyMin = Math.max(1, Number(wp.dailyLikeMin || 60));
+  const dailyMax = Math.max(dailyMin, Number(wp.dailyLikeMax || 160));
+  const likeRatio = Math.max(0, Math.min(1, Number(wp.likeRatio || 0.9)));
   return {
     perVisitMin,
     perVisitMax,
@@ -1736,14 +1950,15 @@ const tryLikeWithStrategy = async (handle: string, facts?: ProfileFacts, command
 
   const tiles = page.locator('article a[href*="/p/"], article a[href*="/reel/"], main a[href*="/p/"], main a[href*="/reel/"]');
   const total = await tiles.count();
-  const candidateCount = Math.min(total, 12);
+  // 评分候选数收敛到 3：只为 2-3 次点赞挑出最优帖，避免打开过多 modal 拖爆看门狗。
+  const candidateCount = Math.min(total, 3);
   const candidates: { idx: number; score: number; meta: any }[] = [];
   const primaryStyle = getPrimaryStyle(facts);
   for (let idx = 0; idx < candidateCount; idx++) {
     try {
       await tiles.nth(idx).scrollIntoViewIfNeeded();
       await page.waitForTimeout(jitter(700, 1600));
-      await tiles.nth(idx).click({ timeout: 10000 });
+      await tiles.nth(idx).click({ timeout: 6000 });
       await page.waitForTimeout(jitter(1000, 2200));
       const meta = await readModalMeta(primaryStyle, '', facts?.followers);
       // "主推帖"加权：优先前3个（常见置顶区）+ 互动高 + 有业务CTA
@@ -1761,6 +1976,7 @@ const tryLikeWithStrategy = async (handle: string, facts?: ProfileFacts, command
   const singleHandleCap = getSingleHandleLikeCap(command);
   const remainingDayQuota = Math.max(0, dayCap - dayCount);
   const maxLikes = Math.min(desiredLikes, candidates.length, remainingDayQuota, singleHandleCap);
+  dbg(`[dbg-like] handle=${handle} total=${total} candCount=${candidateCount} candLen=${candidates.length} scores=[${candidates.map(c=>c.score).join(',')}] maxLikes=${maxLikes} desired=${desiredLikes} dayCount=${dayCount} dayCap=${dayCap} singleCap=${singleHandleCap}`);
   let liked = 0;
   const likedUrls: string[] = [];
   logBehavior('like_policy_applied', {
@@ -1817,6 +2033,7 @@ const tryLikeWithStrategy = async (handle: string, facts?: ProfileFacts, command
           });
         }
       }
+      if (liked > 0) recordInteraction(handle, 'like', { idx: c.idx, url: page.url() }).catch(() => {});
       await page.waitForTimeout(jitter(1200, 2600));
       await closeModal();
       if (liked < maxLikes) {
@@ -1918,6 +2135,7 @@ const executeDmTask = async (task: any): Promise<boolean> => {
     await page.waitForTimeout(jitter(2000, 4000));
 
     logBehavior('dm_sent', { targetHandle, taskId: task.id });
+    recordInteraction(targetHandle, 'dm', { scriptContent, taskId: task.id }).catch(() => {});
     reportDmChat(targetHandle, 'agent', scriptContent, 'contacted').catch(() => {});
     return true;
   } catch (err: any) {
@@ -2207,14 +2425,21 @@ const executeCommand = async (command: CommandPayload) => {
     // 评论/关注总开关按 payload 偏好动态开关（不污染全局 env）
     const commentsOn = actionOverrides.commentsEnabled ? true : (BOT_COMMENT_ENABLED && (actionOverrides.likesEnabled || BOT_COMMENT_ENABLED));
     const followsOn = actionOverrides.followsEnabled ? true : BOT_FOLLOW_ENABLED;
-    if (likeSummary.liked > 0 && (commentsOn || followsOn)) {
+    dbg(`[dbg] liked=${likeSummary.liked} followsOn=${followsOn} commentsOn=${commentsOn} handle=${handle}`);
+    // 评论：仍要求本次有点赞（无互动直接评论显得可疑）。
+    if (likeSummary.liked > 0 && commentsOn) {
       await sleep(jitter(1400, 2600));
-      if (commentsOn) commentSummary = await tryCommentWithStrategy(handle, profileFacts, likeSummary);
-      await sleep(jitter(1200, 2400));
-      if (followsOn) followSummary = await tryFollowOnProfile(handle, likeSummary, command);
+      commentSummary = await tryCommentWithStrategy(handle, profileFacts, likeSummary);
     } else {
-      commentSummary = { attempted: 0, posted: 0, skipped: true, reason: 'no_like_this_visit' };
-      followSummary = { attempted: 0, followed: 0, skipped: true, reason: 'no_like_this_visit' };
+      commentSummary = { attempted: 0, posted: 0, skipped: true, reason: likeSummary.liked > 0 ? 'comment_off' : 'no_like_this_visit' };
+    }
+    // 关注：回关→DM 链路的关键动作，解耦于点赞。只要 followsOn 就尝试关注，
+    // 即使本次未点赞（无可点帖/元数据抓不到），也要能关注，否则永远没有回关来源。
+    if (followsOn) {
+      await sleep(jitter(1200, 2400));
+      followSummary = await tryFollowOnProfile(handle, likeSummary, command);
+    } else {
+      followSummary = { attempted: 0, followed: 0, skipped: true, reason: 'follow_off' };
     }
     await sleep(jitter(1600, 4200));
   } else {
@@ -2242,13 +2467,22 @@ let dmReplyTick = 0;
 const pollLoop = async () => {
   while (running) {
     try {
-      // ── DM outreach: cheap task poll every cycle; inbox scan throttled ──
+      // ── 回关主动复检：每 5 轮回访一个"已关注未检测回关"的号，让回关能被发现 ──
       try {
-        const didDm = await tryExecuteDmTask();
-        if (!didDm) {
-          dmReplyTick = (dmReplyTick + 1) % 3;
-          if (dmReplyTick === 0) await checkDmReplies();
-        }
+        await maybeCheckFollowBacks();
+      } catch {}
+      // ── 捕获主动关注我们的回流粉（如 tattooshops.be）：每 20 轮查一次 Followers 列表 ──
+      try {
+        await checkIncomingFollowBacks();
+      } catch {}
+      // ── 回关号直接发 DM：每轮扫描，受预热窗口 + 日上限节流（内部已判断）──
+      try {
+        await syncFollowBackDmQueue();
+      } catch {}
+      // ── inbox 回复扫描：每 3 轮限流一次，与 DM 发送解耦 ──
+      try {
+        dmReplyTick = (dmReplyTick + 1) % 3;
+        if (dmReplyTick === 0) await checkDmReplies();
       } catch {}
       await sleep(jitter(1500, 3500));
 
@@ -2264,7 +2498,7 @@ const pollLoop = async () => {
         await humanBreak(); // wait if currently in a break period
         // 任务级看门狗：单任务执行上限（默认 8 分钟），超时视为 failed 继续下一个，
         // 防止 IG 页面慢/选择器卡死导致 bot 挂死不再消费队列（2026-08-06 修复）
-        const TASK_TIMEOUT_MS = Math.max(60_000, Number(process.env.BOT_TASK_TIMEOUT_MS || 8 * 60_000));
+        const TASK_TIMEOUT_MS = Math.max(60_000, Number(process.env.BOT_TASK_TIMEOUT_MS || 5 * 60_000));
         try {
           await Promise.race([
             executeCommand(cmd),
@@ -2275,7 +2509,7 @@ const pollLoop = async () => {
           tasksSinceLastLearn++;
           if (tasksSinceLastLearn >= LEARN_INTERVAL) {
             tasksSinceLastLearn = 0;
-            triggerLearn(); // auto-analyze in background
+            triggerLearn().catch(() => {}); // auto-analyze in background (never crash the loop)
           }
           await maybeScheduleBreak(cmd); // schedule next break after N profiles
           await sleep(jitter(3500, 9500)); // elastic gap between targets
