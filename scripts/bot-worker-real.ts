@@ -1194,6 +1194,27 @@ const recordInteraction = async (handle: string, eventType: string, detail: Reco
   }
 };
 
+// Kills any orphaned Chromium still holding our profile directory — e.g. a
+// persistent browser whose JS handle died (page crash / context lost) but the
+// OS process lingers and keeps SingletonLock. Without this, a relaunch hits
+// "Opening in existing browser session" and the bot loops forever (seen
+// 2026-08-08: browser crashed ~8min in, then 12 retries all failed).
+// NOTE: this does a host-wide `taskkill /IM chrome.exe` on Windows. On a host
+// running multiple bot accounts (matrix), scope this by --user-data-dir instead.
+const clearProfileLock = () => {
+  try {
+    const ud = path.resolve(process.cwd(), PROFILE_DIR);
+    for (const f of ['SingletonLock', 'SingletonSocket', 'SingletonCookie', 'SingletonTimedLock']) {
+      try { fs.rmSync(path.join(ud, f), { force: true }); } catch {}
+    }
+    if (process.platform === 'win32') {
+      try { require('child_process').execSync('taskkill /IM chrome.exe /F', { stdio: 'ignore' }); } catch {}
+    } else {
+      try { require('child_process').execSync(`pkill -f "${ud}" || true`, { stdio: 'ignore' }); } catch {}
+    }
+  } catch {}
+};
+
 const ensureBrowser = async () => {
   if (context && page) {
     try {
@@ -1218,6 +1239,7 @@ const ensureBrowser = async () => {
         const profilePath = path.resolve(process.cwd(), PROFILE_DIR);
         if (!fs.existsSync(profilePath)) fs.mkdirSync(profilePath, { recursive: true });
         const userDataDir = profilePath;
+        clearProfileLock(); // clear any orphan Chrome + stale lock before launching
         context = await chromium.launchPersistentContext(userDataDir, {
           headless: HEADLESS,
           viewport: { width: 1280, height: 900 },
