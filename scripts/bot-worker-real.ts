@@ -1408,6 +1408,43 @@ const isInvalidProfilePage = async () => {
   );
 };
 
+// ── 登录闸门（2026-08-08）：未登录时暂停一切任务派发，原地等用户登录，不抢任务不标 failed ──
+const isOnLoginPage = async (): Promise<boolean> => {
+  if (!page) return true;
+  try {
+    const url = (page.url() || '').toLowerCase();
+    if (url.includes('/accounts/login')) return true;
+    // 登录页有 username 输入框
+    const loginInputCount = await page.locator('input[name="username"]').count();
+    if (loginInputCount > 0) return true;
+  } catch {}
+  return false;
+};
+
+const waitUntilLoggedIn = async (): Promise<boolean> => {
+  // page 还没初始化 → 交给 executeCommand/ensureBrowser 的既有流程处理，不要在这里卡死
+  if (!page) return true;
+  // 确保页面在 IG 域，便于判断登录态（不导航，避免打断用户正在输入的登录框）
+  try {
+    const url = (page.url() || '').toLowerCase();
+    if (!url.includes('instagram.com')) {
+      await page.goto(IG_BASE, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+    }
+  } catch {}
+  let printed = false;
+  for (let i = 0; i < 180; i++) { // 最多等 ~15 分钟
+    try {
+      if (!(await isOnLoginPage())) return true;
+    } catch {}
+    if (!printed) {
+      console.log('[bot-real] ⏸  not logged in — pausing ALL task execution, waiting for you to log in (IG window). Bot auto-resumes once logged in.');
+      printed = true;
+    }
+    await sleep(5000);
+  }
+  return false;
+};
+
 // Detect and escape Instagram follow-suggestions / explore-people trap page.
 const escapeFollowTrap = async () => {
   if (!page) return;
@@ -3050,6 +3087,12 @@ let dmReplyTick = 0;
 const pollLoop = async () => {
   while (running) {
     try {
+      // ── 登录闸门：未登录则暂停一切任务派发，原地等登录，不抢任务、不标 failed ──
+      const loggedIn = await waitUntilLoggedIn();
+      if (!loggedIn) {
+        await sleep(POLL_INTERVAL_MS);
+        continue;
+      }
       // ── 回关主动复检：每 5 轮回访一个"已关注未检测回关"的号，让回关能被发现 ──
       try {
         await maybeCheckFollowBacks();
