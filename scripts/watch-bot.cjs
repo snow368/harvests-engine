@@ -36,7 +36,10 @@ const env = { ...process.env, ...(app.env || {}) };
 const cwd = app.cwd || __dirname;
 const script = app.script || './scripts/bot-worker-real.ts';
 // 与 ecosystem 保持一致：node --import tsx <script>
-const args = [...(app.node_args ? [app.node_args] : ['--import', 'tsx']), script];
+// ⚠️ node_args 是单个字符串("--import tsx")，必须按空格拆成独立 argv 元素，
+//    否则 node 会把整串当成一个未知选项："bad option: --import tsx"
+const nodeArgs = app.node_args ? app.node_args.trim().split(/\s+/) : ['--import', 'tsx'];
+const args = [...nodeArgs, script];
 
 console.log('────────────────────────────────────────────────────');
 console.log(`[watch-bot] 前台可见模式启动: ${app.name}`);
