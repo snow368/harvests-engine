@@ -1408,38 +1408,77 @@ const isInvalidProfilePage = async () => {
   );
 };
 
-// ── 登录闸门（2026-08-08）：未登录时暂停一切任务派发，原地等用户登录，不抢任务不标 failed ──
+// ── 登录闸门（2026-08-08 重写）：未登录/挑战页时暂停一切任务派发，原地等用户登录，
+//    不抢任务、不标 failed；每次校验主动跳回 IG 首页强制重判会话（persistent profile 会话
+//    过期会被 IG 踢回登录页，不导航就发现不了）；并用正向"已登录"信号兜底 ──
 const isOnLoginPage = async (): Promise<boolean> => {
-  if (!page) return true;
+  if (!page) return true; // 没页面一律当未登录，安全等待
   try {
     const url = (page.url() || '').toLowerCase();
     if (url.includes('/accounts/login')) return true;
-    // 登录页有 username 输入框
+    if (url.includes('/challenge/')) return true;        // 安全挑战页（确认是你/短信验证）
+    if (url.includes('/accounts/onetap')) return true;
+    if (url.includes('/accounts/emailsignup')) return true;
+    // 登录页才有 username 输入框（用户正输入用户名时也算"未登录"）
     const loginInputCount = await page.locator('input[name="username"]').count();
     if (loginInputCount > 0) return true;
+    // 部分挑战页用其他字段
+    const challengeInput = await page.locator('input[name="security_code"], input[name="email"]').count();
+    if (challengeInput > 0) return true;
+  } catch {}
+  return false;
+};
+
+// 正向信号：只有真正登录后的首页才有这些元素（首页导航 / 私信入口）
+const isLoggedInPositive = async (): Promise<boolean> => {
+  if (!page) return false;
+  try {
+    const loggedInMarkers = await page.locator('svg[aria-label="Home"], a[href="/direct/inbox/"], a[href="/"]').count();
+    if (loggedInMarkers > 0) return true;
   } catch {}
   return false;
 };
 
 const waitUntilLoggedIn = async (): Promise<boolean> => {
-  // page 还没初始化 → 交给 executeCommand/ensureBrowser 的既有流程处理，不要在这里卡死
-  if (!page) return true;
-  // 确保页面在 IG 域，便于判断登录态（不导航，避免打断用户正在输入的登录框）
-  try {
-    const url = (page.url() || '').toLowerCase();
-    if (!url.includes('instagram.com')) {
-      await page.goto(IG_BASE, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
-    }
-  } catch {}
+  // page 为 null 时先尝试拉起浏览器，避免在"无页面"状态下误判已登录去抢任务
+  if (!page) {
+    try { await ensureBrowser(); } catch {}
+  }
+  if (!page) {
+    console.log('[bot-real] ⏸  browser not ready — pausing task execution (will retry).');
+    return false;
+  }
   let printed = false;
   for (let i = 0; i < 180; i++) { // 最多等 ~15 分钟
     try {
-      if (!(await isOnLoginPage())) return true;
+      if (await isOnLoginPage()) {
+        // 在登录/挑战页：不导航，避免打断用户正在输入的登录框，原地等
+        if (!printed) {
+          console.log('[bot-real] ⏸  NOT logged in — pausing ALL task execution. Finish logging in on the IG window (username + password), then the bot auto-resumes. No tasks will be grabbed or marked failed while waiting.');
+          printed = true;
+        }
+        await sleep(5000);
+        continue;
+      }
+      // 不在登录页 → 主动跳回 IG 首页，强制 IG 重新校验会话（过期会重定向到登录页）
+      await page.goto(IG_BASE, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+      // 跳回后可能已被踢到登录页
+      if (await isOnLoginPage()) {
+        if (!printed) {
+          console.log('[bot-real] ⏸  session expired (redirected to login) — pausing ALL task execution, waiting for you to log in. No tasks grabbed or marked failed.');
+          printed = true;
+        }
+        await sleep(5000);
+        continue;
+      }
+      // 确有"已登录"正向信号 → 放行
+      if (await isLoggedInPositive()) return true;
+      // 介于两者之间（加载中/挑战页未识别）：继续等，宁可多等不误跑
+      if (!printed) {
+        console.log('[bot-real] ⏸  login state unclear (loading/challenge) — pausing, waiting for you to resolve login.');
+        printed = true;
+      }
     } catch {}
-    if (!printed) {
-      console.log('[bot-real] ⏸  not logged in — pausing ALL task execution, waiting for you to log in (IG window). Bot auto-resumes once logged in.');
-      printed = true;
-    }
     await sleep(5000);
   }
   return false;
@@ -2978,6 +3017,13 @@ const executeCommand = async (command: CommandPayload) => {
   ensureBrowserLegacyLaunchDisabled();
   await ensureBrowser();
   logBehavior('ensure_browser_done', { commandId, handle });
+  // 登录闸门硬保险：执行任何互动前若发现登录页/挑战页，直接中止本任务
+  // （不标 failed，留给下一轮你登录后自动重试）
+  if (await isOnLoginPage()) {
+    console.log(`[bot-real] ⏸ login/challenge page detected at task start (${commandId}) — aborting task, waiting for you to finish logging in.`);
+    logBehavior('login_required_at_task_start', { commandId, handle });
+    throw new Error('LOGIN_REQUIRED');
+  }
   await escapeFollowTrap();        // escape if previous task left us on explore/people
   await openProfile(handle);
   await escapeFollowTrap();        // escape if profile nav landed on follow suggestions
@@ -3130,6 +3176,12 @@ const pollLoop = async () => {
       for (const cmd of commands) {
         if (!running) break;
         await humanBreak(); // wait if currently in a break period
+        // ── 执行前再确认登录态：登录页/挑战页出现则跳过本任务，不抢、不标 failed，下一轮重判 ──
+        if (!page || await isOnLoginPage()) {
+          console.log(`[bot-real] ⏸ login page present before task ${cmd?.id} — skipping (retries next cycle after you log in).`);
+          await sleep(POLL_INTERVAL_MS);
+          continue;
+        }
         // 任务级看门狗：单任务执行上限（默认 8 分钟），超时视为 failed 继续下一个，
         // 防止 IG 页面慢/选择器卡死导致 bot 挂死不再消费队列（2026-08-06 修复）
         const TASK_TIMEOUT_MS = Math.max(60_000, Number(process.env.BOT_TASK_TIMEOUT_MS || 5 * 60_000));
@@ -3147,9 +3199,14 @@ const pollLoop = async () => {
           }
           await maybeScheduleBreak(cmd); // schedule next break after N profiles
           await sleep(jitter(3500, 9500)); // elastic gap between targets
-        } catch (err: any) {
-          const reason = String(err?.message || 'worker_exception');
-          console.error(`[bot-real] failed ${cmd?.id || 'unknown'}:`, reason);
+    } catch (err: any) {
+      const reason = String(err?.message || 'worker_exception');
+      // 登录态缺失：不抢、不标 failed，跳出本轮任务批次，回到顶部闸门等登录
+      if (reason.includes('LOGIN_REQUIRED')) {
+        console.log('[bot-real] ⏸ login required — skipped task, will retry after you log in.');
+        break;
+      }
+      console.error(`[bot-real] failed ${cmd?.id || 'unknown'}:`, reason);
           logBehavior('task_failed', { commandId: cmd?.id || null, reason });
           if (cmd?.id) {
             try { await reportCommand(cmd.id, 'failed', reason); } catch {}
