@@ -233,6 +233,20 @@ const DM_SCRIPTS_BY_LANG: Record<string, string[]> = {
     "Dina grejer är grymma. Jag förser studior via InkFlow (bläck + cartridges + aftercare, grossist) — pålitliga leveranser och artistpriser. Ingen press, men om du behöver en stabil backup-källa, hör av dig 👍"
   ]
 };
+
+// 软性 rapport 评论池（真诚赞美同行作品，绝不带任何推广/链接）
+// ⚠️ 必须在 RAPPORT_COMMENTS_BY_LANG 之前定义，否则第237行引用会触发 TDZ ReferenceError 导致进程启动即崩溃
+const BOT_RAPPORT_COMMENTS_DEFAULT = [
+  "clean linework, love it 🔥",
+  "this shading is so smooth",
+  "your style is unique — been enjoying your posts",
+  "that piece is sick 💯",
+  "mad respect for the detail here",
+];
+let BOT_RAPPORT_COMMENTS: string[] = BOT_RAPPORT_COMMENTS_DEFAULT;
+try { if (process.env.BOT_RAPPORT_COMMENTS_JSON) BOT_RAPPORT_COMMENTS = JSON.parse(process.env.BOT_RAPPORT_COMMENTS_JSON); } catch {}
+if (!Array.isArray(BOT_RAPPORT_COMMENTS) || !BOT_RAPPORT_COMMENTS.length) BOT_RAPPORT_COMMENTS = BOT_RAPPORT_COMMENTS_DEFAULT;
+
 const RAPPORT_COMMENTS_BY_LANG: Record<string, string[]> = {
   en: BOT_RAPPORT_COMMENTS,
   de: ["saubere Linienführung, gefällt mir 🔥", "dieses Shading ist so weich"],
@@ -456,17 +470,6 @@ const BOT_RAPPORT_DAILY_MAX = Math.max(0, Number(process.env.BOT_RAPPORT_DAILY_M
 const RAPPORT_LIKE_TARGET = Math.max(2, Number(process.env.RAPPORT_LIKE_TARGET || 3));
 const RAPPORT_LIKE_GAP_HOURS = Math.max(1, Number(process.env.RAPPORT_LIKE_GAP_HOURS || 24));
 const RAPPORT_COMMENT_AFTER_HOURS = Math.max(1, Number(process.env.RAPPORT_COMMENT_AFTER_HOURS || 18));
-// 软性 rapport 评论池（真诚赞美同行作品，绝不带任何推广/链接）
-const BOT_RAPPORT_COMMENTS_DEFAULT = [
-  "clean linework, love it 🔥",
-  "this shading is so smooth",
-  "your style is unique — been enjoying your posts",
-  "that piece is sick 💯",
-  "mad respect for the detail here",
-];
-let BOT_RAPPORT_COMMENTS: string[] = BOT_RAPPORT_COMMENTS_DEFAULT;
-try { if (process.env.BOT_RAPPORT_COMMENTS_JSON) BOT_RAPPORT_COMMENTS = JSON.parse(process.env.BOT_RAPPORT_COMMENTS_JSON); } catch {}
-if (!Array.isArray(BOT_RAPPORT_COMMENTS) || !BOT_RAPPORT_COMMENTS.length) BOT_RAPPORT_COMMENTS = BOT_RAPPORT_COMMENTS_DEFAULT;
 const pickRapportComment = (handle: string, lang: string) => pickFromPool(RAPPORT_COMMENTS_BY_LANG[lang] || RAPPORT_COMMENTS_BY_LANG.en, handle);
 
 // ── AI Core (sales_chats D1 sync for triangulation) ───────────────────
