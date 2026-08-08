@@ -47,6 +47,15 @@ parser.add_argument('--task-id', default='')
 parser.add_argument('--cdp-url', default='http://127.0.0.1:9222')
 parser.add_argument('--output-dir', default='./data/scrape_output')
 parser.add_argument('--start-from-city', default='')
+# --- Cloud coverage reporting (Maps Scrape page) ---
+# Pass --job-id to update a pre-created job, or let the script self-register
+# by (country, state). Needs CLOUD_API_BASE (e.g. https://harvests.pages.dev/api)
+# and a bot token. If CLOUD_API_BASE is empty the script runs standalone (no API calls).
+parser.add_argument('--job-id', default='')
+parser.add_argument('--cloud-base', default=os.environ.get('CLOUD_API_BASE', 'https://harvests.pages.dev/api'))
+parser.add_argument('--cloud-token', default=os.environ.get('SCRAPE_JOB_TOKEN', 'vps-bot-secret-2024'))
+parser.add_argument('--register-only', action='store_true',
+                    help='Count existing CSV rows and mark the (country,state) job completed without scraping.')
 args = parser.parse_args()
 
 STATE = args.state
@@ -57,6 +66,92 @@ TASK_ID = args.task_id
 CDP_URL = (args.cdp_url or '').strip()
 OUTPUT_DIR = args.output_dir
 STATE_TAG = re.sub(r'[^a-zA-Z0-9]', '', STATE).upper()
+
+# ========== Cloud coverage reporting ==========
+JOB_ID = args.job_id.strip()
+CLOUD_BASE = (args.cloud_base or '').strip()
+CLOUD_TOKEN = (args.cloud_token or '').strip() or 'vps-bot-secret-2024'
+REGISTER_ONLY = args.register_only
+
+# ========== Gentle pacing（避免限流 / 验证码）==========
+# 全部可用环境变量覆盖，单位毫秒 / 个数
+CITY_DELAY_MIN = int(os.environ.get('SCRAPE_CITY_DELAY_MIN_MS', '20000'))   # 城市间最小拟人延迟
+CITY_DELAY_MAX = int(os.environ.get('SCRAPE_CITY_DELAY_MAX_MS', '40000'))   # 城市间最大拟人延迟
+COOLDOWN_EVERY = int(os.environ.get('SCRAPE_COOLDOWN_EVERY', '10'))         # 每 N 城长冷却一次
+COOLDOWN_MS    = int(os.environ.get('SCRAPE_COOLDOWN_MS', '240000'))        # 长冷却时长（默认 4 分钟）
+CAPTCHA_BACKOFF_MS = int(os.environ.get('SCRAPE_CAPTCHA_BACKOFF_MS', '600000'))  # 命中验证码退避（默认 10 分钟）
+
+def city_delay_seconds() -> float:
+    return random.uniform(CITY_DELAY_MIN, CITY_DELAY_MAX) / 1000.0
+
+def cooldown_seconds() -> float:
+    return COOLDOWN_MS / 1000.0
+
+def captcha_backoff_seconds() -> float:
+    return CAPTCHA_BACKOFF_MS / 1000.0
+
+_CAPTCHA_SIGNALS = [
+    'unusual traffic', 'prove you are human', 'our systems have detected',
+    'automated queries', 'browser check', 'verify you are human',
+    'please complete the security check', 'recaptcha', 'captcha',
+    'temporarily blocked', 'too many requests',
+]
+
+async def detect_captcha(page) -> bool:
+    """检测 Google 限流 / 验证码页。返回 True 表示需要退避。"""
+    try:
+        txt = (await page.content()).lower()
+        return any(s in txt for s in _CAPTCHA_SIGNALS)
+    except Exception:
+        return False
+
+import urllib.request as _urllib
+
+def _cloud_call(path: str, payload: dict):
+    """POST JSON to the cloud API. Returns parsed dict or None. No-op if CLOUD_BASE unset."""
+    if not CLOUD_BASE:
+        return None
+    url = CLOUD_BASE.rstrip('/') + path
+    data = json.dumps(payload).encode('utf-8')
+    req = _urllib.Request(url, data=data, method='POST', headers={
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + CLOUD_TOKEN,
+    })
+    try:
+        with _urllib.urlopen(req, timeout=20) as r:
+            return json.loads(r.read().decode('utf-8'))
+    except Exception as e:
+        print(json.dumps({"type": "log", "message": f"cloud call failed {path}: {str(e)[:150]}"}))
+        return None
+
+def cloud_register():
+    """Upsert a job by (country, state); returns the job id (or None)."""
+    global JOB_ID
+    if JOB_ID:
+        return JOB_ID
+    res = _cloud_call('/api/maps-scrape/jobs', {
+        'country': (COUNTRY or 'USA').upper(),
+        'state': STATE.upper(),
+        'cities': CITIES,
+    })
+    if res and res.get('ok') and res.get('job'):
+        JOB_ID = res['job'].get('id')
+        return JOB_ID
+    return None
+
+def cloud_status(status, cities_done=None, cities_total=None, artists_found=None, error=None):
+    """Report progress for the current job id (no-op if no job id)."""
+    if not JOB_ID:
+        return
+    payload = {'status': status}
+    if cities_done is not None: payload['cities_done'] = cities_done
+    if cities_total is not None: payload['cities_total'] = cities_total
+    if artists_found is not None: payload['artists_found'] = artists_found
+    if error is not None: payload['error'] = error
+    _cloud_call(f'/api/maps-scrape/jobs/{JOB_ID}/status', payload)
+    # 同时打印 progress JSON 供 scheduler 兜底更新进度条（scraper 自身 cloud_status 偶发 403，这里双写）
+    if cities_done is not None and cities_total is not None:
+        print(json.dumps({"type": "progress", "phase": "end", "current": int(cities_done), "total": int(cities_total), "shops_found": int(artists_found or 0)}))
 
 def parse_cities(raw: str):
     s = (raw or "").strip()
@@ -258,7 +353,17 @@ def mark_city_scanned(city_norm: str):
         f.write(city_norm + "\n")
 
 def load_finished():
-    """Load set of already-scraped cities from CSV and progress log"""
+    """
+    断点续核心逻辑：严格区分「城市级完成」与「店铺级去重」。
+
+    - done_cities（城市级是否跳过）= 仅取进度日志 PROGRESS_LOG。
+      只有整城 scrape_city 成功返回后才会 mark_city_scanned 写入日志，
+      因此「跑到一半崩了」的城市不会被判为已完成 → 下次续跑会重新进入任务队列，
+      再由 done_shops 的店铺级去重跳过已入库店铺，从而「从断点继续」而非整城重抓或整城丢数据。
+    - done_shops（店铺级去重）= CSV 已落盘的店铺键（main 中还会并上 DB 已存店铺）。
+      用于 scrape_city 内跳过已保存店铺，保证续跑不产生重复行。
+    重要：CSV 里某城只有半截店铺 ≠ 该城已完成，所以这里不再把 CSV 中的城市计入 done_cities。
+    """
     done_cities = set()
     done_shops = set()
     if os.path.exists(MASTER_CSV):
@@ -268,8 +373,6 @@ def load_finished():
                 for row in reader:
                     city = normalize_string(row.get('City', ''))
                     shop = normalize_string(row.get('Shop Name', ''))
-                    if city:
-                        done_cities.add(city)
                     if shop and city:
                         done_shops.add(f"{shop}_{city}")
         except:
@@ -322,9 +425,11 @@ async def init_db():
         return None
 
 async def save_shop(conn, shop):
+    """保存到 Neon。连接失效时自动重连一次并返回新连接（无则返回原 conn）。"""
     shop_id = generate_shop_id(shop['name'], shop.get('address', ''), shop.get('phone', ''))
     rating_int = int(round(shop.get('rating', 0)))
-    await conn.execute('''
+    try:
+        await conn.execute('''
         INSERT INTO artists (id, uid, username, full_name, shop_name, stage,
                              rating, reviews, address, phone, website,
                              ig_handle, facebook, tiktok, email, city,
@@ -343,11 +448,48 @@ async def save_shop(conn, shop):
             rating = EXCLUDED.rating,
             reviews = EXCLUDED.reviews,
             last_updated = NOW()
-    ''', shop_id, UID,
-        shop['name'].replace(' ', '_').lower(), shop['name'], shop['name'], 'outreach',
-        rating_int, shop.get('reviewCount', 0), shop.get('address'), shop.get('phone'), shop.get('website'),
-        shop.get('instagram'), shop.get('facebook'), shop.get('tiktok'), shop.get('email'), shop['city'],
-        'maps_scrape', 'tattoo_shop', STATE)
+        ''', shop_id, UID,
+            shop['name'].replace(' ', '_').lower(), shop['name'], shop['name'], 'outreach',
+            rating_int, shop.get('reviewCount', 0), shop.get('address'), shop.get('phone'), shop.get('website'),
+            shop.get('instagram'), shop.get('facebook'), shop.get('tiktok'), shop.get('email'), shop['city'],
+            'maps_scrape', 'tattoo_shop', STATE)
+        return conn
+    except (asyncpg.exceptions.InterfaceError, asyncpg.PostgresError, OSError) as e:
+        # 连接可能已被服务端关闭（长时间运行），重建连接重试一次
+        msg = str(e or '').lower()
+        if any(k in msg for k in ['closed', 'timeout', 'reset', 'connection']):
+            print(json.dumps({"type": "log", "message": f"DB conn lost, reconnecting: {shop['name']}"}))
+            try:
+                new_conn = await asyncio.wait_for(asyncpg.connect(DATABASE_URL), timeout=15)
+                await new_conn.execute('''
+                INSERT INTO artists (id, uid, username, full_name, shop_name, stage,
+                                     rating, reviews, address, phone, website,
+                                     ig_handle, facebook, tiktok, email, city,
+                                     source_type, entity_type, import_region, last_updated)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, NOW())
+                ON CONFLICT (id) DO UPDATE SET
+                    full_name = EXCLUDED.full_name,
+                    shop_name = EXCLUDED.shop_name,
+                    address = EXCLUDED.address,
+                    phone = EXCLUDED.phone,
+                    website = EXCLUDED.website,
+                    ig_handle = COALESCE(EXCLUDED.ig_handle, artists.ig_handle),
+                    facebook = COALESCE(EXCLUDED.facebook, artists.facebook),
+                    tiktok = COALESCE(EXCLUDED.tiktok, artists.tiktok),
+                    email = COALESCE(EXCLUDED.email, artists.email),
+                    rating = EXCLUDED.rating,
+                    reviews = EXCLUDED.reviews,
+                    last_updated = NOW()
+                ''', shop_id, UID,
+                    shop['name'].replace(' ', '_').lower(), shop['name'], shop['name'], 'outreach',
+                    rating_int, shop.get('reviewCount', 0), shop.get('address'), shop.get('phone'), shop.get('website'),
+                    shop.get('instagram'), shop.get('facebook'), shop.get('tiktok'), shop.get('email'), shop['city'],
+                    'maps_scrape', 'tattoo_shop', STATE)
+                return new_conn
+            except Exception as e2:
+                print(json.dumps({"type": "error", "message": f"DB reconnect failed: {shop['name']} | {str(e2)[:150]}"}))
+                raise
+        raise
 
 # ==================== 社交链接提取 ====================
 async def extract_socials(page):
@@ -508,6 +650,11 @@ async def scrape_city(page, context, city, done_shops, conn):
     await page.goto(search_url, wait_until="domcontentloaded")
     await asyncio.sleep(8)
 
+    # 限流 / 验证码检测：命中则立即退避，避免浪费后续请求
+    if await detect_captcha(page):
+        print(json.dumps({"type": "warn", "message": f"CAPTCHA/unusual-traffic on search: {search_query}"}))
+        return -1
+
     if "/maps/place/" in page.url:
         urls = [page.url]
     else:
@@ -654,9 +801,9 @@ async def scrape_city(page, context, city, done_shops, conn):
             if data["tiktok"] != "N/A" and not is_valid_tiktok_url(data["tiktok"]):
                 data["tiktok"] = "N/A"
 
-            # 保存到 Neon DB
+            # 保存到 Neon DB（save_shop 自动重连，返回最新连接）
             try:
-                await save_shop(conn, data)
+                conn = await save_shop(conn, data)
             except Exception as se:
                 print(json.dumps({"type": "error", "message": f"DB save failed: {name} | {str(se)}"}))
 
@@ -707,6 +854,23 @@ async def scrape_city(page, context, city, done_shops, conn):
 
 # ==================== 主流程 ====================
 async def main():
+    # --- register-only mode: seed a completed job from existing CSV, no scraping ---
+    if REGISTER_ONLY:
+        count = 0
+        if os.path.exists(MASTER_CSV):
+            try:
+                with open(MASTER_CSV, encoding='utf-8-sig') as f:
+                    count = sum(1 for _ in csv.DictReader(f))
+            except Exception:
+                pass
+        jid = cloud_register()
+        if jid:
+            cloud_status('completed', cities_done=len(CITIES), cities_total=len(CITIES), artists_found=count)
+            print(json.dumps({"type": "done", "message": f"Registered {STATE} as completed ({count} shops)", "job_id": jid}))
+        else:
+            print(json.dumps({"type": "error", "message": "register-only failed (cloud unreachable or job create failed)"}))
+        return
+
     conn = await init_db()
 
     # 从 DB + CSV 双重查重
@@ -732,10 +896,14 @@ async def main():
         if city_norm not in csv_done_cities:
             task_cities.append(c)
 
+    # 已完成城市数（进度日志里已标记），用于让进度条从断点继续而不是归零
+    completed_before = len(all_cities) - len(task_cities)
+
     print(json.dumps({
         "type": "init",
         "total_cities": len(all_cities),
         "task_cities": len(task_cities),
+        "completed_before": completed_before,
         "first_city": task_cities[0] if task_cities else "NONE",
         "state": STATE,
         "country": COUNTRY,
@@ -743,7 +911,16 @@ async def main():
         "progress_log": PROGRESS_LOG
     }))
 
+    # --- register / start cloud coverage job ---
+    if CLOUD_BASE:
+        cloud_register()
+        if JOB_ID:
+            # 进度以全州城市总数为分母，已完成的城市作为基数，续跑不让进度条回零
+            cloud_status('running', cities_total=len(all_cities), cities_done=completed_before, artists_found=0)
+
     if not task_cities:
+        if JOB_ID:
+            cloud_status('completed', cities_done=len(all_cities), cities_total=len(all_cities), artists_found=len(done_shops))
         print(json.dumps({"type": "done", "message": "All cities already scraped", "total_shops": len(done_shops)}))
         await conn.close()
         return
@@ -759,6 +936,8 @@ async def main():
                 print(json.dumps({"type": "log", "message": f"Connected CDP: {CDP_URL}"}))
             except Exception as e:
                 print(json.dumps({"type": "error", "message": f"CDP connect failed: {str(e)}"}))
+                if JOB_ID:
+                    cloud_status('failed', error='CDP connect failed')
                 await conn.close()
                 return
         else:
@@ -797,6 +976,8 @@ async def main():
             print(json.dumps({"type": "log", "message": f"Launched Chromium (headless={HEADLESS})"}))
 
         total_found = 0
+        success_count = 0
+        had_error = False
         for idx, city in enumerate(task_cities):
             city_norm = normalize_string(city)
 
@@ -807,27 +988,53 @@ async def main():
 
             print(json.dumps({
                 "type": "progress", "phase": "start", "city": city,
-                "current": idx + 1, "total": len(task_cities), "shops_found": total_found
+                "current": completed_before + idx + 1, "total": len(all_cities), "shops_found": total_found
             }))
             try:
                 found = await scrape_city(page, context, city, done_shops, conn)
-                total_found += found
-                mark_city_scanned(city_norm)
-                print(json.dumps({
-                    "type": "progress", "phase": "end", "city": city,
-                    "current": idx + 1, "total": len(task_cities), "shops_found": found
-                }))
+                if found == -1:
+                    # CAPTCHA / 限流：退避后重试一次
+                    print(json.dumps({"type": "warn", "message": f"CAPTCHA at {city}; backing off {CAPTCHA_BACKOFF_MS//1000}s then retry"}))
+                    await asyncio.sleep(captcha_backoff_seconds())
+                    found = await scrape_city(page, context, city, done_shops, conn)
+                if found == -1:
+                    # 重试仍被挡：跳过该城（不标记完成，便于后续重跑重试），继续下一城
+                    print(json.dumps({"type": "warn", "message": f"CAPTCHA persists at {city}; skipping for now"}))
+                else:
+                    total_found += found
+                    success_count += 1
+                    mark_city_scanned(city_norm)
+                    if JOB_ID:
+                        cloud_status('running', cities_done=completed_before + idx + 1, cities_total=len(all_cities), artists_found=total_found)
+                    print(json.dumps({
+                        "type": "progress", "phase": "end", "city": city,
+                        "current": completed_before + idx + 1, "total": len(all_cities), "shops_found": found
+                    }))
             except Exception as e:
                 error_msg = str(e)
                 print(json.dumps({"type": "error", "message": f"City error {city}: {error_msg}"}))
-                mark_city_scanned(city_norm)
+                # 断点续：城市级异常【不】标记完成，让该城下次续跑重试（已存店铺靠 done_shops 去重续抓）
+                had_error = True
                 if any(kw in error_msg.lower() for kw in ['target closed', 'browser closed', 'page crashed', 'connection closed', 'protocol error']):
                     print(json.dumps({"type": "error", "message": f"FATAL: Browser crash at {city}, aborting"}))
                     break
                 continue
-            await asyncio.sleep(random.uniform(2, 4))
+            # --- 城市间拟人延迟（避免 Google 限流 / 验证码）---
+            d = city_delay_seconds()
+            print(json.dumps({"type": "log", "message": f"Pacing: sleep {d:.0f}s before next city"}))
+            await asyncio.sleep(d)
+            # --- 每 N 城长冷却一次 ---
+            if (idx + 1) % COOLDOWN_EVERY == 0 and (idx + 1) < len(task_cities):
+                cd = cooldown_seconds()
+                print(json.dumps({"type": "log", "message": f"Cooldown: sleep {cd:.0f}s after {idx+1} cities"}))
+                await asyncio.sleep(cd)
 
-    total_shops = await conn.fetchval("SELECT COUNT(*) FROM artists WHERE source_type='maps_scrape' AND import_region=$1", STATE)
+    total_shops = (await conn.fetchval("SELECT COUNT(*) FROM artists WHERE source_type='maps_scrape' AND import_region=$1", STATE)) if conn else total_found
+    if JOB_ID:
+        # 有城市出错则保持 running（不标 completed），让调度器重新接管并从断点续跑；否则标 completed
+        final_status = 'completed' if not had_error else 'running'
+        cities_done_final = completed_before + success_count
+        cloud_status(final_status, cities_done=cities_done_final, cities_total=len(all_cities), artists_found=total_shops)
     await conn.close()
     print(json.dumps({
         "type": "done",
