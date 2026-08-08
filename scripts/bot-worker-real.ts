@@ -1179,14 +1179,19 @@ const reportCommand = async (commandId: string, status: 'done' | 'failed', reaso
 // 使前台 ShopOutreach 能看到每个 lead 的接触历史（点赞/评论/关注/DM/回关）。
 const recordInteraction = async (handle: string, eventType: string, detail: Record<string, any> = {}) => {
   if (!handle) return;
+  const cleanHandle = String(handle).replace(/^@/, '').trim();
+  const preview = detail?.text ? ' :: ' + String(detail.text).slice(0, 80) : '';
+  console.log(`[bot-real] interaction: ${eventType} @${cleanHandle}${preview}`);
   try {
     await postJson('/api/automation/interaction', {
       botId: BOT_ID,
-      artistHandle: String(handle).replace(/^@/, '').trim(),
+      artistHandle: cleanHandle,
       eventType,
       detail
     });
-  } catch {}
+  } catch (e) {
+    console.warn(`[bot-real] interaction FAILED (${eventType} @${cleanHandle}):`, e?.message || e);
+  }
 };
 
 const ensureBrowser = async () => {
