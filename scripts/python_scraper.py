@@ -116,6 +116,9 @@ def _cloud_call(path: str, payload: dict):
     req = _urllib.Request(url, data=data, method='POST', headers={
         'Content-Type': 'application/json',
         'Authorization': 'Bearer ' + CLOUD_TOKEN,
+        # Cloudflare/Pages 会拦 Python-urllib 默认 UA（返回 403），加浏览器 UA 放行，
+        # 否则 scraper 自身 cloud_status 上报全部 403，任务抓完卡在 running。
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
     })
     try:
         with _urllib.urlopen(req, timeout=20) as r:

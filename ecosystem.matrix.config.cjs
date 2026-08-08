@@ -144,7 +144,7 @@ const apps = [
     restart_delay: 10_000,
     env: {
       ...COMMON_ENV,
-      CLOUD_API_BASE: 'https://harvests-cloud-api.inkflowapp.workers.dev',
+      CLOUD_API_BASE: 'https://harvests.pages.dev',
       SCRAPE_POLL_INTERVAL_MS: '60000',
       SCRAPE_MAX_RUNTIME_MS: '21600000',
       SCRAPE_CDP_URL: '',

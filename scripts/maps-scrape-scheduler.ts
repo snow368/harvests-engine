@@ -165,8 +165,9 @@ async function resolveCities(state: string, country: string): Promise<string[]> 
   return [];
 }
 
-function runScraper(state: string, country: string, citiesFile: string, jobId: any): Promise<number> {
+function runScraper(state: string, country: string, citiesFile: string, jobId: any): Promise<{ code: number; lastFound: number }> {
   return new Promise((resolve) => {
+    let lastFound = 0;
     const args = [
       'python_scraper.py',
       '--state', state,
@@ -198,6 +199,7 @@ function runScraper(state: string, country: string, citiesFile: string, jobId: a
         try {
           const j = JSON.parse(line);
           if (j && j.type === 'progress' && j.phase === 'end' && typeof j.current === 'number') {
+            lastFound = Number(j.shops_found) || lastFound;
             setJobStatus(jobId, 'running', undefined, {
               cities_done: j.current,
               cities_total: j.total,
@@ -208,7 +210,7 @@ function runScraper(state: string, country: string, citiesFile: string, jobId: a
       }
     });
     child.stderr.on('data', (d) => process.stderr.write(`[scraper:${state}|err] ${d}`));
-    child.on('close', (code) => { clearTimeout(watchdog); resolve(code ?? -1); });
+    child.on('close', (code) => { clearTimeout(watchdog); resolve({ code: code ?? -1, lastFound }); });
     child.on('error', (err) => { clearTimeout(watchdog); console.error(`[maps-scrape-sched] spawn error ${state}:`, err.message); resolve(-1); });
   });
 }
@@ -238,10 +240,19 @@ async function processOne(job: any): Promise<void> {
   const citiesFile = path.join(queueDir, `${state}_cities.txt`);
   fs.writeFileSync(citiesFile, cities.join('\n'), 'utf-8');
 
-  const code = await runScraper(state, country, citiesFile, id);
+  const { code, lastFound } = await runScraper(state, country, citiesFile, id);
   console.log(`[maps-scrape-sched] ${state} scraper exited code=${code}`);
-  // scraper 自身已回报 completed/failed；若异常退出(-1/非0)且仍 pending，标 failed 防死循环
-  if (code !== 0) {
+  // scraper 正常退出(code 0)：主动置 completed（不依赖 scraper 自身 cloud_status 上报，
+  // 其 urllib 偶发被 Cloudflare 拦 403 导致 completed 漏报，任务卡在 running）
+  if (code === 0) {
+    await setJobStatus(id, 'completed', undefined, {
+      cities_done: cities.length,
+      cities_total: cities.length,
+      artists_found: lastFound,
+    });
+    console.log(`[maps-scrape-sched] ${state} marked completed (cities=${cities.length}, artists=${lastFound})`);
+  } else {
+    // 异常退出(-1/非0)且仍 pending/running，标 failed 防死循环
     const jobs = await fetchJobs();
     const still = jobs.find((j) => String(j.id) === String(id));
     if (still && (still.status === 'pending' || still.status === 'running')) {
