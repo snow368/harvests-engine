@@ -173,11 +173,14 @@ const apps = [
       BOT_COMMENT_ENABLED: 'true',
       BOT_COMMENT_CHANCE: '0.2',
       BOT_COMMENT_DAILY_MAX: '3',
-      // 关注：每日 3-5 个，需同账号访问 ≥2 次后才关注（不冲动关注防反噬）
+      // 关注：每日 3-5 个，首次访问即关注（2026-08-08 用户要求 ig_01 主动关注+DM；
+      //       触碰门槛降到 1：每个店任务只访问 1 次，旧值 ≥2 永远够不到 → 从不关注）
       BOT_FOLLOW_ENABLED: 'true',
       BOT_FOLLOW_DAILY_MIN: '3',
       BOT_FOLLOW_DAILY_MAX: '5',
-      BOT_FOLLOW_MIN_TOUCHES: '2',
+      BOT_FOLLOW_MIN_TOUCHES: '1',
+      // 回关后 DM 预热窗：默认 4h，降到 1h 让回关号更快收到开场白（仍拟人，不秒发）
+      BOT_DM_WARMUP_HOURS: '1',
       // 只互动近 60 天内的新帖（引流价值高 + 显得活跃）
       BOT_SKIP_OLD_POST_DAYS: '60',
       BOT_PREFER_RECENT_DAYS: '30',

@@ -229,7 +229,9 @@ const apps = [
       BOT_FOLLOW_ENABLED: 'true',
       BOT_FOLLOW_DAILY_MIN: '3',
       BOT_FOLLOW_DAILY_MAX: '5',
-      BOT_FOLLOW_MIN_TOUCHES: '2',
+      BOT_FOLLOW_MIN_TOUCHES: '1',
+      // 回关后 DM 预热窗：默认 4h，降到 1h 让回关号更快收到开场白（仍拟人）
+      BOT_DM_WARMUP_HOURS: '1',
       BOT_SKIP_OLD_POST_DAYS: '60',
       BOT_PREFER_RECENT_DAYS: '30',
     },
