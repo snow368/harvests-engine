@@ -1484,16 +1484,10 @@ const isOnLoginPage = async (): Promise<boolean> => {
   return false;
 };
 
-// 正向信号：只有真正登录后的首页才有这些元素（首页导航 / 私信入口）
-const isLoggedInPositive = async (): Promise<boolean> => {
-  if (!page) return false;
-  try {
-    const loggedInMarkers = await page.locator('svg[aria-label="Home"], a[href="/direct/inbox/"], a[href="/"]').count();
-    if (loggedInMarkers > 0) return true;
-  } catch {}
-  return false;
-};
-
+// 🔴 登录闸门修复（2026-08-09）：之前用「正向标记」（Home svg / inbox 链接）判断已登录，
+// 但页面刚加载或 IG DOM 微调时这些标记缺失 → 误判 login state unclear 并永久暂停，
+// 而其实会话有效（任务已跑成）。改为：只要 URL 在 instagram.com 且不在登录/挑战页就放行；
+// 仅当确认在登录/挑战页、或页面根本没加载到 IG（about:blank）时才等待/暂停。
 const waitUntilLoggedIn = async (): Promise<boolean> => {
   // page 为 null 时先尝试拉起浏览器，避免在"无页面"状态下误判已登录去抢任务
   if (!page) {
@@ -1506,10 +1500,10 @@ const waitUntilLoggedIn = async (): Promise<boolean> => {
   let printed = false;
   for (let i = 0; i < 180; i++) { // 最多等 ~15 分钟
     try {
+      // 在登录/挑战页：不导航，避免打断用户正在输入的登录框，原地等
       if (await isOnLoginPage()) {
-        // 在登录/挑战页：不导航，避免打断用户正在输入的登录框，原地等
         if (!printed) {
-          console.log('[bot-real] ⏸  NOT logged in — pausing ALL task execution. Finish logging in on the IG window (username + password), then the bot auto-resumes. No tasks will be grabbed or marked failed while waiting.');
+          console.log('[bot-real] ⏸  NOT logged in / challenge — pausing ALL task execution. Finish logging in on the IG window (username + password), then the bot auto-resumes. No tasks will be grabbed or marked failed while waiting.');
           printed = true;
         }
         await sleep(5000);
@@ -1517,6 +1511,7 @@ const waitUntilLoggedIn = async (): Promise<boolean> => {
       }
       // 不在登录页 → 主动跳回 IG 首页，强制 IG 重新校验会话（过期会重定向到登录页）
       await page.goto(IG_BASE, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+      try { await page.waitForLoadState('domcontentloaded', { timeout: 8000 }); } catch {}
       // 跳回后可能已被踢到登录页
       if (await isOnLoginPage()) {
         if (!printed) {
@@ -1526,13 +1521,22 @@ const waitUntilLoggedIn = async (): Promise<boolean> => {
         await sleep(5000);
         continue;
       }
-      // 确有"已登录"正向信号 → 放行
-      if (await isLoggedInPositive()) return true;
-      // 介于两者之间（加载中/挑战页未识别）：继续等，宁可多等不误跑
+      // 🔴 关键：不再依赖脆弱 DOM 正向标记。只要 URL 在 instagram.com 且不在登录/挑战页 → 视为已登录放行。
+      const urlNow = (page.url() || '').toLowerCase();
+      if (!urlNow.includes('instagram.com')) {
+        // 页面还没真正加载到 IG（可能 about:blank / 加载失败）→ 重试，不误判为已登录去操作空白页
+        if (!printed) {
+          console.log('[bot-real] ⏸  page not on instagram.com yet (still loading/blank) — waiting for load.');
+          printed = true;
+        }
+        await sleep(5000);
+        continue;
+      }
       if (!printed) {
-        console.log('[bot-real] ⏸  login state unclear (loading/challenge) — pausing, waiting for you to resolve login.');
+        console.log('[bot-real] ✅ login confirmed (on instagram.com, not on login/challenge) — resuming tasks.');
         printed = true;
       }
+      return true;
     } catch {}
     await sleep(5000);
   }
