@@ -1,6 +1,7 @@
 ﻿/* eslint-disable no-console */
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
 import fs from 'node:fs';
+import { execSync } from 'node:child_process';
 import path from 'node:path';
 import os from 'node:os';
 import { createWorker } from 'tesseract.js';
@@ -1227,38 +1228,23 @@ const recordInteraction = async (handle: string, eventType: string, detail: Reco
 // NOTE: this does a host-wide `taskkill /IM chrome.exe` on Windows. On a host
 // running multiple bot accounts (matrix), scope this by --user-data-dir instead.
 const clearProfileLock = () => {
+  const ud = path.resolve(process.cwd(), PROFILE_DIR);
+  const lockFiles = ['SingletonLock', 'SingletonSocket', 'SingletonCookie', 'SingletonTimedLock'];
+  // 必须先杀孤儿 chrome，再删锁文件：活进程以独占方式握着 SingletonLock（ERROR code 32），
+  // 文件被打开时 fs.rmSync 删不掉。VPS 专用机，直接整机关所有 chrome 最可靠。
   try {
-    const ud = path.resolve(process.cwd(), PROFILE_DIR);
-    for (const f of ['SingletonLock', 'SingletonSocket', 'SingletonCookie', 'SingletonTimedLock']) {
-      try { fs.rmSync(path.join(ud, f), { force: true }); } catch {}
-    }
     if (process.platform === 'win32') {
-      // 跨会话杀孤儿 chrome：先按 profile 目录名精准杀，再兜底整机关（VPS 专用机）。
-      // 不再静默吞错——杀不掉会在日志报警，便于定位 session 0 孤儿进程。
-      const profName = path.basename(ud);
-      try {
-        const psList = `Get-CimInstance Win32_Process -Filter "name='chrome.exe'" | Where-Object { $_.CommandLine -like '*${profName}*' } | ForEach-Object { $_.ProcessId }`;
-        const encoded = Buffer.from(psList, 'utf16le').toString('base64');
-        const out = require('child_process').execSync(`powershell -NoProfile -NonInteractive -EncodedCommand ${encoded}`, { encoding: 'utf8' });
-        const pids = (out.match(/\d+/g) || []).map((s: string) => s.trim()).filter(Boolean);
-        let remaining = pids.length > 0;
-        for (const pid of pids) {
-          try { require('child_process').execSync(`taskkill /F /PID ${pid}`, { stdio: 'ignore' }); }
-          catch (e) { console.warn(`[bot-real] clearProfileLock: taskkill ${pid} failed:`, (e as any)?.message); remaining = true; }
-        }
-        if (remaining) {
-          try { require('child_process').execSync('taskkill /F /IM chrome.exe', { stdio: 'ignore' }); }
-          catch (e) { console.warn('[bot-real] clearProfileLock: host-wide taskkill failed:', (e as any)?.message); }
-        }
-      } catch (e) {
-        console.warn('[bot-real] clearProfileLock: scoped kill failed, falling back to host-wide:', (e as any)?.message);
-        try { require('child_process').execSync('taskkill /F /IM chrome.exe', { stdio: 'ignore' }); } catch {}
-      }
+      try { execSync('taskkill /F /IM chrome.exe', { stdio: 'ignore' }); }
+      catch { /* 没有 chrome 在跑也正常 */ }
     } else {
-      try { require('child_process').execSync(`pkill -f "${ud}" || true`, { stdio: 'ignore' }); } catch (e) { console.warn('[bot-real] clearProfileLock: pkill failed:', (e as any)?.message); }
+      try { execSync(`pkill -f "${ud}" || true`, { stdio: 'ignore' }); } catch {}
     }
   } catch (e) {
-    console.warn('[bot-real] clearProfileLock: unexpected error:', (e as any)?.message);
+    console.warn('[bot-real] clearProfileLock: kill failed:', (e as any)?.message);
+  }
+  // 进程已死、锁文件不再被占用，删除残留锁文件。删不掉会在下一轮重试（ensureBrowser 有 12 次退避）兜底。
+  for (const f of lockFiles) {
+    try { fs.rmSync(path.join(ud, f), { force: true }); } catch {}
   }
 };
 
