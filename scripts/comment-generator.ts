@@ -150,27 +150,31 @@ const buildPrompt = (input: CommentInput, _style: string): string => {
   );
 
   const conf = input.styleConfidence || 'low';
-  // 🔴 中性评论铁律（2026-08-09 用户拍板）：只评"通用工艺"，绝不明示/暗示刺青题材/颜色/具体风格，
-  // 防止评论与图片牛头不对马嘴。仅 image-aware 高置信度才允许提风格词，且仍禁止提题材。
-  const styleForContext = conf === 'high' ? (input.style || '') : '';
+  // 🔴 评论铁律（2026-08-09 修订·用户拍板）：bot 完全无看图能力，只能读文字。
+  // 规则：① 绝不断言看得到的视觉工艺(shading/linework/composition/contrast/color/execution)——除非 caption 自己写了；
+  // ② 可引用题材/风格，但 ONLY IF caption 明确写出（caption 是可读文字，图就是那个题材，不会牛头不对马嘴）；③ 不编 caption 没提到的题材。
+  const styleForContext = conf === 'high' || conf === 'medium' ? (input.style || '') : '';
   const tattooContext = buildTattooArtistContext(postType, styleForContext);
 
   const postContext = [
     input.caption ? `Post caption: "${input.caption.slice(0, 300)}"` : null,
-    // ⚠️ imageAlt 可能不准，明确告诉模型"不可据此判定题材"，从源头杜绝牛头不对马嘴
-    input.imageAlt ? `Image description (may be inaccurate — do NOT use it to name the subject): "${input.imageAlt.slice(0, 200)}"` : null,
+    // ⚠️ imageAlt 是 IG 自动生成、可能不准；仅作弱提示，subject 以 caption 为准，绝不可仅凭 alt 判定题材
+    input.imageAlt ? `Image auto-description (may be inaccurate — weak hint only, prefer the caption for subject): "${input.imageAlt.slice(0, 200)}"` : null,
     input.isReel ? '(Video/Reel)' : '(Static post)',
     `Stats: ${input.likeCount || '?'} likes, ${input.commentCount || '?'} comments`,
   ].filter(Boolean).join(' | ');
 
-  // 中性规则：最高优先级，覆盖一切。只评工艺，不评题材/颜色/风格。
-  const NEUTRAL_RULE = `NEUTRALITY RULE (highest priority): NEVER name or describe WHAT the tattoo depicts — no subject, object, animal, person, symbol, scene, or color. Do NOT write phrases like "this rose", "the skull", "love the portrait", "great color". Comment ONLY on universal craftsmanship true for ANY tattoo: line quality, shading, composition, contrast, execution, detail, flow. This guarantees your comment never mismatches the image.`;
+  // 视觉规则：最高优先级。bot 无看图能力，只能读 caption 文字；可引用题材但 ONLY IF caption 写出。
+  const NEUTRAL_RULE = `VISION RULE (highest priority): You CANNOT see the image — you only read text. Therefore:
+- NEVER claim visual qualities you did not observe: do NOT assert shading, linework quality, composition, contrast, color, or execution as if you saw them. (Only exception: the caption itself describes that quality — then you may echo it.)
+- You MAY reference the tattoo's subject or style, but ONLY if the post caption explicitly states it. The caption is text you can read, and the image depicts that same thing, so this is safe and relevant. Do NOT invent a subject the caption does not mention.
+- Stay natural, like a fellow artist/enthusiast reacting to what the post describes. No spam, no marketing.`;
 
   const styleConfNote = conf === 'low'
-    ? `CRITICAL: You cannot see the image. ${NEUTRAL_RULE}`
+    ? `You cannot see the image. ${NEUTRAL_RULE} Read the caption to find what the tattoo is, and you may acknowledge that subject/style if the caption names it. Never claim visual technique you cannot verify.`
     : conf === 'medium'
-    ? `${NEUTRAL_RULE} (The style above is only a guess — do not name it unless the caption explicitly states it.)`
-    : `${NEUTRAL_RULE} (You may note the confirmed style briefly, but never the subject matter.)`;
+    ? `${NEUTRAL_RULE} (The style above is only a text guess from caption/alt — you may reference it if the caption states it, but never claim you observed the visual result.)`
+    : `${NEUTRAL_RULE} (The style above is text-confirmed from caption — you may reference it, but never claim you observed the visual quality.)`;
 
   const lang = (COMMENT_LANG === 'auto' || COMMENT_LANG === 'es') && (input.caption || '').trim().length >= 10
     ? detectPostLanguage(input.caption)
@@ -196,7 +200,8 @@ ${styleConfNote}
 Rules:
 - NEVER sound like spam, bot, marketing, or a customer
 - NEVER mention buying anything, supplies, DM for info, check bio, etc.
-- NEVER reference the tattoo's subject matter, color, or specific imagery. Comments must be about craft only (linework, shading, composition, contrast, execution, detail).
+- You CANNOT see the image. Do NOT claim visual technique (shading/linework/composition/contrast/color) you did not observe.
+- You MAY name the tattoo's subject or style ONLY if the caption explicitly states it; otherwise keep it general. Do NOT invent a subject the caption does not mention.
 - Use tattoo industry language naturally — don't force it
 - 6-20 words. One short sentence is often best.
 - Max 1 emoji. Often no emoji is more authentic.
@@ -242,14 +247,14 @@ export const generateComment = async (input: CommentInput): Promise<GeneratedCom
   if (!DEEPSEEK_API_KEY) {
     // 无 API key 时直接用模板库
     const fallbacks = [
-      'Love the shading on this piece.',
-      'Clean linework, really nice result.',
-      'Smooth blends on this one.',
-      'The linework flows really nicely.',
-      'Great composition, flows really nicely.',
-      'The contrast in this is beautiful.',
-      'Really clean work.',
-      'This is awesome.',
+      'This is really well done.',
+      'Great work as always.',
+      'Such a clean piece.',
+      'This turned out great.',
+      'Really nice post.',
+      'Awesome tattoo.',
+      'Love this, great work.',
+      'This is solid work.',
     ];
     const fbText = fallbacks[Math.floor(Math.random() * fallbacks.length)];
     return { text: fbText, style: 'fallback' };
@@ -294,14 +299,14 @@ export const generateComment = async (input: CommentInput): Promise<GeneratedCom
 
   // 最终 fallback — 模板库
   const fallbacks = [
-    'Love the shading on this piece.',
-    'Clean linework, really nice result.',
-    'The composition here is on point.',
-    'Such a solid piece, great execution.',
     'This is really well done.',
-    'Love how the tones turned out on this.',
-    'Incredible detail work.',
-    'The contrast in this is beautiful.',
+    'Great work as always.',
+    'Such a clean piece.',
+    'This turned out great.',
+    'Really nice post.',
+    'Awesome tattoo.',
+    'Love this, great work.',
+    'This is solid work.',
   ];
   const fbText = fallbacks[Math.floor(Math.random() * fallbacks.length)];
   recentCommentTexts.push(fbText);
