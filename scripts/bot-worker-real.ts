@@ -1305,21 +1305,21 @@ const ensureBrowser = async () => {
         }) as any;
         // Patch pages to hide automation
         const existingPages = (context as any).pages?.() || [];
-        if (existingPages.length > 0) {
-          for (const p of existingPages) {
-            try {
-              if (p.url().includes('instagram.com')) { page = p; break; }
-            } catch {}
-          }
-        }
-        if (!page) {
-          page = await (context as any).newPage();
-        }
+        // 🔴 复用初始标签页（Playwright 启动 persistent 时第一个页永远是 about:blank），
+        // 直接把它导航到 IG，而不是再 newPage 开第二个标签。否则会留下一个盖在前面的
+        // about:blank 废标签，把真正的 IG 登录页挡住 —— 用户看到 about:blank 却无法登录。
+        page = existingPages[0] || (await (context as any).newPage());
         await page.addInitScript(() => {
           Object.defineProperty(navigator, 'webdriver', { get: () => false });
         });
         if (!page.url() || !page.url().includes('instagram.com')) {
           await page.goto(IG_BASE, { waitUntil: 'domcontentloaded', timeout: 45000 });
+        }
+        // 关掉其余空白/多余标签页，确保用户只看到唯一一个 IG 标签。
+        for (const p of ((context as any).pages?.() || [])) {
+          if (p !== page && (!p.url() || p.url() === 'about:blank')) {
+            try { await p.close(); } catch {}
+          }
         }
         await page.bringToFront().catch(() => {});
         console.log('[bot-real] launched persistent browser (stealth mode)');
