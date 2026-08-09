@@ -1233,11 +1233,33 @@ const clearProfileLock = () => {
       try { fs.rmSync(path.join(ud, f), { force: true }); } catch {}
     }
     if (process.platform === 'win32') {
-      try { require('child_process').execSync('taskkill /IM chrome.exe /F', { stdio: 'ignore' }); } catch {}
+      // 跨会话杀孤儿 chrome：先按 profile 目录名精准杀，再兜底整机关（VPS 专用机）。
+      // 不再静默吞错——杀不掉会在日志报警，便于定位 session 0 孤儿进程。
+      const profName = path.basename(ud);
+      try {
+        const psList = `Get-CimInstance Win32_Process -Filter "name='chrome.exe'" | Where-Object { $_.CommandLine -like '*${profName}*' } | ForEach-Object { $_.ProcessId }`;
+        const encoded = Buffer.from(psList, 'utf16le').toString('base64');
+        const out = require('child_process').execSync(`powershell -NoProfile -NonInteractive -EncodedCommand ${encoded}`, { encoding: 'utf8' });
+        const pids = (out.match(/\d+/g) || []).map((s: string) => s.trim()).filter(Boolean);
+        let remaining = pids.length > 0;
+        for (const pid of pids) {
+          try { require('child_process').execSync(`taskkill /F /PID ${pid}`, { stdio: 'ignore' }); }
+          catch (e) { console.warn(`[bot-real] clearProfileLock: taskkill ${pid} failed:`, (e as any)?.message); remaining = true; }
+        }
+        if (remaining) {
+          try { require('child_process').execSync('taskkill /F /IM chrome.exe', { stdio: 'ignore' }); }
+          catch (e) { console.warn('[bot-real] clearProfileLock: host-wide taskkill failed:', (e as any)?.message); }
+        }
+      } catch (e) {
+        console.warn('[bot-real] clearProfileLock: scoped kill failed, falling back to host-wide:', (e as any)?.message);
+        try { require('child_process').execSync('taskkill /F /IM chrome.exe', { stdio: 'ignore' }); } catch {}
+      }
     } else {
-      try { require('child_process').execSync(`pkill -f "${ud}" || true`, { stdio: 'ignore' }); } catch {}
+      try { require('child_process').execSync(`pkill -f "${ud}" || true`, { stdio: 'ignore' }); } catch (e) { console.warn('[bot-real] clearProfileLock: pkill failed:', (e as any)?.message); }
     }
-  } catch {}
+  } catch (e) {
+    console.warn('[bot-real] clearProfileLock: unexpected error:', (e as any)?.message);
+  }
 };
 
 const ensureBrowser = async () => {
