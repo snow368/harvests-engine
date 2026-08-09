@@ -463,6 +463,25 @@ const OFFERS: Array<{
   }
 ];
 
+// 🔴 下单目的地（2026-08-09 用户指定：www.peachtattoosupplies.com）
+// 所有 DM 末尾统一附上「在此下单」引导；未翻译语言 fallback 到英文句。
+const ORDER_URL = 'https://www.peachtattoosupplies.com';
+const ORDER_LINES: Record<string, string> = {
+  en: `Order anytime at ${ORDER_URL}`,
+  de: `Bestell jederzeit auf ${ORDER_URL}`,
+  nl: `Bestel wanneer je wilt op ${ORDER_URL}`,
+  fr: `Commandez à tout moment sur ${ORDER_URL}`,
+  ja: `ご注文はいつでも ${ORDER_URL} から`,
+  es: `Pide cuando quieras en ${ORDER_URL}`,
+  it: `Ordina quando vuoi su ${ORDER_URL}`,
+  pt: `Peça quando quiser em ${ORDER_URL}`,
+  pl: `Zamów kiedy chcesz na ${ORDER_URL}`,
+  tr: `İstediğin zaman sipariş ver: ${ORDER_URL}`,
+  cs: `Objednejte kdykoli na ${ORDER_URL}`,
+  ru: `Заказывайте в любое время на ${ORDER_URL}`,
+  sv: `Beställ när du vill på ${ORDER_URL}`,
+};
+
 // 按客户情况组装 DM：个性化钩子（回赞）→ 产品 pitch（按市场+语言）→ CTA（同语言）。
 // 仅使用 active 的 offer（未核实产品能力前示例保持关闭）；无可用 offer 时 fallback 到原固定文案池。
 const buildDmScript = (handle: string, lang: string, st: any): string => {
@@ -479,10 +498,13 @@ const buildDmScript = (handle: string, lang: string, st: any): string => {
     // 促销钩子：仅当该语言提供了翻译才附加（promo[lang] 存在），未翻译语言不附加，避免机翻/英文污染。
     const promo = offer.promo?.[lang];
     const cta = (offer.cta[lang] || offer.cta.en || '').trim();
-    return [opener, pitch, promo, cta].filter(Boolean).join(' ');
+    // 🔴 末尾统一附「在此下单」目的地（2026-08-09 用户指定 peachtattoosupplies.com）
+    const orderLine = ORDER_LINES[lang] || ORDER_LINES.en;
+    return [opener, pitch, promo, cta, orderLine].filter(Boolean).join(' ');
   }
   const baseScript = pickDmScript(handle, lang);
-  return st?.likedUsDetected ? `${LIKED_US_OPENERS_BY_LANG[lang] || LIKED_US_OPENERS_BY_LANG.en}${baseScript}` : baseScript;
+  const orderLine = ORDER_LINES[lang] || ORDER_LINES.en;
+  return st?.likedUsDetected ? `${LIKED_US_OPENERS_BY_LANG[lang] || LIKED_US_OPENERS_BY_LANG.en}${baseScript} ${orderLine}` : `${baseScript} ${orderLine}`;
 };
 
 
