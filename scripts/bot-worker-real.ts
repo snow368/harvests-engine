@@ -405,6 +405,9 @@ const OFFERS: Array<{
   markets?: string[];
   pitch: Record<string, string>;
   cta: Record<string, string>;
+  // 促销钩子（2026-08-09 用户拍板：PEACH 针 launch 促销）。独立字段，仅对提供了翻译的语言附加，
+  // 未翻译的语言不附加（避免机翻直发 + 避免英文污染非英语 DM）。
+  promo?: Record<string, string>;
 }> = [
   // ── 主推：针 + 转印纸 常备套装（2026-08-07 用户确认：墨水暂不推，主推 needles + stencil paper）
   // 钩子策略：🟡 中钩子——「灭菌 + 独立无菌包装」(2026-08-07 用户确认真实能力) + 每周必补耗材 + 艺术家价格；
@@ -442,6 +445,19 @@ const OFFERS: Array<{
       cs: 'Chceš naši ceník jehel + papíru? Odepiš "stock" a pošlu ti ho — bez tlaku.',
       ru: 'Хотите наш прайс на иглы + бумагу? Напишите "stock" — и я пришлю. Без давления.',
       sv: 'Vill du ha vår prislista på nålar + papper? Svara "stock" så skickar jag den — ingen press.'
+    },
+    // ── PEACH 针 launch 促销（2026-08-09 用户拍板，真实条款，本人审核）──
+    // 新客专享：买 2 盒送 1 盒（首单·新客户，不与其他优惠叠加）；量贩档（所有客户）：买 10 盒送 2 盒，适用全部 PEACH 型号。
+    // 仅对以下已翻译语言附加；其余语言（pl/tr/cs/ru 等）不附加，避免机翻/英文污染。
+    promo: {
+      en: "Quick note — on PEACH needles (CON / COG / AES / PRO) we're running a launch deal: new studios get 3 boxes for the price of 2 (one-time, new artists only), and any order of 10 boxes ships 12. Reply 'deal' and I'll send the exact terms — no pressure.",
+      de: "Kurzer Hinweis — bei PEACH-Nadeln (CON/COG/AES/PRO) läuft ein Einführungsangebot: neue Studios bekommen 3 Boxen zum Preis von 2 (einmalig, nur neue Künstler), und jede Bestellung ab 10 Boxen gibt 12. Antworte 'deal', dann schicke ich die genauen Konditionen — ganz ohne Druck.",
+      nl: "Korte note — op PEACH-naalden (CON/COG/AES/PRO) draait een introductieactie: nieuwe studio's krijgen 3 dozen voor de prijs van 2 (eenmalig, alleen nieuwe artiesten), en elke bestelling vanaf 10 dozen levert 12. Antwoord 'deal' en ik stuur je de exacte voorwaarden — totaal zonder druk.",
+      fr: "Petite note — sur les aiguilles PEACH (CON/COG/AES/PRO) on lance une offre: les nouveaux studios reçoivent 3 boîtes pour le prix de 2 (une fois, nouveaux artistes uniquement), et toute commande de 10 boîtes en donne 12. Réponds 'deal' et je t'envoie les conditions exactes — sans pression.",
+      es: "Nota rápida — en agujas PEACH (CON/COG/AES/PRO) tenemos una oferta de lanzamiento: los nuevos estudios reciben 3 cajas por el precio de 2 (una vez, solo nuevos artistas), y cualquier pedido de 10 cajas envía 12. Responde 'deal' y te mando las condiciones exactas — sin presión.",
+      it: "Nota rapida — sulle ago PEACH (CON/COG/AES/PRO) c'è un'offerta di lancio: i nuovi studi ricevono 3 scatole al prezzo di 2 (una tantum, solo nuovi artisti), e ogni ordine di 10 scatole ne spedisce 12. Rispondi 'deal' e ti mando le condizioni esatte — senza pressione.",
+      pt: "Nota rápida — nas agulhas PEACH (CON/COG/AES/PRO) temos uma oferta de lançamento: novos estúdios recebem 3 caixas pelo preço de 2 (uma vez, só novos artistas), e qualquer pedido de 10 caixas envia 12. Responda 'deal' e eu mando os termos exatos — sem pressão.",
+      ja: "お知らせ — PEACH ニードル（CON/COG/AES/PRO）でスタートキャンペーン中です。新規スタジオ様は2個買うと1個プレゼント（初回・新規限定）、10個のご注文で12個お届けします。「deal」とご返信いただければ詳しい条件をお送りします。どうぞご負担なく。"
     }
   }
 ];
@@ -459,8 +475,10 @@ const buildDmScript = (handle: string, lang: string, st: any): string => {
   if (offer) {
     const opener = st?.likedUsDetected ? (LIKED_US_OPENERS_BY_LANG[lang] || LIKED_US_OPENERS_BY_LANG.en) : '';
     const pitch = (offer.pitch[lang] || offer.pitch.en || '').trim();
+    // 促销钩子：仅当该语言提供了翻译才附加（promo[lang] 存在），未翻译语言不附加，避免机翻/英文污染。
+    const promo = offer.promo?.[lang];
     const cta = (offer.cta[lang] || offer.cta.en || '').trim();
-    return [opener, pitch, cta].filter(Boolean).join(' ');
+    return [opener, pitch, promo, cta].filter(Boolean).join(' ');
   }
   const baseScript = pickDmScript(handle, lang);
   return st?.likedUsDetected ? `${LIKED_US_OPENERS_BY_LANG[lang] || LIKED_US_OPENERS_BY_LANG.en}${baseScript}` : baseScript;
