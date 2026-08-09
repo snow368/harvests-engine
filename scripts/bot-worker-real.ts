@@ -1271,20 +1271,22 @@ const clearProfileLock = () => {
 };
 
 const ensureBrowser = async () => {
+  // 已有一个在 instagram.com 的页面 → 直接复用，绝不重新开浏览器（避免多标签堆积）。
   if (context && page) {
     try {
       const url = page.url();
       if (url && url.includes('instagram.com')) return;
     } catch {}
+    // 有 context 但页面不在 IG（卡在 about:blank 等）→ 先关干净，再重建，不留孤儿。
+    try { await context.close(); } catch {}
     context = null as any; page = null as any;
   }
 
-  // Retry with backoff so a transiently-unavailable browser (e.g. external Chrome
-  // not yet up in CDP mode, or a slow first launch in persistent mode) does NOT
-  // crash the whole process. The process only exits after exhausting all retries,
-  // at which point pm2 restarts it and tries again.
-  const MAX_ATTEMPTS = 12;
-  const BACKOFF_MS = 15_000;
+  // Retry with backoff. 关键：每一次重试前，上一轮若已半启动了一个浏览器/标签页，
+  // 必须在 catch 里把它 context.close() 掉 —— 否则孤儿浏览器 + 孤儿标签会越积越多
+  // （之前"七八个 about:blank"就是这样来的：12 次重试每次都 newPage 且不清旧进程）。
+  const MAX_ATTEMPTS = 4;
+  const BACKOFF_MS = 8_000;
   let lastErr: any;
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     try {
@@ -1293,9 +1295,10 @@ const ensureBrowser = async () => {
         // Login session is saved in the profile directory.
         const profilePath = path.resolve(process.cwd(), PROFILE_DIR);
         if (!fs.existsSync(profilePath)) fs.mkdirSync(profilePath, { recursive: true });
-        const userDataDir = profilePath;
-        clearProfileLock(); // clear any orphan Chrome + stale lock before launching
-        context = await chromium.launchPersistentContext(userDataDir, {
+        // 🔴 每次启动前：杀光所有孤儿 chrome + 删残留锁文件，确保不会撞 ProcessSingleton，
+        //    也不会因为上一次没退干净的 chrome 而反复失败重试。
+        clearProfileLock();
+        context = await chromium.launchPersistentContext(profilePath, {
           headless: HEADLESS,
           viewport: { width: 1280, height: 900 },
           args: [
@@ -1303,23 +1306,17 @@ const ensureBrowser = async () => {
             '--disable-blink-features=AutomationControlled',
           ],
         }) as any;
-        // Patch pages to hide automation
-        const existingPages = (context as any).pages?.() || [];
-        // 🔴 复用初始标签页（Playwright 启动 persistent 时第一个页永远是 about:blank），
-        // 直接把它导航到 IG，而不是再 newPage 开第二个标签。否则会留下一个盖在前面的
-        // about:blank 废标签，把真正的 IG 登录页挡住 —— 用户看到 about:blank 却无法登录。
-        page = existingPages[0] || (await (context as any).newPage());
+        // 🔴 单标签铁律：Playwright 启动 persistent 时第一个页永远是 about:blank，
+        // 直接复用它并导航到 IG，绝不 newPage 开第二个/第三个标签。
+        const allPages = (context as any).pages?.() || [];
+        page = allPages[0] || (await (context as any).newPage());
         await page.addInitScript(() => {
           Object.defineProperty(navigator, 'webdriver', { get: () => false });
         });
-        if (!page.url() || !page.url().includes('instagram.com')) {
-          await page.goto(IG_BASE, { waitUntil: 'domcontentloaded', timeout: 45000 });
-        }
-        // 关掉其余空白/多余标签页，确保用户只看到唯一一个 IG 标签。
+        await page.goto(IG_BASE, { waitUntil: 'domcontentloaded', timeout: 45000 });
+        // 关掉当前页之外的一切标签（任何残留 about:blank / 其它页），保证永远只有唯一一个 IG 标签。
         for (const p of ((context as any).pages?.() || [])) {
-          if (p !== page && (!p.url() || p.url() === 'about:blank')) {
-            try { await p.close(); } catch {}
-          }
+          if (p !== page) { try { await p.close(); } catch {} }
         }
         await page.bringToFront().catch(() => {});
         console.log('[bot-real] launched persistent browser (stealth mode)');
@@ -1341,7 +1338,6 @@ const ensureBrowser = async () => {
       }
       if (!page) {
         page = await context.newPage();
-        // Attempt anti-detection before navigation (may not fully work in CDP mode).
         try {
           await page.addInitScript(() => {
             Object.defineProperty(navigator, 'webdriver', { get: () => false });
@@ -1355,6 +1351,9 @@ const ensureBrowser = async () => {
     } catch (e) {
       lastErr = e;
       console.error(`[bot-real] browser ensure attempt ${attempt}/${MAX_ATTEMPTS} failed: ${e?.message || e}`);
+      // 🔴 失败后若留下了半残 context，立刻关掉它，避免孤儿进程/标签堆积（多标签根因）。
+      try { if (context) { await context.close(); } } catch {}
+      context = null as any; page = null as any;
       if (attempt < MAX_ATTEMPTS) {
         await sleep(BACKOFF_MS);
       }
