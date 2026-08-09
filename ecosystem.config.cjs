@@ -169,21 +169,23 @@ const apps = [
       BOT_DAILY_LIKE_OVERRIDE: '0',
       BOT_LIKE_COOLDOWN_MIN_HOURS: '24',
       BOT_LIKE_COOLDOWN_MAX_HOURS: '72',
-      // 评论：概率 0.2，每日上限 3 条（评论是最危险动作，先保守）
+      // 评论：概率 0.4，每日上限 15 条（成熟号放量；按账号年龄连续爬坡，新号自动降低）
       BOT_COMMENT_ENABLED: 'true',
-      BOT_COMMENT_CHANCE: '0.2',
-      BOT_COMMENT_DAILY_MAX: '3',
-      // 关注：每日 3-5 个，首次访问即关注（2026-08-08 用户要求 ig_01 主动关注+DM；
+      BOT_COMMENT_CHANCE: '0.4',
+      BOT_COMMENT_DAILY_MAX: '15',
+      // 关注：每日 15-40 个（成熟号满档；按账号年龄连续爬坡，ig_01 绑定 51 天→立即满档；
       //       触碰门槛降到 1：每个店任务只访问 1 次，旧值 ≥2 永远够不到 → 从不关注）
       BOT_FOLLOW_ENABLED: 'true',
-      BOT_FOLLOW_DAILY_MIN: '3',
-      BOT_FOLLOW_DAILY_MAX: '5',
+      BOT_FOLLOW_DAILY_MIN: '15',
+      BOT_FOLLOW_DAILY_MAX: '40',
       BOT_FOLLOW_MIN_TOUCHES: '1',
       // 回关后 DM 预热窗：默认 4h，降到 1h 让回关号更快收到开场白（仍拟人，不秒发）
       BOT_DM_WARMUP_HOURS: '1',
       // 只互动近 60 天内的新帖（引流价值高 + 显得活跃）
       BOT_SKIP_OLD_POST_DAYS: '60',
       BOT_PREFER_RECENT_DAYS: '30',
+      // 账号绑定日（raiha8833 接入系统日）；bot 据此按真实天数连续爬坡，避免写死上限
+      BOT_ACCOUNT_BOUND_AT: '2026-06-19T00:00:00Z',
     },
     error_file: path.join(LOGS_DIR, 'bot-worker-error.log'),
     out_file: path.join(LOGS_DIR, 'bot-worker-out.log'),

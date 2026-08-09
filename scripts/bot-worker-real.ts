@@ -132,6 +132,10 @@ const BOT_OCR_ENABLED = String(process.env.BOT_OCR_ENABLED || 'false').toLowerCa
 const BOT_DM_DAILY_MAX = Math.max(0, Number(process.env.BOT_DM_DAILY_MAX || 12));
 // 回关后到首次 DM 的自然预热窗口（小时），避免秒回关秒 DM 显得机械。0 = 直接发。
 const BOT_DM_WARMUP_HOURS = Math.max(0, Number(process.env.BOT_DM_WARMUP_HOURS || 4));
+// 账号绑定/自动化起始日（ISO）。用于按真实账号成熟天数连续爬坡关注/评论/点赞上限。
+// 填 IG 号接入系统的日期（raiha8833 = 2026-06-19，距今>50天 → 立即满档）。
+// 不填则 bot 用本地首次运行日做基准（未来新号从 0 自动暖机）。
+const BOT_ACCOUNT_BOUND_AT = String(process.env.BOT_ACCOUNT_BOUND_AT || '').trim();
 // DM 文案池（回关后软性 B2B 开场白）。直接随 create-marketing-task 的 scriptContent 带上，
 // 不依赖 cloud-api 的 marketing_scripts 表（该表写入被 Firebase 中间件拦截，需部署才能改）。
 // 可用 BOT_DM_SCRIPTS_JSON 环境变量覆盖（JSON 字符串数组）。
@@ -733,6 +737,8 @@ type LikeState = {
     byHandle?: Record<string, { lastCommentAt?: number }>;
     recentText?: Array<{ ts: number; hash: number }>;
   };
+  // DM 去重：记录每个 handle 上次已回复的文案哈希，防止把 bot 自己的出站/上轮回复误当客户新消息反复自回复。
+  dmSeen?: Record<string, number>;
 };
 const loadLikeState = (): LikeState => {
   try {
@@ -763,6 +769,7 @@ if (!likeState.comments.byHandle) likeState.comments.byHandle = {};
 if (!likeState.comments.recentText) likeState.comments.recentText = [];
 if (!likeState.dm) likeState.dm = { byDay: {} };
 if (!likeState.dm.byDay) likeState.dm.byDay = {};
+if (!likeState.dmSeen) likeState.dmSeen = {};
 
 const getTodayKey = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 const isSameDay = (a?: number, b?: number) => { if (!a || !b) return false; return getTodayKey(new Date(a)) === getTodayKey(new Date(b)); };
@@ -2033,6 +2040,39 @@ const toAgeDays = (iso?: string) => {
   return (Date.now() - t) / (1000 * 60 * 60 * 24);
 };
 
+// 账号成熟天数：按优先级取年龄源，用于连续爬坡（而非写死的 discrete 阶段）。
+// 优先级：① cloud-api 注入的 accountAgeDays → ② 环境变量 BOT_ACCOUNT_BOUND_AT →
+// ③ bot 本地首次运行记录（未来新号自动从 0 暖机）→ ④ 无记录视为成熟号（满档）。
+const getAccountAgeDays = (command?: CommandPayload): number => {
+  const injected = Number(command?.accountAgeDays || 0);
+  if (Number.isFinite(injected) && injected > 0) return injected;
+  if (BOT_ACCOUNT_BOUND_AT) {
+    const d = toAgeDays(BOT_ACCOUNT_BOUND_AT);
+    if (Number.isFinite(d) && d > 0) return d;
+  }
+  const localBound = Number((likeState as any).accountBoundAt || 0);
+  if (localBound > 0) return (Date.now() - localBound) / (1000 * 60 * 60 * 24);
+  // 首次运行时记录本地起始日，后续自动按真实经过天数爬坡
+  if (!(likeState as any).accountBoundAt) {
+    (likeState as any).accountBoundAt = Date.now();
+    saveLikeState(likeState);
+  }
+  return 0; // 当天视为最年轻（仅浏览+点赞），次日开始爬坡
+};
+
+// 按账号成熟天数计算"日关注上限"（连续爬坡，取代写死的 new/transition/stable 三档）。
+//  <3 天：0（纯暖机，只浏览+点赞）
+//  3~21 天：线性 2 → BOT_FOLLOW_DAILY_MAX
+//  >=21 天：满档 BOT_FOLLOW_DAILY_MAX
+// 每日下限取档位 70%，留自然抖动。
+const FOLLOW_RAMP_MAX_AGE = 21;
+const getAccountFollowRamp = (ageDays: number): number => {
+  if (ageDays < 3) return 0;
+  if (ageDays >= FOLLOW_RAMP_MAX_AGE) return BOT_FOLLOW_DAILY_MAX;
+  const t = (ageDays - 3) / (FOLLOW_RAMP_MAX_AGE - 3); // 0..1
+  return Math.round(2 + t * (BOT_FOLLOW_DAILY_MAX - 2));
+};
+
 const todayKey = () => {
   const d = new Date();
   const y = d.getFullYear();
@@ -2067,17 +2107,14 @@ const shouldTryComment = (handle: string, likeSummary?: LikeActionSummary) => {
 
 const getFollowDayCap = (command?: CommandPayload) => {
   const key = todayKey();
-  const stage = String(command?.accountStage || '').toLowerCase();
-
-  // 根据账号阶段调整日上限
-  let minCap = BOT_FOLLOW_DAILY_MIN;
-  let maxCap = BOT_FOLLOW_DAILY_MAX;
-  if (stage === 'new') { minCap = 0; maxCap = 0; }               // D1-D2: 禁止关注
-  else if (stage === 'transition') { minCap = 0; maxCap = 1; }    // D3-D4: 最多1次/天
-  // stable: 正常配额 (2-6)
+  const ageDays = getAccountAgeDays(command);
+  const rampMax = getAccountFollowRamp(ageDays);
+  // 每日下限取档位 70%，留自然抖动；档位为 0 时直接 0（新号纯暖机）
+  const minCap = Math.floor(rampMax * 0.7);
+  const maxCap = rampMax;
 
   if (!likeState.follows!.dayCap || likeState.follows!.dayCap.key !== key) {
-    likeState.follows!.dayCap = { key, cap: minCap === maxCap ? minCap : randInt(minCap, maxCap) };
+    likeState.follows!.dayCap = { key, cap: minCap >= maxCap ? minCap : randInt(Math.max(0, minCap), Math.max(1, maxCap)) };
     saveLikeState(likeState);
   }
   return likeState.follows!.dayCap.cap;
@@ -2547,10 +2584,10 @@ const getLikePolicy = (command?: CommandPayload) => {
 };
 
 const getSingleHandleLikeCap = (command?: CommandPayload) => {
-  const ageDays = Number(command?.accountAgeDays || 0);
-  const stage = String(command?.accountStage || '').toLowerCase();
-  if ((Number.isFinite(ageDays) && ageDays > 0 && ageDays < 30) || stage === 'new' || stage === 'transition') return 1;
-  return 2;
+  const ageDays = getAccountAgeDays(command);
+  if (ageDays < 3) return 1;        // 新号：每 handle 仅 1 赞（暖机）
+  if (ageDays < 30) return 2;       // 成长期：2
+  return 2;                         // 成熟号：维持 2（已由日总上限控量）
 };
 
 const getDefaultDailyBrowseTarget = (command?: CommandPayload) => {
@@ -2789,6 +2826,11 @@ const executeDmTask = async (task: any): Promise<boolean> => {
     logBehavior('dm_sent', { targetHandle, taskId: task.id });
     recordInteraction(targetHandle, 'dm', { scriptContent, taskId: task.id }).catch(() => {});
     reportDmChat(targetHandle, 'agent', scriptContent, 'contacted').catch(() => {});
+    // 记录出站 DM 文本哈希，防止随后扫描把 bot 自己的消息误当客户新消息（防自回复死循环）
+    if (targetHandle && likeState.dmSeen) {
+      likeState.dmSeen[targetHandle] = hashString(scriptContent || '');
+      saveLikeState(likeState);
+    }
     return true;
   } catch (err: any) {
     logBehavior('dm_failed', { targetHandle, taskId: task.id, error: String(err?.message || '') });
@@ -2913,6 +2955,12 @@ const checkDmReplies = async (): Promise<number> => {
 
         const partnerHandle = await extractThreadHandle();
 
+        // 去重守卫：空 handle 或最新消息就是 bot 自己上次的回复 → 跳过，避免反复自回复
+        if (!partnerHandle) { logBehavior('dm_reply_skip_empty_handle'); continue; }
+        const lastSeen = likeState.dmSeen?.[partnerHandle];
+        const curHash = hashString(latestText);
+        if (lastSeen && lastSeen === curHash) { logBehavior('dm_reply_skip_own_echo', { targetHandle: partnerHandle }); continue; }
+
         if (intent === 'purchase_confirmed') {
           // Post-purchase: send thank-you directly, mark as converted (no marketing script)
           const msg = `Thank you for your order @${partnerHandle || ''}! We appreciate your business. If you have any questions about your order, feel free to ask.`;
@@ -2929,6 +2977,7 @@ const checkDmReplies = async (): Promise<number> => {
           handled++;
           logBehavior('dm_purchase_confirmed', { targetHandle: partnerHandle, text: latestText.slice(0, 80) });
           reportDmChat(partnerHandle, 'customer', latestText, 'won').catch(() => {});
+          if (likeState.dmSeen) { likeState.dmSeen[partnerHandle!] = hashString(latestText); saveLikeState(likeState); }
           if (partnerHandle) {
             postJson('/api/marketing/tasks/mark-converted', { targetHandle: partnerHandle }).catch(() => {});
             logBehavior('dm_converted_reported', { targetHandle: partnerHandle, source: 'dm_keyword' });
@@ -2953,6 +3002,7 @@ const checkDmReplies = async (): Promise<number> => {
             reportDmChat(partnerHandle, 'customer', latestText).catch(() => {});
             reportDmChat(partnerHandle, 'agent', reply).catch(() => {});
           }
+          if (likeState.dmSeen) { likeState.dmSeen[partnerHandle!] = hashString(reply); saveLikeState(likeState); }
 
           // Report "replied" so the Worker flips the lead's marketing_task.
           // No-op on the Worker side if this handle has no engaged task.
