@@ -247,6 +247,8 @@ const BOT_RAPPORT_COMMENTS_DEFAULT = [
   "your style is unique — been enjoying your posts",
   "that piece is sick 💯",
   "mad respect for the detail here",
+  "how many sessions did this take you? been loving your work",
+  "do you design these yourself? curious",
 ];
 let BOT_RAPPORT_COMMENTS: string[] = BOT_RAPPORT_COMMENTS_DEFAULT;
 try { if (process.env.BOT_RAPPORT_COMMENTS_JSON) BOT_RAPPORT_COMMENTS = JSON.parse(process.env.BOT_RAPPORT_COMMENTS_JSON); } catch {}
@@ -2507,11 +2509,11 @@ const buildCommentText = async (facts?: ProfileFacts, postMeta?: any): Promise<s
         'This hits different, really nice.',
       ],
       question: [
-        'Love this! How long did this session take?',
-        'The detail here is insane. What needle config did you use?',
-        'Beautiful work. Is this healed or fresh in the photo?',
-        'This is so clean. Do you design these yourself?',
-        'Love the tones. What ink brand do you prefer for this style?',
+        'Love this concept — how long did the session take?',
+        'Do you design these yourself or work from client ideas?',
+        'What inspired this piece? Genuinely curious.',
+        'How many sessions did this take you?',
+        'Do you tattoo in this style full time?',
       ],
       detail_focused: [
         'Those fine lines in the background are so precise.',

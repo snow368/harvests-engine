@@ -143,7 +143,7 @@ const isTooSimilar = (text: string, threshold = 0.6): boolean => {
 /**
  * 构建专业纹身师视角的 prompt
  */
-const buildPrompt = (input: CommentInput, _style: string): string => {
+const buildPrompt = (input: CommentInput, style: string): string => {
   const postType = detectPostType(
     input.caption || '',
     input.imageAlt ? [input.imageAlt] : []
@@ -189,6 +189,15 @@ const buildPrompt = (input: CommentInput, _style: string): string => {
   };
   const langGuide = LANG_GUIDES[lang] || LANG_GUIDES['en'];
 
+  const STYLE_INSTRUCTIONS: Record<string, string> = {
+    professional: 'Tone: a fellow tattoo artist giving brief, respectful pro feedback. A statement, not a question.',
+    casual: 'Tone: a relaxed peer/fan reacting. A short statement, not a question.',
+    question: "Tone: curious peer. End with ONE genuine, low-pressure question that invites the artist to reply — about the tattoo's subject/theme if the caption names it, or about their process, inspiration, or how long it took. Questions drive conversation. Keep it natural.",
+    short_praise: 'Tone: very short genuine praise (2-5 words). A statement, not a question.',
+    detail_focused: 'Tone: reference a specific subject/theme the caption names (never visual technique), and you may add a light question. Do NOT claim visual quality.',
+  };
+  const styleInstruction = STYLE_INSTRUCTIONS[style] || STYLE_INSTRUCTIONS.casual;
+
   return `${tattooContext}
 
 Post context: ${postContext}
@@ -197,13 +206,15 @@ ${langGuide}
 
 ${styleConfNote}
 
+Style instruction: ${styleInstruction}
+
 Rules:
 - NEVER sound like spam, bot, marketing, or a customer
 - NEVER mention buying anything, supplies, DM for info, check bio, etc.
 - You CANNOT see the image. Do NOT claim visual technique (shading/linework/composition/contrast/color) you did not observe.
 - You MAY name the tattoo's subject or style ONLY if the caption explicitly states it; otherwise keep it general. Do NOT invent a subject the caption does not mention.
 - Use tattoo industry language naturally — don't force it
-- 6-20 words. One short sentence is often best.
+- 6-20 words. If your style is "question", a short sentence ending in a question is perfect.
 - Max 1 emoji. Often no emoji is more authentic.
 
 Return ONLY JSON: {"text": "your comment", "style": "tattoo_artist"}`;
@@ -260,8 +271,9 @@ export const generateComment = async (input: CommentInput): Promise<GeneratedCom
     return { text: fbText, style: 'fallback' };
   }
 
-  // 随机选风格，但倾向简短赞美和随性
-  const weights = [0.30, 0.30, 0.10, 0.25, 0.05];  // professional, casual, question, short_praise, detail_focused — 偏向中性工艺评论，降权 detail_focused/question 防题材错配
+  // 随机选风格：提问(question)为主力——问题是引回评/点赞的第一杠杆；
+  // 降权纯赞美(short_praise)因为它几乎不引发互动；保留 casual 做自然调剂。
+  const weights = [0.15, 0.25, 0.45, 0.10, 0.05];  // professional, casual, question, short_praise, detail_focused
   const r = Math.random();
   let acc = 0;
   let styleIdx = 1; // default casual
