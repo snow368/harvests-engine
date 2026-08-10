@@ -140,6 +140,161 @@ const isTooSimilar = (text: string, threshold = 0.6): boolean => {
   return false;
 };
 
+// ========== 纹身风格分类器（核心：测到帖子具体是什么风格） ==========
+// canonical key → 正文别名 + hashtag(不含 #)。置信度：
+//   high   = 作者在 caption/hashtag 自标该风格（文本信号，VISION 安全，评论可深入）
+//   medium = 仅 IG alt 文本猜测（不深引，谨慎）
+//   low    = 无信号（安全通用评论）
+export type StyleDetection = {
+  primary: string;            // canonical key，对应 STYLE_CRITIQUE / DOMAIN_PHRASES.styles
+  all: string[];              // 命中的 canonical keys
+  confidence: 'high' | 'medium' | 'low';
+  source: 'hashtag' | 'caption' | 'alt' | 'none';
+};
+
+const TATTOO_STYLE_TAXONOMY: { key: string; aliases: string[]; hashtags: string[] }[] = [
+  { key: 'blackwork', aliases: ['blackwork','black work','solid black','black out'], hashtags: ['blackwork','blackworktattoo','blackworktattoos','solidblack','blackouttattoo','blackout'] },
+  { key: 'fine line', aliases: ['fine line','fineline','fine-line','single needle','single-needle','thin line','minimal line'], hashtags: ['fineline','finelinetattoo','finelinetattoos','single-needle','singleneedle','thinlinetattoo','thinlinetattoos','microneedle','minimalisttattoo','minimaltattoo','minimaltattoos'] },
+  { key: 'traditional', aliases: ['traditional','old school','american traditional','americana','bold will hold'], hashtags: ['traditional','trad','oldtattoo','oldschooltattoo','americantraditional','tradtattoo','tattootrad'] },
+  { key: 'neo traditional', aliases: ['neo traditional','neo-traditional','neo trad'], hashtags: ['neotraditional','neotrad','neotraditionaltattoo'] },
+  { key: 'new school', aliases: ['new school','newschool'], hashtags: ['newschool','newschooltattoo','newskool'] },
+  { key: 'japanese', aliases: ['japanese','irezumi','japanesetattoo','horimono'], hashtags: ['japanese','irezumi','japanesetattoo','japanesetattoos','horimono','japantattoo'] },
+  { key: 'realism', aliases: ['realism','realistic','photo realistic','photoreal'], hashtags: ['realism','realistic','realismtattoo','realistictattoo','photorealism','photoreal'] },
+  { key: 'black and grey', aliases: ['black and grey','black & grey','black and gray','black & gray','bng','grey wash','gray wash'], hashtags: ['blackandgrey','blackandgray','blackandgreytattoo','bang','bngtattoo','greywash','graywash'] },
+  { key: 'color', aliases: ['color tattoo','colour tattoo','color realism','colour realism'], hashtags: ['colortattoo','colour tattoo','colorrealism','colourrealism','colortattoos'] },
+  { key: 'microrealism', aliases: ['microrealism','micro realism','mini realism'], hashtags: ['microrealism','microrealistic','microrealismtattoo','miniaturetattoo'] },
+  { key: 'watercolor', aliases: ['watercolor','watercolour','water color','water colour'], hashtags: ['watercolor','watercolortattoo','watercolour','watercolourtattoo'] },
+  { key: 'dotwork', aliases: ['dotwork','stippling','stipple','pointillism'], hashtags: ['dotwork','dotworktattoo','stippling','stippled','pointillism'] },
+  { key: 'geometric', aliases: ['geometric','sacred geometry'], hashtags: ['geometric','geometrictattoo','sacredgeometry','geotattoo'] },
+  { key: 'tribal', aliases: ['tribal','polynesian','maori','samoan'], hashtags: ['tribal','tribaltattoo','polynesian','polynesiantattoo','maoritattoo','samoantattoo'] },
+  { key: 'trash polka', aliases: ['trash polka'], hashtags: ['trashpolka','trashpolkatattoo'] },
+  { key: 'illustrative', aliases: ['illustrative','illustration style'], hashtags: ['illustrative','illustrativetattoo','illustrationtattoo'] },
+  { key: 'ornamental', aliases: ['ornamental','ornament'], hashtags: ['ornamental','ornamentaltattoo','ornament'] },
+  { key: 'lettering', aliases: ['lettering','script tattoo','handlettering','hand lettering','calligraphy tattoo'], hashtags: ['lettering','letteringtattoo','scripttattoo','handlettering','calligraphy'] },
+  { key: 'portrait', aliases: ['portrait tattoo','portrait'], hashtags: ['portraittattoo','portrait'] },
+  { key: 'surrealism', aliases: ['surrealism','surreal'], hashtags: ['surrealism','surrealtattoo','surreal'] },
+  { key: 'cover up', aliases: ['cover up','cover-up','coverup'], hashtags: ['coverup','coveruptattoo','cover'] },
+  { key: 'linework', aliases: ['linework','line work','line art','line-art'], hashtags: ['linework','lineart','lineworktattoo','linearttattoo'] },
+  { key: 'minimalist', aliases: ['minimalist','minimal'], hashtags: ['minimalist','minimal','minimalisttattoo'] },
+  { key: 'chicano', aliases: ['chicano','chicano style'], hashtags: ['chicano','chicanotattoo'] },
+  { key: 'anime', aliases: ['anime','anime tattoo'], hashtags: ['anime','animetattoo','animatattoo'] },
+];
+
+const extractHashtags = (text?: string): string[] => {
+  if (!text) return [];
+  const m = String(text).toLowerCase().match(/#([a-z0-9_]+)/g) || [];
+  return m.map((t) => t.slice(1));
+};
+
+const normAlias = (s: string) => s.toLowerCase();
+
+const aliasHit = (haystack: string, alias: string): boolean => {
+  if (/\s/.test(alias)) return haystack.includes(alias); // 多词别名直接包含
+  // 单词别名用边界匹配：仅 空格/#/开头/结尾 算边界，避免 non-traditional 误命中 traditional
+  const esc = alias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(^|[\s#])${esc}([\s#]|$)`, 'i').test(haystack);
+};
+
+export const detectTattooStyle = (caption?: string, alt?: string, providedHashtags?: string[]): StyleDetection => {
+  const cap = normAlias(caption || '');
+  const altNorm = normAlias(alt || '');
+  const tags = (providedHashtags && providedHashtags.length ? providedHashtags : extractHashtags(caption))
+    .map((t) => t.toLowerCase().replace(/[^a-z0-9]/g, ''));
+  const tagSet = new Set(tags);
+
+  const selfLabeled: string[] = [];
+  const altLabeled: string[] = [];
+  let selfSource: StyleDetection['source'] = 'none';
+
+  for (const { key, aliases, hashtags } of TATTOO_STYLE_TAXONOMY) {
+    const inHashtag = hashtags.some((h) => tagSet.has(h.replace(/[^a-z0-9]/g, '')));
+    const inCaption = aliases.some((a) => aliasHit(cap, a));
+    const inAlt = aliases.some((a) => aliasHit(altNorm, a));
+    if (inHashtag || inCaption) {
+      selfLabeled.push(key);
+      if (inHashtag && selfSource === 'none') selfSource = 'hashtag';
+      else if (inCaption && selfSource === 'none') selfSource = 'caption';
+    } else if (inAlt) {
+      altLabeled.push(key);
+    }
+  }
+
+  if (selfLabeled.length) return { primary: selfLabeled[0], all: selfLabeled, confidence: 'high', source: selfSource };
+  if (altLabeled.length) return { primary: altLabeled[0], all: altLabeled, confidence: 'medium', source: 'alt' };
+  return { primary: '', all: [], confidence: 'low', source: 'none' };
+};
+
+// 风格专属「深层工艺角度」——仅谈工艺/传统/技法大方向（VISION 安全，绝不断言视觉结果）。
+export const STYLE_DEEP_ANGLES: Record<string, string[]> = {
+  'fine line': [
+    'single-pass discipline — keeping line weight consistent without going back over',
+    'avoiding blowouts at the thinnest weights',
+    'bugpin vs standard round liner for crisp fine line',
+  ],
+  'blackwork': [
+    'planning the solid-black masses vs negative space before you start',
+    'packing solid black without leaving holidays',
+    'balancing bold black mass against bare skin',
+  ],
+  'traditional': [
+    'bold will hold — why those lines stay thick',
+    'spit-shade vs whip-shade on trad fades',
+    'limited-palette discipline in traditional',
+  ],
+  'neo traditional': [
+    'line-weight variation for illustrative depth',
+    'how the decorative background supports the focal subject',
+    'color palette choices that read as neo-trad',
+  ],
+  'japanese': [
+    'mikiri — the fade where motifs meet the background',
+    'how the background flows with the body contour',
+    'placing the main motif vs supporting elements',
+  ],
+  'realism': [
+    'building value range from darks to lights',
+    'keeping a consistent light source across the piece',
+    'handling midtones so it does not go muddy',
+  ],
+  'black and grey': [
+    'grey-wash mixing and dilution ratios',
+    'soft vs hard edges in B&G',
+    'pushing contrast without solid black',
+  ],
+  'microrealism': [
+    'needle control at that tiny scale',
+    'keeping detail readable once it heals',
+  ],
+  'watercolor': [
+    'keeping color bleeds controlled (not muddy)',
+    'pairing a solid anchor with the watercolor wash',
+  ],
+  'dotwork': [
+    'building gradient purely from dot density',
+    'stipple vs machine-dotwork rhythm',
+  ],
+  'geometric': [
+    'locking symmetry across the piece',
+    'dot precision on mandala layering',
+  ],
+  'lettering': [
+    'script weight and flow',
+    'keeping flourishes from breaking up over time',
+  ],
+  'tribal': [
+    'negative-space rhythm in the patterns',
+    'how the bold curves follow the muscle',
+  ],
+  'ornamental': [
+    'pattern rhythm and consistent spacing',
+    'how the flow follows the body',
+  ],
+  'illustrative': [
+    'line quality — mixing fine + bold',
+    'composition that makes it read as illustrative',
+  ],
+};
+
 /**
  * 构建专业纹身师视角的 prompt
  */
@@ -154,6 +309,7 @@ const buildPrompt = (input: CommentInput, style: string): string => {
   // 规则：① 绝不断言看得到的视觉工艺(shading/linework/composition/contrast/color/execution)——除非 caption 自己写了；
   // ② 可引用题材/风格，但 ONLY IF caption 明确写出（caption 是可读文字，图就是那个题材，不会牛头不对马嘴）；③ 不编 caption 没提到的题材。
   const styleForContext = conf === 'high' || conf === 'medium' ? (input.style || '') : '';
+  const deepAngles = (conf === 'high' || conf === 'medium') && input.style ? (STYLE_DEEP_ANGLES[input.style] || []) : [];
   const tattooContext = buildTattooArtistContext(postType, styleForContext);
 
   const postContext = [
@@ -176,6 +332,10 @@ const buildPrompt = (input: CommentInput, style: string): string => {
     ? `${NEUTRAL_RULE} (The style above is only a text guess from caption/alt — you may reference it if the caption states it, but never claim you observed the visual result.)`
     : `${NEUTRAL_RULE} (The style above is text-confirmed from caption — you may reference it, but never claim you observed the visual quality.)`;
 
+  const deepNote = deepAngles.length
+    ? `\nSTYLE-DEEP MODE (safe — the artist self-identified "${input.style}" in text): engage with ${input.style}-specific CRAFT KNOWLEDGE using the angles below. Talk about the style's process, tradition, or how it is built — never claim you observed the visual result. Style craft angles to draw from:\n${deepAngles.map((a) => '- ' + a).join('\n')}`
+    : '';
+
   const lang = (COMMENT_LANG === 'auto' || COMMENT_LANG === 'es') && (input.caption || '').trim().length >= 10
     ? detectPostLanguage(input.caption)
     : COMMENT_LANG;
@@ -192,7 +352,7 @@ const buildPrompt = (input: CommentInput, style: string): string => {
   const STYLE_INSTRUCTIONS: Record<string, string> = {
     professional: 'Tone: a fellow tattoo artist giving brief, respectful pro feedback. A statement, not a question.',
     casual: 'Tone: a relaxed peer/fan reacting. A short statement, not a question.',
-    question: "Tone: curious peer. End with ONE genuine, low-pressure question that invites the artist to reply — about the tattoo's subject/theme if the caption names it, or about their process, inspiration, or how long it took. Questions drive conversation. Keep it natural.",
+    question: "Tone: curious peer. End with ONE genuine, low-pressure question. If a style is detected, make it style-relevant — ask about that style's process, tradition, or how it is built (e.g. for blackwork: how you plan the negative space; for japanese: the mikiri transitions). Questions drive replies. Keep it natural.",
     short_praise: 'Tone: very short genuine praise (2-5 words). A statement, not a question.',
     detail_focused: 'Tone: reference a specific subject/theme the caption names (never visual technique), and you may add a light question. Do NOT claim visual quality.',
   };
@@ -204,7 +364,7 @@ Post context: ${postContext}
 
 ${langGuide}
 
-${styleConfNote}
+${styleConfNote}${deepNote}
 
 Style instruction: ${styleInstruction}
 
@@ -212,6 +372,7 @@ Rules:
 - NEVER sound like spam, bot, marketing, or a customer
 - NEVER mention buying anything, supplies, DM for info, check bio, etc.
 - You CANNOT see the image. Do NOT claim visual technique (shading/linework/composition/contrast/color) you did not observe.
+- If a tattoo style is detected and confidence is high, you MAY reference it and engage with its craft (the artist named the style in text, so this is safe and relevant). Never claim you observed the visual quality — only discuss the style's process/tradition/technique in general terms.
 - You MAY name the tattoo's subject or style ONLY if the caption explicitly states it; otherwise keep it general. Do NOT invent a subject the caption does not mention.
 - Use tattoo industry language naturally — don't force it
 - 6-20 words. If your style is "question", a short sentence ending in a question is perfect.

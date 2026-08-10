@@ -5,7 +5,7 @@ import { execSync } from 'node:child_process';
 import path from 'node:path';
 import os from 'node:os';
 import { createWorker } from 'tesseract.js';
-import { generateComment, getFromPool, refillPool, clearRecentHistory } from './comment-generator';
+import { generateComment, getFromPool, refillPool, clearRecentHistory, detectTattooStyle } from './comment-generator';
 import { detectPostType } from './tattoo-voice';
 
 // 2026-08-07 全局兜底：捕获未处理异常/拒绝，避免单任务内的异步错误直接杀死整个进程
@@ -2654,12 +2654,20 @@ const tryCommentWithStrategy = async (handle: string, facts?: ProfileFacts, like
       postUrl,
       text,
       score: chosen.score,
+      style: chosen.meta.postStyle || '',
+      styleConfidence: chosen.meta.styleConfidence || 'low',
+      styleSource: chosen.meta.styleSource || 'none',
       likeCount: Number(chosen.meta.likeCount || 0),
       commentCount: Number(chosen.meta.commentCount || 0),
       cta: Number(chosen.meta.cta || 0),
       pinnedLikelyBoost: Number(chosen.meta.pinnedLikelyBoost || 0)
     });
-    recordInteraction(handle, 'comment', { postUrl, text, score: chosen.score }).catch(() => {});
+    recordInteraction(handle, 'comment', {
+      postUrl, text, score: chosen.score,
+      style: chosen.meta.postStyle || '',
+      styleConfidence: chosen.meta.styleConfidence || 'low',
+      styleSource: chosen.meta.styleSource || 'none',
+    }).catch(() => {});
     // 🛑 检测 IG 限制信号（评论后常弹 "Action Blocked / Try again later"）
     try {
       const bsig = await detectBlockSignal();
@@ -2712,15 +2720,13 @@ const readModalMeta = async (primaryStyle: string, expectedHandle = '', follower
   const promo = keywordHits(blob, PROMO_KEYWORDS).length;
   const cta = keywordHits(blob, BUSINESS_CTA_KEYWORDS).length;
 
-  // Style detection from THIS post (not profile): alt text is IG's own AI description.
-  // alt-confirmed = caption + alt BOTH mention the style → high confidence.
-  const captionStyles = keywordHits(normalizeForMatch(caption), STYLE_KEYWORDS);
-  const altStyles = keywordHits(normalizeForMatch(altHints), STYLE_KEYWORDS);
-  const altConfirmedStyles = captionStyles.filter((s) => altStyles.includes(s));
-  const postStyle = altConfirmedStyles[0] || captionStyles[0] || altStyles[0] || '';
-  const styleConfidence = altConfirmedStyles.length > 0 ? 'high' :
-    (captionStyles.length > 0 && altStyles.length > 0) ? 'medium' : 'low';
-
+  // 风格检测（核心改进）：用分类法从 caption/hashtag(作者自标) + IG alt 文本识别具体风格。
+  // 作者自标(正文或 #tag) → high 置信 → 评论可深入该风格工艺（VISION 安全，因风格来自文本）；
+  // 仅 alt 猜测 → medium，谨慎引用；无信号 → low，安全通用评论。
+  const det = detectTattooStyle(caption, altHints);
+  const postStyle = det.primary;
+  const styleConfidence = det.confidence;
+  const styleSource = det.source;
   const styleBoost = postStyle ? (styleConfidence === 'high' ? 3 : styleConfidence === 'medium' ? 2 : 1) : 0;
   const isReel = /\/reel\//i.test(url);
   let score = 0;
@@ -2755,7 +2761,7 @@ const readModalMeta = async (primaryStyle: string, expectedHandle = '', follower
   else if (postType === 'wip') score += 1;
   else if (postType === 'booking') score -= 3;
   else if (postType === 'flash') score -= 4;
-  return { url, postKey, ownerHandle, isOwnerPost, dt, ageDays, score, positive, promo, cta, styleBoost, isReel, likeCount, commentCount, postType, postStyle, styleConfidence };
+  return { url, postKey, ownerHandle, isOwnerPost, dt, ageDays, score, positive, promo, cta, styleBoost, isReel, likeCount, commentCount, postType, postStyle, styleConfidence, styleSource };
 };
 
 const closeModal = async () => {
