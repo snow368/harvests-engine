@@ -83,6 +83,7 @@ type CommentInput = {
   artistHandle?: string;
   style?: string;           // tattoo style detected
   styleConfidence?: string; // 'high' | 'medium' | 'low' — alt-text verified
+  visionDescription?: string; // 视觉模型对图的观测描述（TEXT，安全可引用）；为空=无图信号
   likeCount?: number;
   commentCount?: number;
   isReel?: boolean;
@@ -370,11 +371,13 @@ const buildPrompt = (input: CommentInput, style: string): string => {
   );
 
   const conf = input.styleConfidence || 'low';
-  // 🔴 评论铁律（2026-08-09 修订·用户拍板）：bot 完全无看图能力，只能读文字。
-  // 规则：① 绝不断言看得到的视觉工艺(shading/linework/composition/contrast/color/execution)——除非 caption 自己写了；
-  // ② 可引用题材/风格，但 ONLY IF caption 明确写出（caption 是可读文字，图就是那个题材，不会牛头不对马嘴）；③ 不编 caption 没提到的题材。
-  // ⚠️ STYLE-DEEP「点出内行细节」仅在 high（作者自标 caption/hashtag，bot 读得到的文字）时触发。
-  //   medium = 仅 IG alt 图 AI 猜测（可能不准），low = 无信号 —— 二者一律不深入风格、不假装懂，退回通用提问/随性。
+  const hasVision = !!(input.visionDescription && input.visionDescription.trim());
+  // 🔴 评论铁律（2026-08-09 修订·用户拍板，2026-08-10 扩展视觉）：
+  // 无视觉模型时：bot 只能读文字，绝不断言看不见的视觉工艺。
+  // 有视觉模型时：视觉模型"替 bot 看了图"并产出 TEXT 观测（visionDescription），bot 可以把这些
+  //   "别人描述给你听的图内容"当作可信素材引用 —— 但绝不超出观测范围去编。
+  // 风格深入(STYLE-DEEP)仍仅在 high 触发：high 来自作者自标(caption/hashtag) 或 视觉确认(模型真看了图)。
+  //   medium = 仅 IG alt 图 AI 猜测（可能不准），low = 无信号 —— 二者一律不深入风格、不假装懂。
   const styleForContext = conf === 'high' ? (input.style || '') : '';
   const deepAngles = conf === 'high' && input.style ? (STYLE_DEEP_ANGLES[input.style] || []) : [];
   const tattooContext = buildTattooArtistContext(postType, styleForContext);
@@ -383,21 +386,26 @@ const buildPrompt = (input: CommentInput, style: string): string => {
     input.caption ? `Post caption: "${input.caption.slice(0, 300)}"` : null,
     // ⚠️ imageAlt 是 IG 自动生成、可能不准；仅作弱提示，subject 以 caption 为准，绝不可仅凭 alt 判定题材
     input.imageAlt ? `Image auto-description (may be inaccurate — weak hint only, prefer the caption for subject): "${input.imageAlt.slice(0, 200)}"` : null,
+    hasVision ? `IMAGE ANALYSIS (observed facts from a vision model — you MAY reference these as if described to you, but NEVER claim visual qualities beyond this list): ${input.visionDescription!.slice(0, 400)}` : null,
     input.isReel ? '(Video/Reel)' : '(Static post)',
     `Stats: ${input.likeCount || '?'} likes, ${input.commentCount || '?'} comments`,
   ].filter(Boolean).join(' | ');
 
-  // 视觉规则：最高优先级。bot 无看图能力，只能读 caption 文字；可引用题材但 ONLY IF caption 写出。
-  const NEUTRAL_RULE = `VISION RULE (highest priority): You CANNOT see the image — you only read text. Therefore:
+  // 视觉规则：最高优先级。当无图观测时维持"只能读文字"；当有图观测时允许引用观测到的细节。
+  const NEUTRAL_RULE = hasVision
+    ? `VISION RULE (highest priority): You have an IMAGE ANALYSIS describing what was observed (see IMAGE ANALYSIS in Post context). You MAY reference those observed details — the subject, craft (linework/shading/composition/color/negative space), and palette — because they were reported by analysis, not imagined. Do NOT claim any visual quality NOT listed in the IMAGE ANALYSIS. You may ALSO reference the tattoo's subject/style if the caption states it. Never invent. Stay natural, like a fellow artist reacting to the post. No spam, no marketing.`
+    : `VISION RULE (highest priority): You CANNOT see the image — you only read text. Therefore:
 - NEVER claim visual qualities you did not observe: do NOT assert shading, linework quality, composition, contrast, color, or execution as if you saw them. (Only exception: the caption itself describes that quality — then you may echo it.)
 - You MAY reference the tattoo's subject or style, but ONLY if the post caption explicitly states it. The caption is text you can read, and the image depicts that same thing, so this is safe and relevant. Do NOT invent a subject the caption does not mention.
 - Stay natural, like a fellow artist/enthusiast reacting to what the post describes. No spam, no marketing.`;
 
   const styleConfNote = conf === 'low'
-    ? `You cannot see the image. ${NEUTRAL_RULE} Read the caption to find what the tattoo is, and you may acknowledge that subject/style if the caption names it. Never claim visual technique you cannot verify.`
+    ? (hasVision
+        ? `An image analysis is available (see IMAGE ANALYSIS) — you may reference its observed subject/craft, but never claim beyond it. ${NEUTRAL_RULE}`
+        : `You cannot see the image. ${NEUTRAL_RULE} Read the caption to find what the tattoo is, and you may acknowledge that subject/style if the caption names it. Never claim visual technique you cannot verify.`)
     : conf === 'medium'
     ? `${NEUTRAL_RULE} (The style above is only a text guess from caption/alt — you may reference it if the caption states it, but never claim you observed the visual result.)`
-    : `${NEUTRAL_RULE} (The style above is text-confirmed from caption — you may reference it, but never claim you observed the visual quality.)`;
+    : `${NEUTRAL_RULE} (The style above is confirmed — from caption or image analysis — you may reference it and its craft; never claim you observed the visual result beyond the IMAGE ANALYSIS.)`;
 
   const deepNote = deepAngles.length
     ? `\nSTYLE-DEEP MODE (safe — the artist self-identified "${input.style}" in text): engage with ${input.style}-specific CRAFT KNOWLEDGE using the angles below. The goal is SPECIFICITY — name one insider detail the way a fellow artist would, so the poster feels truly seen and hits like/reply. These are craft facts ABOUT THE STYLE (process/tradition/technique), NOT claims about their specific image — never say you observed the visual result of their piece. Style craft details to draw from:\n${deepAngles.map((a) => '- ' + a).join('\n')}\nPrefer a comment that names ONE specific detail above, then you may add a low-pressure question about how they approach it.`
@@ -440,9 +448,9 @@ Style instruction: ${styleInstruction}
 Rules:
 - NEVER sound like spam, bot, marketing, or a customer
 - NEVER mention buying anything, supplies, DM for info, check bio, etc.
-- You CANNOT see the image. Do NOT claim visual technique (shading/linework/composition/contrast/color) you did not observe.
-- If a tattoo style is detected and confidence is high, you MAY reference it and engage with its craft (the artist named the style in text, so this is safe and relevant). Never claim you observed the visual quality — only discuss the style's process/tradition/technique in general terms.
-- You MAY name the tattoo's subject or style ONLY if the caption explicitly states it; otherwise keep it general. Do NOT invent a subject the caption does not mention.
+- ${hasVision ? 'You have an IMAGE ANALYSIS in Post context. You MAY reference its observed subject/craft/palette, but NEVER claim visual qualities beyond what it lists.' : 'You CANNOT see the image. Do NOT claim visual technique (shading/linework/composition/contrast/color) you did not observe.'}
+- If a tattoo style is detected and confidence is high, you MAY reference it and engage with its craft (the artist named the style in text, OR a vision model observed it — both safe). Never claim you observed the visual result beyond the IMAGE ANALYSIS.
+- You MAY name the tattoo's subject or style ONLY if the caption explicitly states it, or if the IMAGE ANALYSIS reports it; otherwise keep it general. Do NOT invent a subject the caption does not mention.
 - Use tattoo industry language naturally — don't force it
 - 6-20 words. If your style is "question", a short sentence ending in a question is perfect.
 - Max 1 emoji. Often no emoji is more authentic.

@@ -6,6 +6,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { createWorker } from 'tesseract.js';
 import { generateComment, getFromPool, refillPool, clearRecentHistory, detectTattooStyle } from './comment-generator';
+import { analyzePostImage, isVisionEnabled, buildVisionDescription } from './vision-analyze';
 import { detectPostType } from './tattoo-voice';
 
 // 2026-08-07 全局兜底：捕获未处理异常/拒绝，避免单任务内的异步错误直接杀死整个进程
@@ -2468,6 +2469,7 @@ const buildCommentText = async (facts?: ProfileFacts, postMeta?: any): Promise<s
         artistHandle: facts?.title?.replace(/[\(\)@]/g, '').trim(),
         style: commentStyle,
         styleConfidence: styleConf,
+        visionDescription: postMeta?.visionDescription,
         likeCount: postMeta?.likeCount,
         commentCount: postMeta?.commentCount,
         isReel: postMeta?.isReel,
@@ -2627,7 +2629,41 @@ const tryCommentWithStrategy = async (handle: string, facts?: ProfileFacts, like
   const chosen = ranked.find((r) => r.score >= 3 && (r.meta.ageDays ?? 9999) <= 60 && (r.meta.promo ?? 0) === 0);
   if (!chosen) return { attempted: 1, posted: 0, skipped: true, reason: 'no_comment_candidate' };
 
-  const text = await buildCommentText(facts, { ...chosen.meta, caption: facts?.sampleCaption });
+  // ===== 视觉分析（仅对"将要评论"的最优帖触发，控成本/延迟，不影响浏览评分）=====
+  // 文案 + 图片结合：视觉模型"看"图 -> 产出观测 TEXT -> 注入评论生成。
+  // 作者自标风格(caption/hashtag) 优先于视觉；视觉仅在自标缺失且模型确认时把 low/medium 升为 high。
+  let visionDescription = '';
+  let tempStyle = chosen.meta.postStyle || '';
+  let tempConf: string = chosen.meta.styleConfidence || 'low';
+  let tempSource: string = chosen.meta.styleSource || 'none';
+  if (isVisionEnabled() && chosen.meta.postImageSrc) {
+    try {
+      const vis = await analyzePostImage(chosen.meta.postImageSrc);
+      if (vis) {
+        visionDescription = buildVisionDescription(vis);
+        if (vis.styleConfidence === 'high' && vis.style) {
+          // 视觉判定风格 -> 归一化到分类法 canonical key
+          const visNorm = vis.style.toLowerCase().replace(/[^a-z0-9]/g, '');
+          const canon = detectTattooStyle('', '', [visNorm]).primary;
+          // 作者自标(high)优先；否则（无风格 / 仅 alt 弱猜测 medium）视觉确认即升 high
+          if (canon && tempConf !== 'high') {
+            tempStyle = canon;
+            tempConf = 'high';
+            tempSource = 'vision';
+          }
+        }
+      }
+    } catch {}
+  }
+
+  const text = await buildCommentText(facts, {
+    ...chosen.meta,
+    caption: facts?.sampleCaption,
+    style: tempStyle,
+    styleConfidence: tempConf,
+    styleSource: tempSource,
+    visionDescription,
+  });
   pruneRecentCommentHashes();
   const textHash = hashString(normalizeForMatch(text));
   const dup = (likeState.comments!.recentText || []).some((x) => x.hash === textHash);
@@ -2654,9 +2690,10 @@ const tryCommentWithStrategy = async (handle: string, facts?: ProfileFacts, like
       postUrl,
       text,
       score: chosen.score,
-      style: chosen.meta.postStyle || '',
-      styleConfidence: chosen.meta.styleConfidence || 'low',
-      styleSource: chosen.meta.styleSource || 'none',
+      style: tempStyle || '',
+      styleConfidence: tempConf || 'low',
+      styleSource: tempSource || 'none',
+      vision: !!visionDescription,
       likeCount: Number(chosen.meta.likeCount || 0),
       commentCount: Number(chosen.meta.commentCount || 0),
       cta: Number(chosen.meta.cta || 0),
@@ -2664,9 +2701,10 @@ const tryCommentWithStrategy = async (handle: string, facts?: ProfileFacts, like
     });
     recordInteraction(handle, 'comment', {
       postUrl, text, score: chosen.score,
-      style: chosen.meta.postStyle || '',
-      styleConfidence: chosen.meta.styleConfidence || 'low',
-      styleSource: chosen.meta.styleSource || 'none',
+      style: tempStyle || '',
+      styleConfidence: tempConf || 'low',
+      styleSource: tempSource || 'none',
+      vision: !!visionDescription,
     }).catch(() => {});
     // 🛑 检测 IG 限制信号（评论后常弹 "Action Blocked / Try again later"）
     try {
@@ -2677,6 +2715,29 @@ const tryCommentWithStrategy = async (handle: string, facts?: ProfileFacts, like
   } catch {
     await closeModal().catch(() => {});
     return { attempted: 1, posted: 0, skipped: true, reason: 'comment_post_failed' };
+  }
+};
+
+// 抓取弹窗里"最大的帖子图"的 src（scontent 签名 URL）。仅取 URL 字符串，不下载；
+// 视觉分析时直接把 URL 交给视觉模型服务端拉取（避免浏览器 CORS 抓图）。无图/出错返回 ''。
+const getPostImageSrc = async (): Promise<string> => {
+  if (!page) return '';
+  try {
+    return await page.evaluate(() => {
+      const imgs = Array.from(
+        document.querySelectorAll('div[role="dialog"] img[src*="scontent"]')
+      ) as HTMLImageElement[];
+      if (!imgs.length) return '';
+      let best = '';
+      let bestW = 0;
+      for (const im of imgs) {
+        const w = im.naturalWidth || im.clientWidth || 0;
+        if (w > bestW) { bestW = w; best = im.src; }
+      }
+      return best;
+    });
+  } catch {
+    return '';
   }
 };
 
@@ -2706,6 +2767,8 @@ const readModalMeta = async (primaryStyle: string, expectedHandle = '', follower
     .then(async (els) => Promise.all(els.slice(0, 4).map(async (el) => ((await el.getAttribute('alt')) || '').slice(0, 200))))
     .catch(() => [] as string[]))
     .join(' ');
+  // 帖子图 URL（供视觉分析使用，仅当 BOT_VISION_ENABLED 时后续才会用到）
+  const postImageSrc = await getPostImageSrc();
   const dt = await page.locator('time').first().getAttribute('datetime').catch(() => null);
   const dialogText = normalizeForMatch(
     (await page.locator('div[role="dialog"]').first().innerText().catch(() => '')) || ''
@@ -2761,7 +2824,7 @@ const readModalMeta = async (primaryStyle: string, expectedHandle = '', follower
   else if (postType === 'wip') score += 1;
   else if (postType === 'booking') score -= 3;
   else if (postType === 'flash') score -= 4;
-  return { url, postKey, ownerHandle, isOwnerPost, dt, ageDays, score, positive, promo, cta, styleBoost, isReel, likeCount, commentCount, postType, postStyle, styleConfidence, styleSource };
+  return { url, postKey, ownerHandle, isOwnerPost, dt, ageDays, score, positive, promo, cta, styleBoost, isReel, likeCount, commentCount, postType, postStyle, styleConfidence, styleSource, postImageSrc };
 };
 
 const closeModal = async () => {

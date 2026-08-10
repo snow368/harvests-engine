@@ -182,6 +182,12 @@ const apps = [
       // 关注优先级闸门：'*' = 所有任务层级都允许关注（scheduler 当前不注入 followPriority，留空即放行；
       //   '*' 为未来按优先级排程留余地，同时避免误设为仅 high 卡住关注量）。
       BOT_FOLLOW_PRIORITIES: '*',
+      // 视觉分析（文案+图片结合）：默认关闭，VPS 置 '1' 开启。视觉模型把帖子图变成 TEXT 观测，
+      //   注入评论生成（VISION RULE 升级为"可引用观测细节"）；作者自标风格优先于视觉。
+      //   API key 默认复用 DEEPSEEK_API_KEY；可单独设 BOT_VISION_API_KEY。
+      BOT_VISION_ENABLED: '0',
+      // BOT_VISION_BASE_URL: 'https://api.deepseek.com/v1',  // 默认；或 'https://api.deepseek.international/v1'
+      // BOT_VISION_MODEL: 'deepseek-v4-flash',               // 默认；pro 更准更贵
       // 放宽 round 1（Stage B，待观察 Stage A 后 push）：点赞目标降到 2 篇（DM 闸门本就需 ≥2 赞）、
       //   点赞间隔降到 4h、评论间隔降到 4h → 回关号 ~4h 即攒够 ≥2 赞 + 1 评跨过 DM-able 门槛（Stage A 为 ~8h）
       RAPPORT_LIKE_TARGET: '2',
