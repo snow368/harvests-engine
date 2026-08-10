@@ -182,9 +182,11 @@ const apps = [
       // 关注优先级闸门：'*' = 所有任务层级都允许关注（scheduler 当前不注入 followPriority，留空即放行；
       //   '*' 为未来按优先级排程留余地，同时避免误设为仅 high 卡住关注量）。
       BOT_FOLLOW_PRIORITIES: '*',
-      // 回关熟悉度阶梯加速：点赞间隔降到 8h（原强制每天 1 篇）→ 回关号 ~1 天内攒够 ≥2 赞 + 1 评，更快 DM-able
-      RAPPORT_LIKE_GAP_HOURS: '8',
-      RAPPORT_COMMENT_AFTER_HOURS: '8',
+      // 放宽 round 1（Stage B，待观察 Stage A 后 push）：点赞目标降到 2 篇（DM 闸门本就需 ≥2 赞）、
+      //   点赞间隔降到 4h、评论间隔降到 4h → 回关号 ~4h 即攒够 ≥2 赞 + 1 评跨过 DM-able 门槛（Stage A 为 ~8h）
+      RAPPORT_LIKE_TARGET: '2',
+      RAPPORT_LIKE_GAP_HOURS: '4',
+      RAPPORT_COMMENT_AFTER_HOURS: '4',
       // 回关后 DM 预热窗：默认 4h，降到 1h 让回关号更快收到开场白（仍拟人，不秒发）
       BOT_DM_WARMUP_HOURS: '1',
       // 只互动近 60 天内的新帖（引流价值高 + 显得活跃）
