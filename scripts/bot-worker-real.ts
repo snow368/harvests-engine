@@ -780,6 +780,8 @@ type LikeState = {
   };
   // DM 去重：记录每个 handle 上次已回复的文案哈希，防止把 bot 自己的出站/上轮回复误当客户新消息反复自回复。
   dmSeen?: Record<string, number>;
+  // 🛑 账号休息（被动，IG 限制信号触发）：持久化，bot 重启也继续休息直到冷却结束
+  rest?: { until: number; reason: string; severity: string; at: number; count?: number };
 };
 const loadLikeState = (): LikeState => {
   try {
@@ -809,6 +811,7 @@ if (!likeState.comments.byDay) likeState.comments.byDay = {};
 if (!likeState.comments.byHandle) likeState.comments.byHandle = {};
 if (!likeState.comments.recentText) likeState.comments.recentText = [];
 if (!likeState.dm) likeState.dm = { byDay: {} };
+if (!likeState.rest) likeState.rest = { until: 0, reason: '', severity: '', at: 0 };
 if (!likeState.dm.byDay) likeState.dm.byDay = {};
 if (!likeState.dmSeen) likeState.dmSeen = {};
 
@@ -1481,6 +1484,76 @@ const isOnLoginPage = async (): Promise<boolean> => {
     if (challengeInput > 0) return true;
   } catch {}
   return false;
+};
+
+// ── 账号休息（被动，2026-08-10）：IG 弹出"操作被限制/稍后再试/暂时被封"等信号时，
+//    整个账号停止一切动作（点赞/评论/关注/DM/回关复检），按严重程度休息 4–72h，
+//    并把这次休息记入数据（recordInteraction 'account_rest'，前台可见），休息完自动恢复。
+//    信号源自真实 DOM 文本，故为"数据驱动"——IG 没说限流就不休息；bot 重启也继续休息。 ──
+const BLOCK_PATTERNS: { re: RegExp; severity: 'soft' | 'hard' | 'checkpoint' }[] = [
+  // 硬封：临时封禁 / 禁止关注·点赞·评论 —— 长休息
+  { re: /temporarily blocked|we('|’)?ve temporarily|blocked from (following|liking|commenting|doing this)/i, severity: 'hard' },
+  // 软封：操作被拦截 / 稍后再试 / 请求过多 / 限制频率 —— 中休息
+  { re: /action (was )?blocked|this action has been blocked|we restrict certain activity|please try again later|try again later|too many requests|too many (actions|attempts)|limit how often you (can )?do/i, severity: 'soft' },
+  // 验证/安全检查：确认非机器人 / 异常活动 / 验证身份 —— 中短休息
+  { re: /confirm you('|’)?re (not )?a (robot|human)|security check|unusual (login )?activity|verify your (identity|account)|suspicious (login )?activity/i, severity: 'checkpoint' },
+];
+
+// 扫描当前页面（body + 所有 dialog）是否出现 IG 限制信号。返回 severity + 原文，或 null。
+const detectBlockSignal = async (): Promise<{ severity: string; text: string } | null> => {
+  if (!page) return null;
+  try {
+    const bodyText = (await page.locator('body').innerText().catch(() => '')) || '';
+    const dialogTexts = (await page.locator('div[role="dialog"]').allInnerTexts().catch(() => [] as string[])) || [];
+    const text = (bodyText + ' ' + dialogTexts.join(' ')).toLowerCase();
+    // 先粗筛强信号词，避免普通帖子正文误触发
+    if (!/(block|restrict|temporarily|suspicious|verify|security check|unusual activity|too many)/i.test(text)) return null;
+    for (const p of BLOCK_PATTERNS) {
+      const m = text.match(p.re);
+      if (m) return { severity: p.severity, text: m[0].slice(0, 140) };
+    }
+  } catch {}
+  return null;
+};
+
+// 休息时长：按严重程度 + 账号阶段（新/过渡账号封得狠，休息加倍）
+const getRestCooldownMs = (severity: string): number => {
+  const stage = String(lastAccountStage || 'stable').toLowerCase();
+  const young = stage === 'new' || stage === 'transition';
+  if (severity === 'hard') return Math.round(jitter(24 * 3600_000, 72 * 3600_000) * (young ? 1.5 : 1));
+  if (severity === 'checkpoint') return jitter(2 * 3600_000, 6 * 3600_000);
+  return jitter(4 * 3600_000, 12 * 3600_000); // soft
+};
+
+const isAccountResting = (): boolean => {
+  const r = likeState.rest;
+  return !!r && typeof r.until === 'number' && Date.now() < r.until;
+};
+
+// 触发账号休息：停止一切动作直到冷却结束，记入数据，离开限制页
+const triggerAccountRest = async (severity: string, text: string) => {
+  if (isAccountResting()) return; // 已在休息中不重复触发
+  const cooldown = getRestCooldownMs(severity);
+  likeState.rest = {
+    until: Date.now() + cooldown,
+    reason: text,
+    severity,
+    at: Date.now(),
+    count: (likeState.rest?.count || 0) + 1,
+  };
+  saveLikeState(likeState);
+  breakUntil = Math.max(breakUntil, likeState.rest.until); // 同时挂起拟人休息逻辑
+  logBehavior('account_rest_triggered', {
+    severity,
+    text,
+    restUntil: new Date(likeState.rest.until).toISOString(),
+    restCount: likeState.rest.count,
+  });
+  console.log(`[bot-real] 🛑 ACCOUNT REST (${severity}): "${text}". Resting until ${new Date(likeState.rest.until).toISOString()} (~${Math.round(cooldown / 3600_000)}h). All actions paused; heartbeat/login kept alive.`);
+  // 记入数据：账号级事件（event_type=account_rest 不进客户 funnel 的 like/follow/dm 计数，前台可见"账号休息"）
+  recordInteraction(BOT_ID, 'account_rest', { severity, reason: text, restUntil: likeState.rest.until }).catch(() => {});
+  // 离开限制对话框，回到 IG 首页，避免弹窗卡住后续流程
+  if (page) { try { await page.goto(IG_BASE, { waitUntil: 'domcontentloaded', timeout: 20000 }); } catch {} }
 };
 
 // 🔴 登录闸门修复（2026-08-09）：之前用「正向标记」（Home svg / inbox 链接）判断已登录，
@@ -2270,6 +2343,15 @@ const tryFollowOnProfile = async (handle: string, likeSummary: LikeActionSummary
   await followBtn.click({ timeout: 6000 });
   await page.waitForTimeout(jitter(1200, 2400));
 
+  // 🛑 检测 IG 限制信号（关注后常弹 "Action Blocked / Try again later"）
+  try {
+    const bsig = await detectBlockSignal();
+    if (bsig) {
+      await triggerAccountRest(bsig.severity, bsig.text);
+      return { attempted: 1, followed: 0, skipped: true, reason: `account_blocked_${bsig.severity}` };
+    }
+  } catch {}
+
   const dayKey = todayKey();
   likeState.follows!.byDay![dayKey] = Number(likeState.follows!.byDay![dayKey] || 0) + 1;
   likeState.follows!.byHandle![handle] = { followedAt: Date.now() };
@@ -2493,6 +2575,11 @@ const tryCommentWithStrategy = async (handle: string, facts?: ProfileFacts, like
       pinnedLikelyBoost: Number(chosen.meta.pinnedLikelyBoost || 0)
     });
     recordInteraction(handle, 'comment', { postUrl, text, score: chosen.score }).catch(() => {});
+    // 🛑 检测 IG 限制信号（评论后常弹 "Action Blocked / Try again later"）
+    try {
+      const bsig = await detectBlockSignal();
+      if (bsig) await triggerAccountRest(bsig.severity, bsig.text);
+    } catch {}
     return { attempted: 1, posted: 1, skipped: false, text, postUrl };
   } catch {
     await closeModal().catch(() => {});
@@ -2774,6 +2861,11 @@ const tryLikeWithStrategy = async (handle: string, facts?: ProfileFacts, command
         }
       }
       if (liked > 0) recordInteraction(handle, 'like', { idx: c.idx, url: page.url() }).catch(() => {});
+      // 🛑 检测 IG 限制信号（点赞后常弹 "Action Blocked"），命中立即停手并启动账号休息
+      try {
+        const bsig = await detectBlockSignal();
+        if (bsig) { await triggerAccountRest(bsig.severity, bsig.text); break; }
+      } catch {}
       await page.waitForTimeout(jitter(1200, 2600));
       await closeModal();
       if (liked < maxLikes) {
@@ -2877,6 +2969,11 @@ const executeDmTask = async (task: any): Promise<boolean> => {
     logBehavior('dm_sent', { targetHandle, taskId: task.id });
     recordInteraction(targetHandle, 'dm', { scriptContent, taskId: task.id }).catch(() => {});
     reportDmChat(targetHandle, 'agent', scriptContent, 'contacted').catch(() => {});
+    // 🛑 检测 IG 限制信号（DM 后常弹 "Action Blocked / Try again later"）
+    try {
+      const bsig = await detectBlockSignal();
+      if (bsig) await triggerAccountRest(bsig.severity, bsig.text);
+    } catch {}
     // 记录出站 DM 文本哈希，防止随后扫描把 bot 自己的消息误当客户新消息（防自回复死循环）
     if (targetHandle && likeState.dmSeen) {
       likeState.dmSeen[targetHandle] = hashString(scriptContent || '');
@@ -3238,6 +3335,23 @@ const pollLoop = async () => {
       const loggedIn = await waitUntilLoggedIn();
       if (!loggedIn) {
         await sleep(POLL_INTERVAL_MS);
+        continue;
+      }
+      // ── 账号休息（被动，数据驱动）：IG 限制信号触发后，暂停一切动作直到冷却结束 ──
+      //    前台/数据可见（recordInteraction account_rest）；心跳 + 登录校验仍存活，冷却完自动续跑。
+      if (isAccountResting()) {
+        const leftMin = Math.max(0, Math.round((likeState.rest!.until - Date.now()) / 60000));
+        console.log(`[bot-real] 🛑 account resting (${likeState.rest!.severity}): ~${leftMin}min left — skipping all actions, heartbeat alive.`);
+        await sleep(Math.min(POLL_INTERVAL_MS, 60_000));
+        continue;
+      }
+      // 每轮顺带复检一次页面是否出现新的限制信号（覆盖挑战/弹窗类，无需动作也查）
+      try {
+        const bsig = await detectBlockSignal();
+        if (bsig) await triggerAccountRest(bsig.severity, bsig.text);
+      } catch {}
+      if (isAccountResting()) {
+        await sleep(Math.min(POLL_INTERVAL_MS, 60_000));
         continue;
       }
       // ── 回关主动复检：每 5 轮回访一个"已关注未检测回关"的号，让回关能被发现 ──
