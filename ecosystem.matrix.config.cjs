@@ -234,13 +234,15 @@ const apps = [
       // 关注优先级闸门：'*' = 所有任务层级都允许关注（scheduler 当前不注入 followPriority，留空即放行；
       //   '*' 为未来按优先级排程留余地，同时避免误设为仅 high 卡住关注量）。
       BOT_FOLLOW_PRIORITIES: '*',
-      // 视觉分析（文案+图片结合）：默认关闭，VPS 置 '1' 开启。视觉模型把帖子图变成 TEXT 观测，
-      //   注入评论生成（VISION RULE 升级为"可引用观测细节"）；作者自标风格优先于视觉。
-      //   API key 默认复用 DEEPSEEK_API_KEY；可单独设 BOT_VISION_API_KEY。
-      BOT_VISION_ENABLED: '1',
+      // 视觉分析（看图）：⚠️ DeepSeek 纯文本平台不支持 image_url，看图必 400 失败 → 先关。
+      //   已填 DEEPSEEK_API_KEY，评论改用"读 caption 的 AI 文案"(deepseek-chat)，已是模板的大升级。
+      //   要真看图需换视觉模型(OpenAI GPT-4o / Gemini)：填 BOT_VISION_API_KEY + BOT_VISION_MODEL + BOT_VISION_BASE_URL，再把本开关置 '1'。
+      BOT_VISION_ENABLED: '0',
       // ⚠️ 必填：DeepSeek API key —— Flash 视觉分析 + AI 评论生成都依赖它。留空则评论退化模板、视觉不生效。
       //   把下面这串替换成你的真实 key（sk-...）；也可删掉这行改用 VPS 环境注入 $env:DEEPSEEK_API_KEY。
-      DEEPSEEK_API_KEY: 'sk-REPLACE-WITH-REAL-DEEPSEEK-KEY',
+      // DeepSeek key 走 VPS 系统/用户环境变量 DEEPSEEK_API_KEY（不放进 git，避免泄露）；
+      //   VPS 用 [Environment]::SetEnvironmentVariable("DEEPSEEK_API_KEY","sk-...","User") 设一次，pm2 restart 即生效且过 cron 重启。
+      DEEPSEEK_API_KEY: process.env.DEEPSEEK_API_KEY || '',
       // BOT_VISION_BASE_URL: 'https://api.deepseek.com/v1',  // 默认；或 'https://api.deepseek.international/v1'
       // BOT_VISION_MODEL: 'deepseek-v4-flash',               // 默认；pro 更准更贵
       // 放宽 round 1（Stage B，待观察 Stage A 后 push）：点赞目标降到 2 篇（DM 闸门本就需 ≥2 赞）、
