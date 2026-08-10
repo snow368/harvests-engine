@@ -182,15 +182,15 @@ const apps = [
       // 关注优先级闸门：'*' = 所有任务层级都允许关注（scheduler 当前不注入 followPriority，留空即放行；
       //   '*' 为未来按优先级排程留余地，同时避免误设为仅 high 卡住关注量）。
       BOT_FOLLOW_PRIORITIES: '*',
-      // 视觉分析（Gemini 原生多模态）：看图产出图观测，注入评论生成（"文案+图片结合"）。
-      //   Gemini 原生支持图片输入；GOOGLE_API_KEY 走 VPS 用户环境变量（不进 git）。
-      //   vision-analyze.ts 自动识别 googleapis.com 走原生 inline_data 格式（图片本地下载转 base64）。
+      // 视觉分析（Qwen-VL 多模态，经阿里云 DashScope OpenAI 兼容端点）：看图产出图观测，注入评论生成。
+      //   Qwen-VL 原生支持 image_url（服务端拉取远程图），比 Gemini 更易拿额度（国内/支付宝免费额度）。
+      //   vision-analyze.ts 自动识别「非 googleapis.com」→ 走 OpenAI image_url 分支（无需改代码）。
+      //   DASHSCOPE_API_KEY 走 VPS 用户环境变量（不进 git）；留空 → isVisionEnabled()=false → 降级回纯 caption。
+      //   备选 Gemini：BASE_URL=https://generativelanguage.googleapis.com/v1beta/models, MODEL=gemini-2.0-flash, API_KEY=GOOGLE_API_KEY
       BOT_VISION_ENABLED: '1',
-      BOT_VISION_MODEL: 'gemini-2.0-flash',
-      BOT_VISION_BASE_URL: 'https://generativelanguage.googleapis.com/v1beta/models',
-      // GOOGLE_API_KEY 由 VPS 环境变量注入（[Environment]::SetEnvironmentVariable），不硬编码进 git；
-      //   留空则即便开关开，isVisionEnabled() 也为 false → 优雅降级回纯 caption 评论。
-      BOT_VISION_API_KEY: process.env.GOOGLE_API_KEY || '',
+      BOT_VISION_MODEL: 'qwen-vl-plus',
+      BOT_VISION_BASE_URL: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      BOT_VISION_API_KEY: process.env.DASHSCOPE_API_KEY || '',
       // AI 评论文案（读帖子 caption）：依赖 DeepSeek deepseek-chat（纯文本，能跑）。
       //   DEEPSEEK_API_KEY 同样走 VPS 用户环境变量（不进 git）。
       DEEPSEEK_API_KEY: process.env.DEEPSEEK_API_KEY || '',

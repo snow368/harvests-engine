@@ -8,7 +8,7 @@
  * - 任何失败都返回 null，调用方优雅降级回纯文案路径，绝不编风格/视觉结论。
  *
  * 默认关闭（BOT_VISION_ENABLED=0）。支持两种后端：
- * - OpenAI 兼容（默认）：DeepSeek / 任意兼容网关，用 image_url 线格式（服务端拉取远程图）。
+ * - OpenAI 兼容（默认）：DeepSeek / Qwen-VL via DashScope / 任意兼容网关，用 image_url 线格式（服务端拉取远程图）。
  * - Gemini（原生）：BOT_VISION_BASE_URL 含 'googleapis.com' 时自动走 Gemini 原生 inline_data 格式，
  *   用 GOOGLE_API_KEY（或 BOT_VISION_API_KEY）作 query 参数；Gemini 不支持远程 URL 拉图，
  *   故图片需本地下载转 base64 再传。
