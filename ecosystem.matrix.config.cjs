@@ -237,7 +237,7 @@ const apps = [
       // 视觉分析（文案+图片结合）：默认关闭，VPS 置 '1' 开启。视觉模型把帖子图变成 TEXT 观测，
       //   注入评论生成（VISION RULE 升级为"可引用观测细节"）；作者自标风格优先于视觉。
       //   API key 默认复用 DEEPSEEK_API_KEY；可单独设 BOT_VISION_API_KEY。
-      BOT_VISION_ENABLED: '0',
+      BOT_VISION_ENABLED: '1',
       // BOT_VISION_BASE_URL: 'https://api.deepseek.com/v1',  // 默认；或 'https://api.deepseek.international/v1'
       // BOT_VISION_MODEL: 'deepseek-v4-flash',               // 默认；pro 更准更贵
       // 放宽 round 1（Stage B，待观察 Stage A 后 push）：点赞目标降到 2 篇（DM 闸门本就需 ≥2 赞）、
