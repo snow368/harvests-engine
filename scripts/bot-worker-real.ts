@@ -834,9 +834,12 @@ const syncFollowBackDmQueue = async (): Promise<boolean> => {
     if (BOT_DM_DAILY_MAX > 0 && dmSentToday() >= BOT_DM_DAILY_MAX) return false;
     const byHandle = likeState.follows?.byHandle || {};
     const now = Date.now();
+    const selfIds = new Set([BOT_ID, ...(ACCOUNT_IDS || [])].map((x) => String(x).toLowerCase()));
     for (const [handle, raw] of Object.entries(byHandle)) {
       const st = raw as any;
-      if (!st?.followBackDetected || st.dmSent) continue;
+      // 🛑 self-DM 守卫：绝不给 bot 自己的账号发 DM（之前误把 raiha8833 当客户发了 2 条 self-DM）
+      if (selfIds.has(String(handle).toLowerCase())) continue;
+      if (!st?.followBackDetected || st.followBackRevoked || st.dmSent) continue;
       // 熟悉度门槛：评论开启时需 ≥2 赞 + 1 条真实评论；评论关闭时需 ≥3 赞。先建立关系，不硬推广。
       const rp = st.rapport || {};
       const rapportReady = BOT_COMMENT_ENABLED ? (rp.likedPosts >= 2 && rp.commentedAt > 0) : (rp.likedPosts >= 3);
@@ -1028,14 +1031,30 @@ const syncFollowBackRapport = async (): Promise<void> => {
 let fbCheckTick = 0;
 const maybeCheckFollowBacks = async () => {
   try {
-    fbCheckTick = (fbCheckTick + 1) % 5;
+    fbCheckTick = (fbCheckTick + 1) % 2; // 🔼 每 5 轮 → 每 2 轮，更快发现回关
     if (fbCheckTick !== 0) return;
     const byHandle = likeState.follows?.byHandle || {};
-    const candidates = Object.entries(byHandle).filter(([, s]) => (s as any)?.followedAt && !(s as any)?.followBackDetected);
-    if (!candidates.length) return;
-    const [handle] = candidates[Math.floor(Math.random() * candidates.length)];
-    logBehavior('fb_recheck_open', { targetHandle: handle });
+    // 撤销池：已 detected 且未撤销的号（检测对方是否已取关）；发现池：已关注未检测的号
+    const detected = Object.entries(byHandle).filter(([, s]) => (s as any)?.followBackDetected && !(s as any)?.followBackRevoked);
+    const undetected = Object.entries(byHandle).filter(([, s]) => (s as any)?.followedAt && !(s as any)?.followBackDetected);
+    const pool = detected.length ? detected : undetected; // 优先复查已回关号是否仍关注（取关撤销）
+    if (!pool.length) return;
+    const [handle] = pool[Math.floor(Math.random() * pool.length)];
+    logBehavior('fb_recheck_open', { targetHandle: handle, mode: detected.length ? 'revoke_check' : 'discover' });
     await openProfile(handle);
+    // 撤销检测：打开后若 "Follows you" 已消失，标记 followBackRevoked（数据真实，不再计入有效回关/DM）
+    if (detected.length) {
+      try {
+        const followsYou = await page.locator('text="Follows you"').first().isVisible({ timeout: 2000 }).catch(() => false);
+        const st = (likeState.follows!.byHandle![handle] || {}) as any;
+        if (st.followBackDetected && !followsYou && !st.followBackRevoked) {
+          st.followBackRevoked = true;
+          saveLikeState(likeState);
+          logBehavior('follow_back_revoked', { handle });
+          recordInteraction(handle, 'follow_back_revoked', { handle }).catch(() => {});
+        }
+      } catch {}
+    }
   } catch {}
 };
 
@@ -1059,7 +1078,9 @@ const checkIncomingFollowBacks = async () => {
         .filter((h: string) => /^[A-Za-z0-9._]{2,30}$/.test(h) && !['p', 'reel', 'explore', 'accounts', 'direct', 'tv', 'stories'].includes(h))
     ).catch(() => []);
     const sample = (handles || []).slice(0, 40);
+    const selfIds = new Set([BOT_ID, ...(ACCOUNT_IDS || [])].map((x) => String(x).toLowerCase()));
     for (const h of sample) {
+      if (selfIds.has(String(h).toLowerCase())) continue; // 🛑 不会把 bot 自己记为回关
       const st = (likeState.follows!.byHandle![h] || (likeState.follows!.byHandle![h] = {})) as any;
       if (st.followBackDetected) continue; // 已处理过
       if (!countryCache[h]) countryCache[h] = { country: inferCountryFromHandle(h) };
@@ -2254,12 +2275,19 @@ const BOT_FOLLOW_POST_COOLDOWN_HOURS = Math.max(12, Number(process.env.BOT_FOLLO
 const BOT_FOLLOW_REQUIRE_LIKE = String(process.env.BOT_FOLLOW_REQUIRE_LIKE || 'false').toLowerCase() === 'true';
 
 const shouldTryFollow = (handle: string, likeSummary: LikeActionSummary, command?: CommandPayload, facts?: ProfileFacts) => {
+  // [0] 关注跳过自己（防御：不会去关注 bot 自身账号）
+  const selfIds = new Set([BOT_ID, ...(ACCOUNT_IDS || [])].map((x) => String(x).toLowerCase()));
+  if (selfIds.has(String(handle).toLowerCase())) return { ok: false, reason: 'self' };
+
   // [1] 总开关
   if (!BOT_FOLLOW_ENABLED) return { ok: false, reason: 'follow_disabled' };
 
-  // [2] 仅高优先级
+  // [2] 优先级闸门（默认仅 high；设 BOT_FOLLOW_PRIORITIES=high,medium 或 * 可放宽以提升关注量）
   const priority = String(command?.followPriority || '').toLowerCase();
-  if (priority && priority !== 'high') return { ok: false, reason: `follow_priority_${priority}` };
+  const allowedPriors = (process.env.BOT_FOLLOW_PRIORITIES || 'high').split(',').map((s) => s.trim().toLowerCase());
+  if (priority && !allowedPriors.includes(priority) && !allowedPriors.includes('*')) {
+    return { ok: false, reason: `follow_priority_${priority}` };
+  }
 
   // [3] 触达次数（至少访问过N次）
   const touchCount = likeState.touches?.[handle] || 0;
@@ -2903,6 +2931,12 @@ const tryLikeWithStrategy = async (handle: string, facts?: ProfileFacts, command
 const executeDmTask = async (task: any): Promise<boolean> => {
   if (!page) throw new Error('page_not_initialized');
   const targetHandle = String(task.target_handle || '').replace(/^@/, '').trim();
+  // 🛑 self-DM 双保险：target 是 bot 自己则直接放弃
+  const selfIds = new Set([BOT_ID, ...(ACCOUNT_IDS || [])].map((x) => String(x).toLowerCase()));
+  if (selfIds.has(targetHandle.toLowerCase())) {
+    logBehavior('dm_self_skip', { targetHandle });
+    return false;
+  }
   let scriptContent = '';
   try {
     const parsed = typeof task.script_content === 'string' ? JSON.parse(task.script_content) : task.script_content;
@@ -2993,6 +3027,13 @@ const tryExecuteDmTask = async (): Promise<boolean> => {
     const tasks: any[] = Array.isArray(data?.tasks) ? data.tasks : [];
     if (!tasks.length) return false;
     const task = tasks[0];
+    const tgt = String(task.target_handle || '').replace(/^@/, '').toLowerCase();
+    const selfIds = new Set([BOT_ID, ...(ACCOUNT_IDS || [])].map((x) => String(x).toLowerCase()));
+    if (selfIds.has(tgt)) { // 🛑 self-DM 守卫（poll 路径）
+      logBehavior('dm_self_skip', { targetHandle: task.target_handle });
+      await postJson('/api/marketing/tasks/report', { taskId: task.id, status: 'failed', botId: BOT_ID, note: 'self_target' }).catch(() => {});
+      return false;
+    }
     logBehavior('dm_task_acquired', { taskId: task.id, targetHandle: task.target_handle });
     const success = await executeDmTask(task);
     await postJson('/api/marketing/tasks/report', {
