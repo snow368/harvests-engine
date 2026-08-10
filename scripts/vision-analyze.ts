@@ -17,7 +17,7 @@
 const VISION_ENABLED = (process.env.BOT_VISION_ENABLED || '0').trim() === '1';
 const VISION_BASE = (process.env.BOT_VISION_BASE_URL || 'https://api.deepseek.com/v1').replace(/\/+$/, '');
 const VISION_MODEL = (process.env.BOT_VISION_MODEL || 'deepseek-v4-flash').trim();
-const VISION_TIMEOUT_MS = Number(process.env.BOT_VISION_TIMEOUT_MS || '12000');
+const VISION_TIMEOUT_MS = Number(process.env.BOT_VISION_TIMEOUT_MS || '30000');
 
 const isGemini = (): boolean => VISION_BASE.includes('googleapis.com');
 
@@ -75,8 +75,34 @@ export const analyzePostImage = async (imageUrl: string): Promise<VisionResult |
   }
 };
 
-// OpenAI 兼容后端（DeepSeek / 兼容网关）：image_url 让服务端拉取远程图，无需本地下载
+// 自己先把远程图下载成 base64 data URI，避免依赖视觉服务端去拉图（DashScope 拉远程图常超时
+// → "Download multimodal file timed out"，会让视觉在真实环境系统性失效）。下载失败则退回原始 URL。
+const downloadImageAsDataUri = async (url: string, ms = 15000): Promise<string | null> => {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), ms);
+  try {
+    const r = await fetch(url, {
+      signal: ctrl.signal,
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; InkFlowBot/1.0)' },
+    });
+    if (!r.ok) return null;
+    const buf = Buffer.from(await r.arrayBuffer());
+    const mime = (r.headers.get('content-type') || 'image/jpeg').split(';')[0] || 'image/jpeg';
+    // 单图上限保护：超过 ~8MB 不再 base64（视觉服务端也通常拒绝），退回 URL 让服务端试拉
+    if (buf.length > 8 * 1024 * 1024) return null;
+    return `data:${mime};base64,${buf.toString('base64')}`;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(t);
+  }
+};
+
+// OpenAI 兼容后端（Qwen-VL via DashScope / DeepSeek / 任意兼容网关）：优先 base64 data URI，
+// 下载失败才退回 image_url 让服务端拉取远程图。
 const analyzeWithOpenAI = async (imageUrl: string, signal: AbortSignal): Promise<VisionResult | null> => {
+  const dataUri = await downloadImageAsDataUri(imageUrl);
+  const imgRef = dataUri || imageUrl; // base64 优先，失败退回远程 URL
   const resp = await fetch(`${VISION_BASE}/chat/completions`, {
     method: 'POST',
     headers: {
@@ -90,7 +116,7 @@ const analyzeWithOpenAI = async (imageUrl: string, signal: AbortSignal): Promise
           role: 'user',
           content: [
             { type: 'text', text: VISION_PROMPT },
-            { type: 'image_url', image_url: { url: imageUrl } },
+            { type: 'image_url', image_url: { url: imgRef } },
           ],
         },
       ],
