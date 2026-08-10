@@ -224,74 +224,139 @@ export const detectTattooStyle = (caption?: string, alt?: string, providedHashta
   return { primary: '', all: [], confidence: 'low', source: 'none' };
 };
 
-// 风格专属「深层工艺角度」——仅谈工艺/传统/技法大方向（VISION 安全，绝不断言视觉结果）。
+// 风格专属「内行细节维度」——每风格 3-5 个懂行人才会注意的具体工艺点。
+// ⚠️ 这些是对 STYLE 本身的工艺知识（谈过程/传统/技法），不是对「这张图」视觉结果的断言（VISION 安全）。
+// 评论落到一个具体细节上，艺术家才会觉得"这人真懂行"→ 点赞/回评率上升。
 export const STYLE_DEEP_ANGLES: Record<string, string[]> = {
   'fine line': [
-    'single-pass discipline — keeping line weight consistent without going back over',
-    'avoiding blowouts at the thinnest weights',
-    'bugpin vs standard round liner for crisp fine line',
+    'that single-pass discipline — one clean run, no going back over the line',
+    'how the thinnest taper stays crisp instead of blowing out into the skin',
+    'the control where a line drops from bold to a whisper',
+    'bugpin vs standard liner for that hairline finish',
   ],
   'blackwork': [
-    'planning the solid-black masses vs negative space before you start',
-    'packing solid black without leaving holidays',
-    'balancing bold black mass against bare skin',
+    'how the negative space does the work — the bare skin reads as the highlight, not the black',
+    'keeping packed-black edges crisp, no fuzzy halo where it meets skin',
+    'planning the black as one continuous mass instead of scattered chunks',
+    'using solid black to create depth with zero grey',
   ],
   'traditional': [
-    'bold will hold — why those lines stay thick',
-    'spit-shade vs whip-shade on trad fades',
-    'limited-palette discipline in traditional',
+    'bold will hold — why those thick outlines are the whole point',
+    'whip-shade vs spit-shade on the fades',
+    'the 3-4 color discipline that makes it read across a room',
+    'those solid color packs with no patchy gaps',
   ],
   'neo traditional': [
-    'line-weight variation for illustrative depth',
-    'how the decorative background supports the focal subject',
-    'color palette choices that read as neo-trad',
+    'the line-weight variation that builds illustrative depth',
+    'how the decorative background frames the focal subject instead of crowding it',
+    'that palette — muted but punchy, very neo-trad',
   ],
   'japanese': [
-    'mikiri — the fade where motifs meet the background',
-    'how the background flows with the body contour',
-    'placing the main motif vs supporting elements',
+    'mikiri — the fade where a motif dissolves into the background',
+    'how the background flows with the body contour, not against it',
+    'placing the main motif vs the supporting elements for balance',
+    'the way scale is used to show depth in a full sleeve',
   ],
   'realism': [
-    'building value range from darks to lights',
-    'keeping a consistent light source across the piece',
-    'handling midtones so it does not go muddy',
+    'building the full value range from deep darks to bright lights',
+    'holding one consistent light source across the whole piece',
+    'keeping midtones clean so it never goes muddy',
+    'the skin texture detail that sells the realism',
   ],
   'black and grey': [
-    'grey-wash mixing and dilution ratios',
-    'soft vs hard edges in B&G',
-    'pushing contrast without solid black',
+    'grey-wash dilution ratios for those soft transitions',
+    'knowing when to use a soft edge vs a hard one',
+    'pushing contrast with wash alone, no solid black needed',
+  ],
+  'color': [
+    'saturation control so colors stay punchy instead of muddy',
+    'laying color without blowing out the line',
+    'packing a flat area solid in one pass vs building it up',
   ],
   'microrealism': [
     'needle control at that tiny scale',
-    'keeping detail readable once it heals',
+    'keeping the detail readable once it heals, not blending together',
+    'how you hold the value range on a thumbnail-sized piece',
   ],
   'watercolor': [
-    'keeping color bleeds controlled (not muddy)',
-    'pairing a solid anchor with the watercolor wash',
+    'keeping the color bleeds controlled, not turning to mud',
+    'pairing a solid anchor line with the wash so it does not drift',
+    'layering washes so the colors stay translucent, not opaque',
   ],
   'dotwork': [
-    'building gradient purely from dot density',
-    'stipple vs machine-dotwork rhythm',
+    'building the whole gradient from dot density alone',
+    'the rhythm of machine dotwork vs hand stipple',
+    'how dot spacing implies form without any line',
   ],
   'geometric': [
-    'locking symmetry across the piece',
-    'dot precision on mandala layering',
-  ],
-  'lettering': [
-    'script weight and flow',
-    'keeping flourishes from breaking up over time',
+    'locking perfect symmetry across the whole mandala',
+    'dot precision where the layers meet',
+    'how the geometry follows the body plane without distorting',
   ],
   'tribal': [
-    'negative-space rhythm in the patterns',
-    'how the bold curves follow the muscle',
+    'the negative-space rhythm in the pattern',
+    'how the bold curves follow the muscle, not cross it',
+    'how the negative space defines the shape as much as the black',
   ],
-  'ornamental': [
-    'pattern rhythm and consistent spacing',
-    'how the flow follows the body',
+  'trash polka': [
+    'the red-black contrast and that chaotic collage energy',
+    'mixing realistic fragments with graphic black marks',
+    'the torn / splatter transitions between elements',
   ],
   'illustrative': [
-    'line quality — mixing fine + bold',
-    'composition that makes it read as illustrative',
+    'mixing fine and bold line for that drawn feel',
+    'composition that reads as illustration, not just a tattoo',
+    'the way it reads like a page lifted from a sketchbook',
+  ],
+  'ornamental': [
+    'pattern rhythm and even spacing across the flow',
+    'how the ornament follows the body line',
+    'negative space working with the pattern, not against it',
+  ],
+  'lettering': [
+    'script weight and flow — keeping the letters connected naturally',
+    'how the flourishes stay intact as it ages',
+    'the contrast of thick and thin strokes inside one word',
+  ],
+  'portrait': [
+    'catching likeness through value, not just outline',
+    'the soft skin-tone transitions',
+    'keeping the eyes alive',
+  ],
+  'surrealism': [
+    'the dreamlike scale shifts between elements',
+    'blending realistic rendering with impossible forms',
+    'the impossible perspective that makes it feel like a dream',
+  ],
+  'cover up': [
+    'using the old ink as part of the new design',
+    'strategic black to kill the old contrast',
+    'designing around the old piece instead of just hiding it',
+  ],
+  'linework': [
+    'consistent line weight across the whole piece',
+    'a line that flows without hesitant stops',
+    'the confident single-weight contour',
+  ],
+  'minimalist': [
+    'saying more with the least possible line',
+    'negative space doing the storytelling',
+    'one perfect gesture instead of detail',
+  ],
+  'chicano': [
+    'the rolled-letter script flow',
+    'franco-style black and grey fades',
+    'the iconic blocks — clowns, roses, lettering',
+  ],
+  'anime': [
+    'keeping the cel-shaded look crisp',
+    'line economy that reads as anime, not generic',
+    'clean fills inside bold outlines',
+  ],
+  'new school': [
+    'that exaggerated 3D shading and cartoon proportion',
+    'bold outlines with wild gradient fills',
+    'how the highlights pop off the wobbly lines',
   ],
 };
 
@@ -333,7 +398,7 @@ const buildPrompt = (input: CommentInput, style: string): string => {
     : `${NEUTRAL_RULE} (The style above is text-confirmed from caption — you may reference it, but never claim you observed the visual quality.)`;
 
   const deepNote = deepAngles.length
-    ? `\nSTYLE-DEEP MODE (safe — the artist self-identified "${input.style}" in text): engage with ${input.style}-specific CRAFT KNOWLEDGE using the angles below. Talk about the style's process, tradition, or how it is built — never claim you observed the visual result. Style craft angles to draw from:\n${deepAngles.map((a) => '- ' + a).join('\n')}`
+    ? `\nSTYLE-DEEP MODE (safe — the artist self-identified "${input.style}" in text): engage with ${input.style}-specific CRAFT KNOWLEDGE using the angles below. The goal is SPECIFICITY — name one insider detail the way a fellow artist would, so the poster feels truly seen and hits like/reply. These are craft facts ABOUT THE STYLE (process/tradition/technique), NOT claims about their specific image — never say you observed the visual result of their piece. Style craft details to draw from:\n${deepAngles.map((a) => '- ' + a).join('\n')}\nPrefer a comment that names ONE specific detail above, then you may add a low-pressure question about how they approach it.`
     : '';
 
   const lang = (COMMENT_LANG === 'auto' || COMMENT_LANG === 'es') && (input.caption || '').trim().length >= 10
@@ -354,7 +419,9 @@ const buildPrompt = (input: CommentInput, style: string): string => {
     casual: 'Tone: a relaxed peer/fan reacting. A short statement, not a question.',
     question: "Tone: curious peer. End with ONE genuine, low-pressure question. If a style is detected, make it style-relevant — ask about that style's process, tradition, or how it is built (e.g. for blackwork: how you plan the negative space; for japanese: the mikiri transitions). Questions drive replies. Keep it natural.",
     short_praise: 'Tone: very short genuine praise (2-5 words). A statement, not a question.',
-    detail_focused: 'Tone: reference a specific subject/theme the caption names (never visual technique), and you may add a light question. Do NOT claim visual quality.',
+    detail_focused: deepAngles.length
+      ? `Tone: name ONE specific, insider craft detail about ${input.style} drawn from the STYLE-DEEP angles (e.g. "${deepAngles[0]}"). State it like a fellow artist who knows the style — this specificity is what earns the like. You may add a light, low-pressure question. Never claim you observed the visual quality of their piece.`
+      : 'Tone: reference a specific subject/theme the caption names (never visual technique), and you may add a light question. Do NOT claim visual quality.',
   };
   const styleInstruction = STYLE_INSTRUCTIONS[style] || STYLE_INSTRUCTIONS.casual;
 
@@ -432,9 +499,13 @@ export const generateComment = async (input: CommentInput): Promise<GeneratedCom
     return { text: fbText, style: 'fallback' };
   }
 
-  // 随机选风格：提问(question)为主力——问题是引回评/点赞的第一杠杆；
-  // 降权纯赞美(short_praise)因为它几乎不引发互动；保留 casual 做自然调剂。
-  const weights = [0.15, 0.25, 0.45, 0.10, 0.05];  // professional, casual, question, short_praise, detail_focused
+  // 风格已识别(high/medium)时：把「细节化陈述」(detail_focused)权重拉到 30%，与提问(35%)一起成为主体——
+  // 懂行的具体细节最引赞，风格相关问题最引回复；纯赞美压到 5%。
+  // 风格未识别(low)时：维持提问为主力(45%)的通用策略。
+  const conf = input.styleConfidence || 'low';
+  const weights = (conf === 'high' || conf === 'medium')
+    ? [0.18, 0.12, 0.35, 0.05, 0.30]   // professional, casual, question, short_praise, detail_focused
+    : [0.15, 0.25, 0.45, 0.10, 0.05];  // professional, casual, question, short_praise, detail_focused
   const r = Math.random();
   let acc = 0;
   let styleIdx = 1; // default casual
@@ -446,9 +517,11 @@ export const generateComment = async (input: CommentInput): Promise<GeneratedCom
 
   // 最多重试3次生成不重复的评论
   for (let attempt = 0; attempt < 3; attempt++) {
+    // 重试时降级上下文防重复，但高风格时继续走 detail_focused/question 保持细节化，不退回泛泛赞美
+    const retryStyle = (attempt > 0 && style === 'short_praise') ? 'casual' : style;
     const prompt = buildPrompt(
       attempt > 0 ? { ...input, caption: '' } : input, // 重试时降级上下文
-      attempt > 0 ? 'short_praise' : style
+      retryStyle
     );
     const raw = await callDeepSeek(prompt);
     const parsed = safeJsonParse(raw, { text: raw.slice(0, 100), style });
