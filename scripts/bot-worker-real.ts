@@ -142,9 +142,9 @@ const BOT_ACCOUNT_BOUND_AT = String(process.env.BOT_ACCOUNT_BOUND_AT || '').trim
 // 不依赖 cloud-api 的 marketing_scripts 表（该表写入被 Firebase 中间件拦截，需部署才能改）。
 // 可用 BOT_DM_SCRIPTS_JSON 环境变量覆盖（JSON 字符串数组）。
 const BOT_DM_SCRIPTS_DEFAULT = [
-  "Hey — been quietly enjoying your work for a bit (that recent piece is fire 🔥). I run InkFlow, a wholesale supply house for tattoo studios — ink, cartridges, aftercare. If you ever want to compare pricing or grab a sample kit, just reply and I'll send our artist price list over. No rush at all 🙌",
-  "Hi! Been following your work — your linework's clean. Quick one: I help studios stay stocked through InkFlow (wholesale ink + needles + aftercare). Whenever you need a reliable backup source, reply 'catalog' and I'll shoot you the list. Zero pressure 👍",
-  "Love what you've been putting out. I'm with InkFlow — we supply tattoo studios wholesale (ink, carts, aftercare). If keeping stocked ever becomes a hassle, just hit reply and I'll send our artist rates. Glad to have you in the circle ✌️"
+  "Hey — I've been quietly following your work, and I keep coming back to your linework. There's a calm confidence in it that's rare. I run InkFlow — we're the wholesale house for the stuff you burn through daily: ink, cartridges, aftercare. No pitch, just… if supply ever lets you down mid-session (we've ALL been there 😅), reply 'catalog' and I'll send our artist price list. Glad I found your page 🙌",
+  "Quick honest one: your shading stopped me scrolling today. I've spent enough time around tattoo studios to know the difference between ink that flows and ink that fights you — and your pieces clearly come from the good stuff. I'm with InkFlow (wholesale ink + needles + aftercare). Whenever you want a backup source that just shows up on time, say the word and I'll send the list. Zero pressure 👍",
+  "Been enjoying your posts — there's a real point of view in your work, not just technique. I help tattoo artists stay stocked through InkFlow (ink, carts, aftercare, wholesale). The thing I hear most from artists is 'I just want my supplier to not ghost me' — that's kind of our whole thing. If you ever want to compare or grab a sample kit, reply and I'll shoot it over. Happy to have you in the circle ✌️"
 ];
 let BOT_DM_SCRIPTS: string[] = BOT_DM_SCRIPTS_DEFAULT;
 try { if (process.env.BOT_DM_SCRIPTS_JSON) BOT_DM_SCRIPTS = JSON.parse(process.env.BOT_DM_SCRIPTS_JSON); } catch {}
@@ -3213,14 +3213,14 @@ const pickAutoReply = async (targetHandle: string, intent: string, category: str
     if (content) return content;
     // Fallback: use category-appropriate template
     const fallbacks: Record<string, string> = {
-      product_intro: `Thanks @${targetHandle}! Check our website for more details on our tattoo supplies.`,
-      collaboration: `Thanks @${targetHandle}! We'd love to explore collaboration opportunities.`,
-      industry_talk: `Thanks @${targetHandle}! Always great to connect with fellow industry pros.`,
-      after_sales: `Thanks @${targetHandle}! We're glad you're happy with our products.`,
+      product_intro: `Hey @${targetHandle} — so glad you reached out! Happy to help you get sorted. What are you mainly running low on right now — ink, carts, or aftercare? I'll pull together options that actually fit how you work 🙌`,
+      collaboration: `Love that you're thinking bigger @${targetHandle} — collabs are the fun part. Tell me a bit about your style and what you'd want to build, and let's see if we're a fit to work together ✌️`,
+      industry_talk: `Always good to trade notes with another person in the chair @${targetHandle} 😄 What's been keeping you busy in the studio lately?`,
+      after_sales: `Appreciate you checking in @${targetHandle}! Everything land the way you expected? If anything's off or you want to tweak your next order, I'm right here 👍`,
     };
-    return fallbacks[category] || `Thanks @${targetHandle}! We'd love to help. Feel free to ask any questions.`;
+    return fallbacks[category] || `Hey @${targetHandle} — so glad you messaged! What can I help you with? I'm right here 🙌`;
   } catch {
-    return `Thanks @${targetHandle}! We'd love to help. Feel free to ask any questions.`;
+    return `Hey @${targetHandle} — so glad you messaged! What can I help you with? I'm right here 🙌`;
   }
 };
 
