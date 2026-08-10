@@ -511,11 +511,16 @@ export const generateComment = async (input: CommentInput): Promise<GeneratedCom
 
   // 风格 high（作者自标）时：把「细节化陈述」(detail_focused)权重拉到 30%，与提问(35%)一起成为主体——
   // 懂行的具体细节最引赞，风格相关问题最引回复；纯赞美压到 5%。
-  // medium（仅 IG alt 图猜测）/low（无信号）时：退回提问为主力(45%)的通用策略，绝不假装懂风格。
+  // 有视觉观测时：即使风格未 high，也把"具体工艺陈述"权重抬高，让 Flash 看到的 subject/craft/palette 真正被用进评论，
+  // 避免退化成泛泛赞美（用户 2026-08-10："评论内容不精彩"）。
+  // medium（仅 IG alt 图猜测）/low 且无视觉时：退回提问为主力(45%)的通用策略，绝不假装懂风格。
   const conf = input.styleConfidence || 'low';
+  const hasVision = !!(input.visionDescription && input.visionDescription.trim());
   const weights = (conf === 'high')
     ? [0.18, 0.12, 0.35, 0.05, 0.30]   // professional, casual, question, short_praise, detail_focused
-    : [0.15, 0.25, 0.45, 0.10, 0.05];  // professional, casual, question, short_praise, detail_focused
+    : hasVision
+      ? [0.30, 0.15, 0.35, 0.05, 0.15] // 有视觉观测：偏具体工艺陈述 + 提问，把图里看到的东西说出来
+      : [0.15, 0.25, 0.45, 0.10, 0.05]; // professional, casual, question, short_praise, detail_focused
   const r = Math.random();
   let acc = 0;
   let styleIdx = 1; // default casual

@@ -2625,9 +2625,14 @@ const tryCommentWithStrategy = async (handle: string, facts?: ProfileFacts, like
       await closeModal().catch(() => {});
     }
   }
-  ranked.sort((a, b) => b.score - a.score);
-  const chosen = ranked.find((r) => r.score >= 3 && (r.meta.ageDays ?? 9999) <= 60 && (r.meta.promo ?? 0) === 0);
-  if (!chosen) return { attempted: 1, posted: 0, skipped: true, reason: 'no_comment_candidate' };
+  // 评论优先评"客人最近发的"帖：在质量达标(score>=3)、非推广、且在近 BOT_SKIP_OLD_POST_DAYS 天内 的候选里，
+  // 选 ageDays 最小（最新）的那条；同新鲜度再比 score。太老的帖互动价值低（用户 2026-08-10 拍板）。
+  const qualifying = ranked.filter(
+    (r) => r.score >= 3 && (r.meta.promo ?? 0) === 0 && (r.meta.ageDays ?? 9999) <= BOT_SKIP_OLD_POST_DAYS
+  );
+  if (!qualifying.length) return { attempted: 1, posted: 0, skipped: true, reason: 'no_comment_candidate' };
+  qualifying.sort((a, b) => (a.meta.ageDays ?? 9999) - (b.meta.ageDays ?? 9999) || b.score - a.score);
+  const chosen = qualifying[0];
 
   // ===== 视觉分析（仅对"将要评论"的最优帖触发，控成本/延迟，不影响浏览评分）=====
   // 文案 + 图片结合：视觉模型"看"图 -> 产出观测 TEXT -> 注入评论生成。
@@ -3672,6 +3677,14 @@ const main = async () => {
     proxyServer: BOT_PROXY_SERVER || null,
     commentEnabled: BOT_COMMENT_ENABLED,
   });
+  // 视觉/AI 评论就绪状态自检（用户 2026-08-10 问"flash 可以分析了？"——重启后看这行即可确认）
+  console.log('[bot-real] [vision-check]', JSON.stringify({
+    visionEnabledFlag: (process.env.BOT_VISION_ENABLED || '0') === '1',
+    deepseekKeySet: !!process.env.DEEPSEEK_API_KEY,
+    visionKeySet: !!process.env.BOT_VISION_API_KEY,
+    isVisionEnabled: isVisionEnabled(),
+    visionModel: (process.env.BOT_VISION_MODEL || 'deepseek-v4-flash'),
+  }));
   // 预热评论池
   if (BOT_COMMENT_ENABLED) {
     refillPool().then(() => console.log('[bot-real] comment pool warmed up'));
