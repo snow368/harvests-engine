@@ -231,6 +231,12 @@ const apps = [
       BOT_FOLLOW_DAILY_MIN: '15',
       BOT_FOLLOW_DAILY_MAX: '40',
       BOT_FOLLOW_MIN_TOUCHES: '1',
+      // 关注优先级闸门：'*' = 所有任务层级都允许关注（scheduler 当前不注入 followPriority，留空即放行；
+      //   '*' 为未来按优先级排程留余地，同时避免误设为仅 high 卡住关注量）。
+      BOT_FOLLOW_PRIORITIES: '*',
+      // 回关熟悉度阶梯加速：点赞间隔降到 8h（原强制每天 1 篇）→ 回关号 ~1 天内攒够 ≥2 赞 + 1 评，更快 DM-able
+      RAPPORT_LIKE_GAP_HOURS: '8',
+      RAPPORT_COMMENT_AFTER_HOURS: '8',
       // 回关后 DM 预热窗：默认 4h，降到 1h 让回关号更快收到开场白（仍拟人）
       BOT_DM_WARMUP_HOURS: '1',
       BOT_SKIP_OLD_POST_DAYS: '60',

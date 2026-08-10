@@ -987,8 +987,9 @@ const syncFollowBackRapport = async (): Promise<void> => {
       if (!st?.followBackDetected || st.dmSent) continue; // DM 发完即停止 ladder
       if (!st.rapport) st.rapport = { likedPosts: 0, lastLikeAt: 0, firstLikeAt: 0, commentedAt: 0, commentLikedAt: 0 };
       const rp = st.rapport;
-      // 阶段1：点赞帖子。目标 RAPPORT_LIKE_TARGET(默认3) 篇，每天最多 1 篇（同天不重复），横跨多天显得是持续关注
-      if (rp.likedPosts < RAPPORT_LIKE_TARGET && !isSameDay(rp.lastLikeAt, now) && now - (rp.lastLikeAt || 0) > RAPPORT_LIKE_GAP_HOURS * 3600_000) {
+      // 阶段1：点赞帖子。目标 RAPPORT_LIKE_TARGET(默认3) 篇；仅按时间间隔(RAPPORT_LIKE_GAP_HOURS)节流，
+      // 不再强制"每天 1 篇"——放宽后回关号可在 ~1 天内攒够 ≥2 赞，更快跨过 DM-able 门槛。
+      if (rp.likedPosts < RAPPORT_LIKE_TARGET && now - (rp.lastLikeAt || 0) > RAPPORT_LIKE_GAP_HOURS * 3600_000) {
         const got = await rapportLikePosts(handle, 1);
         if (got > 0) {
           rp.likedPosts += got;
@@ -1061,6 +1062,53 @@ const maybeCheckFollowBacks = async () => {
 // 2026-08-07: 捕获「主动关注我们」的回流粉（如 tattooshops.be）。我们未必先关注过他们，
 // 故需定期查自己账号的 Followers 列表，发现新粉即记为 follow_back，复用 syncFollowBackDmQueue
 // 在预热窗口后发购买向 DM，并写入 harvests DB 时间线供前台可见。
+// 🔁 回关互惠（reciprocal follow-back）：对方主动关注我们 → 礼貌回关。
+// 这是 IG 上风险最低的关注动作（对方已先选我们），三大收益：
+//   ① 留住粉丝、降低取关率（互关关系更牢，followBackRevoked 更少 → DM-able 不流失）；
+//   ② 对方回关后常会来逛我们主页/点赞 → 经 checkWhoLikedUs 把 DM 预热窗口提前到 1h；
+//   ③ 直接增加互关数 = "吸引人关注回来" 的核心增长动作，且不依赖 scheduler 任务量。
+// 受全局日关注上限（BOT_FOLLOW_DAILY_MAX，与主动关注共享预算）+ 限制信号检测保护。
+const reciprocalFollowBack = async (handle: string): Promise<boolean> => {
+  try {
+    if (!BOT_FOLLOW_ENABLED || !page) return false;
+    const selfIds = new Set([BOT_ID, ...(ACCOUNT_IDS || [])].map((x) => String(x).toLowerCase()));
+    if (selfIds.has(String(handle).toLowerCase())) return false;
+    const st = (likeState.follows!.byHandle![handle] || {}) as any;
+    if (st.followedAt) return false; // 已关注过，不重复
+    // 日上限（与主动关注共享同一预算，避免双向超量触发 IG 风控）
+    const dayKey = todayKey();
+    const cap = getFollowDayCap();
+    const current = Number(likeState.follows!.byDay?.[dayKey] || 0);
+    if (cap > 0 && current >= cap) {
+      logBehavior('reciprocal_follow_skip_cap', { handle, current, cap });
+      return false;
+    }
+    await openProfile(handle);
+    await page.waitForTimeout(jitter(1200, 2400));
+    const followSelectors = ['header button', 'header div[role="button"]', 'main button', 'main div[role="button"]', 'button', 'div[role="button"]'];
+    let followBtn: any = null;
+    for (const sel of followSelectors) {
+      const cand = page.locator(sel).filter({ hasText: /^\s*Follow(\s+Back)?\s*$/i }).first();
+      if ((await cand.count()) > 0) { followBtn = cand; break; }
+    }
+    if (!followBtn) { logBehavior('reciprocal_follow_btn_not_found', { handle }); return false; }
+    await followBtn.click({ timeout: 6000 });
+    await page.waitForTimeout(jitter(1200, 2400));
+    // 🛑 限制信号检测（回关也可能触发 "Try again later"）
+    try {
+      const bsig = await detectBlockSignal();
+      if (bsig) { await triggerAccountRest(bsig.severity, bsig.text); return false; }
+    } catch {}
+    likeState.follows!.byDay![dayKey] = Number(likeState.follows!.byDay![dayKey] || 0) + 1;
+    st.followedAt = Date.now();
+    likeState.follows!.byHandle![handle] = st;
+    saveLikeState(likeState);
+    logBehavior('reciprocal_follow_done', { handle, dayCount: likeState.follows!.byDay![dayKey], dayCap: cap });
+    recordInteraction(handle, 'follow', { reciprocated: true, followedAt: Date.now() }).catch(() => {});
+    return true;
+  } catch { return false; }
+};
+
 let incomingFbTick = 0;
 const checkIncomingFollowBacks = async () => {
   try {
@@ -1079,6 +1127,7 @@ const checkIncomingFollowBacks = async () => {
     ).catch(() => []);
     const sample = (handles || []).slice(0, 40);
     const selfIds = new Set([BOT_ID, ...(ACCOUNT_IDS || [])].map((x) => String(x).toLowerCase()));
+    const newFans: string[] = []; // 🔁 收集本轮新粉，关弹窗后统一礼貌回关（避免逐个导航打断列表枚举）
     for (const h of sample) {
       if (selfIds.has(String(h).toLowerCase())) continue; // 🛑 不会把 bot 自己记为回关
       const st = (likeState.follows!.byHandle![h] || (likeState.follows!.byHandle![h] = {})) as any;
@@ -1087,15 +1136,21 @@ const checkIncomingFollowBacks = async () => {
       st.country = st.country || countryCache[h].country;
       st.followBackDetected = true;
       st.followBackDetectedAt = Date.now();
-      st.followedAt = st.followedAt || 0; // 对方主动关注我们，我们不一定要回关
+      st.followedAt = st.followedAt || 0; // 对方主动关注我们；下方统一礼貌回关
       st.dmEligibleAt = BOT_DM_WARMUP_HOURS > 0 ? Date.now() + BOT_DM_WARMUP_HOURS * 3600_000 : 0;
       st.dmSent = false;
       saveLikeState(likeState);
       recordInteraction(h, 'follow_back', { organic: true, followBackDetectedAt: st.followBackDetectedAt }).catch(() => {});
       logBehavior('incoming_follow_back', { handle: h });
+      newFans.push(h);
     }
     await page.keyboard.press('Escape').catch(() => {});
     await page.waitForTimeout(jitter(800, 1500));
+    // 🔁 回关互惠：礼貌回关本轮新粉（受日关注上限 + 限制信号保护；与主动关注共享预算）
+    for (const h of newFans) {
+      try { await reciprocalFollowBack(h); } catch {}
+      await sleep(jitter(3000, 6000));
+    }
   } catch {}
 };
 
