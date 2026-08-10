@@ -373,8 +373,10 @@ const buildPrompt = (input: CommentInput, style: string): string => {
   // 🔴 评论铁律（2026-08-09 修订·用户拍板）：bot 完全无看图能力，只能读文字。
   // 规则：① 绝不断言看得到的视觉工艺(shading/linework/composition/contrast/color/execution)——除非 caption 自己写了；
   // ② 可引用题材/风格，但 ONLY IF caption 明确写出（caption 是可读文字，图就是那个题材，不会牛头不对马嘴）；③ 不编 caption 没提到的题材。
-  const styleForContext = conf === 'high' || conf === 'medium' ? (input.style || '') : '';
-  const deepAngles = (conf === 'high' || conf === 'medium') && input.style ? (STYLE_DEEP_ANGLES[input.style] || []) : [];
+  // ⚠️ STYLE-DEEP「点出内行细节」仅在 high（作者自标 caption/hashtag，bot 读得到的文字）时触发。
+  //   medium = 仅 IG alt 图 AI 猜测（可能不准），low = 无信号 —— 二者一律不深入风格、不假装懂，退回通用提问/随性。
+  const styleForContext = conf === 'high' ? (input.style || '') : '';
+  const deepAngles = conf === 'high' && input.style ? (STYLE_DEEP_ANGLES[input.style] || []) : [];
   const tattooContext = buildTattooArtistContext(postType, styleForContext);
 
   const postContext = [
@@ -499,11 +501,11 @@ export const generateComment = async (input: CommentInput): Promise<GeneratedCom
     return { text: fbText, style: 'fallback' };
   }
 
-  // 风格已识别(high/medium)时：把「细节化陈述」(detail_focused)权重拉到 30%，与提问(35%)一起成为主体——
+  // 风格 high（作者自标）时：把「细节化陈述」(detail_focused)权重拉到 30%，与提问(35%)一起成为主体——
   // 懂行的具体细节最引赞，风格相关问题最引回复；纯赞美压到 5%。
-  // 风格未识别(low)时：维持提问为主力(45%)的通用策略。
+  // medium（仅 IG alt 图猜测）/low（无信号）时：退回提问为主力(45%)的通用策略，绝不假装懂风格。
   const conf = input.styleConfidence || 'low';
-  const weights = (conf === 'high' || conf === 'medium')
+  const weights = (conf === 'high')
     ? [0.18, 0.12, 0.35, 0.05, 0.30]   // professional, casual, question, short_praise, detail_focused
     : [0.15, 0.25, 0.45, 0.10, 0.05];  // professional, casual, question, short_praise, detail_focused
   const r = Math.random();
