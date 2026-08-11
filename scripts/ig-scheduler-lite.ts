@@ -21,6 +21,9 @@ const BOT_ID = process.env.SCHEDULER_BOT_ID || 'bot_ig_01';
 const DAILY_LIMIT = Number(process.env.SCHEDULER_DAILY_LIMIT) || 50;
 const BATCH_SIZE = Math.min(20, Math.max(1, Number(process.env.SCHEDULER_BATCH_SIZE) || 10));
 const TARGET_STATE = (process.env.SCHEDULER_STATE || 'ALL').trim().toUpperCase();
+// 多州定向（西语浓度高州测试用）：SCHEDULER_STATES='TX,CA,FL' 优先于单州 SCHEDULER_STATE
+const TARGET_STATES = (process.env.SCHEDULER_STATES || '')
+  .split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
 const CLOUD_API_BASE = (process.env.CLOUD_API_BASE || 'https://harvests.pages.dev').replace(/\/+$/, '');
 const BOT_API_TOKEN = (process.env.BOT_API_TOKEN || 'vps-bot-secret-2024').trim();
 
@@ -46,10 +49,14 @@ async function fetchArtists(limit = 200): Promise<any[]> {
     }
     const data = await resp.json() as any;
     const items: any[] = data?.items || [];
-    // 可选州过滤（state 列）：ALL 不过滤；否则只保留该州
-    const filtered = TARGET_STATE === 'ALL'
+    // 州过滤：SCHEDULER_STATES（多州，如 'TX,CA,FL'）优先；否则 SCHEDULER_STATE 单州；ALL 不过滤
+    const filtered = (TARGET_STATE === 'ALL' && !TARGET_STATES.length)
       ? items
-      : items.filter((a: any) => String(a.state || '').toUpperCase() === TARGET_STATE);
+      : items.filter((a: any) => {
+          const st = String(a.state || '').toUpperCase();
+          if (TARGET_STATES.length) return TARGET_STATES.includes(st);
+          return st === TARGET_STATE;
+        });
     return filtered;
   } catch (e: any) {
     console.error('[ig-scheduler] fetch artists failed:', e?.message?.slice(0, 80));
@@ -115,7 +122,8 @@ async function main() {
   // 从 Cloud API (D1) 读 artists
   const artists = await fetchArtists(Math.min(remaining * 3, 200));
   if (!artists.length) {
-    console.log(`[ig-scheduler] No new artists available${TARGET_STATE !== 'ALL' ? ' for ' + TARGET_STATE : ''}`);
+    const scope = TARGET_STATES.length ? TARGET_STATES.join(',') : (TARGET_STATE !== 'ALL' ? TARGET_STATE : '');
+    console.log(`[ig-scheduler] No new artists available${scope ? ' for ' + scope : ''}`);
     return;
   }
 
@@ -181,9 +189,10 @@ async function main() {
     }
   }
 
-  console.log(`[ig-scheduler] Created ${created}/${batch.length} tasks (${todayCount}/${effectiveLimit} today) for bot=${BOT_ID} state=${TARGET_STATE} age=${acctAgeDays}d`);
+  const scope = TARGET_STATES.length ? TARGET_STATES.join(',') : TARGET_STATE;
+  console.log(`[ig-scheduler] Created ${created}/${batch.length} tasks (${todayCount}/${effectiveLimit} today) for bot=${BOT_ID} state=${scope} age=${acctAgeDays}d`);
 }
 
-console.log(`[ig-scheduler] Running every 5 mins (bot=${BOT_ID}, state=${TARGET_STATE}, daily=${DAILY_LIMIT})`);
+console.log(`[ig-scheduler] Running every 5 mins (bot=${BOT_ID}, state=${TARGET_STATES.length ? TARGET_STATES.join(',') : TARGET_STATE}, daily=${DAILY_LIMIT})`);
 main().catch(e => console.error('[ig-scheduler] first run error:', e));
 setInterval(() => main().catch(e => console.error('[ig-scheduler] error:', e)), 5 * 60 * 1000);
