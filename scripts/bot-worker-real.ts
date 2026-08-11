@@ -149,6 +149,16 @@ const BOT_DM_SCRIPTS_DEFAULT = [
 let BOT_DM_SCRIPTS: string[] = BOT_DM_SCRIPTS_DEFAULT;
 try { if (process.env.BOT_DM_SCRIPTS_JSON) BOT_DM_SCRIPTS = JSON.parse(process.env.BOT_DM_SCRIPTS_JSON); } catch {}
 if (!Array.isArray(BOT_DM_SCRIPTS) || !BOT_DM_SCRIPTS.length) BOT_DM_SCRIPTS = BOT_DM_SCRIPTS_DEFAULT;
+// 2026-08-11: 暖受众 DM 文案池（对我们帖子下点赞/评论的人，软性感谢 + 供货钩子，情绪化代入感）
+// 可用 AUDIENCE_DM_SCRIPTS_JSON 环境变量覆盖（JSON 字符串数组）。
+const AUDIENCE_DM_SCRIPTS_DEFAULT = [
+  "Hey — thanks for the love on our recent piece 🙌 means a lot coming from someone with your eye. I run InkFlow — we're the wholesale house for the ink, cartridges and aftercare you burn through daily. No pitch, just: if your supplier ever ghosts you mid-session, reply 'catalog' and I'll send our artist price list. Glad you're here ✌️",
+  "Noticed you hanging out on our page — appreciate you 🙏 Your work's got a point of view, so I figured you'd care about supply that just shows up on time. I'm with InkFlow (wholesale ink + needles + aftercare). Whenever you want a backup source that doesn't vanish, say the word and I'll shoot over the list. Zero pressure 👍",
+  "Saw you liked our stuff — thank you, genuinely. Around tattoo studios I keep hearing 'I just want my supplier to not disappear on me' — kind of our whole thing at InkFlow (ink, carts, aftercare, wholesale). If you ever want to compare or grab a sample kit, reply and I'll send it. Happy to have you around ✌️"
+];
+let AUDIENCE_DM_SCRIPTS: string[] = AUDIENCE_DM_SCRIPTS_DEFAULT;
+try { if (process.env.AUDIENCE_DM_SCRIPTS_JSON) AUDIENCE_DM_SCRIPTS = JSON.parse(process.env.AUDIENCE_DM_SCRIPTS_JSON); } catch {}
+if (!Array.isArray(AUDIENCE_DM_SCRIPTS) || !AUDIENCE_DM_SCRIPTS.length) AUDIENCE_DM_SCRIPTS = AUDIENCE_DM_SCRIPTS_DEFAULT;
 const hashStr = (s: string) => { let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0; return Math.abs(h); };
 const pickFromPool = (pool: string[], key: string) => pool[hashStr(key || 'anon') % pool.length];
 // 本地化优先层（2026-08-07）：基于 WebSearch 调研的本地商务话术，含本地痛点钩子
@@ -1200,6 +1210,118 @@ const checkWhoLikedUs = async (): Promise<void> => {
     await page.keyboard.press('Escape').catch(() => {});
     await page.waitForTimeout(jitter(800, 1500));
   } catch {}
+};
+
+// 2026-08-11: 暖受众反关注（audience reciprocation）
+// 主动关注我们自己帖子下「点赞/评论过」的人——他们已对我们的内容感兴趣，回关率远高于冷触达 artist。
+// 与 checkWhoLikedUs 的区别：后者只标记「已认识粉丝」的赞；本函数发现并关注「新」暖线索，扩大漏斗顶部。
+// 受 AUDIENCE_FOLLOW_DAILY_MAX（默认 20）+ 限制信号检测保护；AUDIENCE_DM_ENABLED 为真时对关注的暖线索发软性 DM。
+let audienceTick = 0;
+const checkAudienceReciprocate = async () => {
+  try {
+    audienceTick = (audienceTick + 1) % 20;
+    if (audienceTick !== 0) return;
+    if (!BOT_FOLLOW_ENABLED || !page) return;
+    const me = (ACCOUNT_IDS && ACCOUNT_IDS[0]) || '';
+    if (!me) return;
+    const dayKey = todayKey();
+    const followCap = Math.max(0, Number(process.env.AUDIENCE_FOLLOW_DAILY_MAX || 20));
+    const dmEnabled = /^(1|true|yes|on)$/i.test(process.env.AUDIENCE_DM_ENABLED || 'true');
+    const dmCap = Math.max(0, Number(process.env.AUDIENCE_DM_DAILY_MAX || 10));
+    const postsScan = Math.max(1, Math.min(8, Number(process.env.AUDIENCE_POSTS_SCAN || 3)));
+    let followedToday = Number((likeState.audienceFollowsByDay || {})[dayKey] || 0);
+    let dmToday = Number((likeState.audienceDmByDay || {})[dayKey] || 0);
+    const selfIds = new Set([BOT_ID, ...(ACCOUNT_IDS || [])].map((x) => String(x).toLowerCase()));
+    const seen = new Set<string>();
+    const isHandle = (h: string) => /^[A-Za-z0-9._]{2,30}$/.test(h) && !['p','reel','explore','accounts','direct','tv','stories','saved','reels'].includes(h);
+
+    await page.goto(`${IG_BASE}/${me}/`, { waitUntil: 'domcontentloaded', timeout: 45000 });
+    await page.waitForTimeout(jitter(1500, 3000));
+    const postLinks = await page.locator('a[href*="/p/"]').evaluateAll((els: any[]) =>
+      Array.from(new Set(els.map((e: any) => (e.getAttribute('href') || '').split('?')[0]).filter((h: string) => h.includes('/p/')).slice(0, postsScan)))
+    ).catch(() => [] as string[]);
+    for (const pl of postLinks) {
+      if (followedToday >= followCap && dmToday >= dmCap) break;
+      await page.goto(`${IG_BASE}${pl}`, { waitUntil: 'domcontentloaded', timeout: 45000 });
+      await page.waitForTimeout(jitter(1800, 3200));
+      // 评论者：帖子页评论区里的 handle 链接
+      const commenters = await page.locator('a[href^="/"]').evaluateAll((els: any[]) =>
+        els.map((e: any) => (e.getAttribute('href') || '').replace(/[?#].*$/, '').replace(/^\/+|\/+$/g, ''))
+          .filter((h: string) => isHandle(h))
+      ).catch(() => [] as string[]);
+      for (const h of commenters) { if (h) seen.add(h); }
+      // 点赞者：打开 liked_by 弹窗
+      const likedBy = page.locator('a[href*="/liked_by/"]').first();
+      if ((await likedBy.count()) > 0) {
+        await likedBy.click({ timeout: 8000 }).catch(() => {});
+        await page.waitForTimeout(jitter(2000, 3500));
+        const likers = await page.locator('a[href^="/"]').evaluateAll((els: any[]) =>
+          els.map((e: any) => (e.getAttribute('href') || '').replace(/[?#].*$/, '').replace(/^\/+|\/+$/g, ''))
+            .filter((h: string) => isHandle(h))
+        ).catch(() => [] as string[]);
+        for (const h of likers) { if (h) seen.add(h); }
+        await page.keyboard.press('Escape').catch(() => {});
+        await page.waitForTimeout(jitter(800, 1500));
+      }
+    }
+    let scanned = 0;
+    for (const h of Array.from(seen)) {
+      if (scanned++ > 60) break; // 每轮最多处理 60 个候选，避免单次过长
+      if (followedToday >= followCap && dmToday >= dmCap) break;
+      if (selfIds.has(h.toLowerCase())) continue;
+      const st: any = (likeState.follows!.byHandle![h] || (likeState.follows!.byHandle![h] = {}));
+      if (st.followedAt) continue; // 已关注过，跳过
+      if (followedToday >= followCap) continue; // 已达关注上限，本轮回填只处理新关注的
+      const ok = await followAudienceLead(h);
+      if (!ok) continue;
+      followedToday++;
+      st.followedAt = Date.now();
+      st.audienceFollowedAt = Date.now();
+      likeState.audienceFollowsByDay = likeState.audienceFollowsByDay || {};
+      likeState.audienceFollowsByDay[dayKey] = followedToday;
+      saveLikeState(likeState);
+      recordInteraction(h, 'follow', { audience: true, reason: 'audience_reciprocate', followedAt: Date.now() }).catch(() => {});
+      logBehavior('audience_follow_done', { handle: h, dayCount: followedToday, dayCap: followCap });
+      // 可选：对暖线索发软性 DM（受 AUDIENCE_DM_DAILY_MAX + 限制信号保护）
+      if (dmEnabled && dmToday < dmCap) {
+        try {
+          const script = pickFromPool(AUDIENCE_DM_SCRIPTS, h);
+          await executeDmTask({ target_handle: h, script_content: script } as any);
+          dmToday++;
+          likeState.audienceDmByDay = likeState.audienceDmByDay || {};
+          likeState.audienceDmByDay[dayKey] = dmToday;
+          saveLikeState(likeState);
+        } catch {}
+      }
+      await sleep(jitter(3000, 6000));
+    }
+  } catch {}
+};
+
+// 暖受众关注：打开对方主页点 Follow（与 reciprocalFollowBack 同源逻辑），受限制信号保护。
+const followAudienceLead = async (handle: string): Promise<boolean> => {
+  try {
+    if (!BOT_FOLLOW_ENABLED || !page) return false;
+    const selfIds = new Set([BOT_ID, ...(ACCOUNT_IDS || [])].map((x) => String(x).toLowerCase()));
+    if (selfIds.has(String(handle).toLowerCase())) return false;
+    await openProfile(handle);
+    await page.waitForTimeout(jitter(1200, 2400));
+    const followSelectors = ['header button', 'header div[role="button"]', 'main button', 'main div[role="button"]', 'button', 'div[role="button"]'];
+    let followBtn: any = null;
+    for (const sel of followSelectors) {
+      const cand = page.locator(sel).filter({ hasText: /^\s*Follow(\s+Back)?\s*$/i }).first();
+      if ((await cand.count()) > 0) { followBtn = cand; break; }
+    }
+    if (!followBtn) { logBehavior('audience_follow_btn_not_found', { handle }); return false; }
+    await followBtn.click({ timeout: 6000 });
+    await page.waitForTimeout(jitter(1200, 2400));
+    try {
+      const bsig = await detectBlockSignal();
+      if (bsig) { await triggerAccountRest(bsig.severity, bsig.text); return false; }
+    } catch {}
+    logBehavior('audience_follow_clicked', { handle });
+    return true;
+  } catch { return false; }
 };
 
 const logBehavior = (event: string, data: Record<string, any> = {}) => {
@@ -3537,6 +3659,10 @@ const pollLoop = async () => {
       // ── 检测「对方赞过我们」：每 20 轮查一次最新帖子点赞者列表，互赞则提前预热窗口 ──
       try {
         await checkWhoLikedUs();
+      } catch {}
+      // ── 暖受众反关注：每 20 轮扫我们自己帖子下的点赞/评论者，主动关注新暖线索（可选发DM）──
+      try {
+        await checkAudienceReciprocate();
       } catch {}
       // ── 回关 rapport 阶梯：先点赞→(隔天)评论 建立熟悉感，再发 DM（内部已判断进度）──
       try {
