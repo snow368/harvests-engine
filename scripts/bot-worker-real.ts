@@ -150,17 +150,40 @@ let BOT_DM_SCRIPTS: string[] = BOT_DM_SCRIPTS_DEFAULT;
 try { if (process.env.BOT_DM_SCRIPTS_JSON) BOT_DM_SCRIPTS = JSON.parse(process.env.BOT_DM_SCRIPTS_JSON); } catch {}
 if (!Array.isArray(BOT_DM_SCRIPTS) || !BOT_DM_SCRIPTS.length) BOT_DM_SCRIPTS = BOT_DM_SCRIPTS_DEFAULT;
 // 2026-08-11: 暖受众 DM 文案池（对我们帖子下点赞/评论的人，软性感谢 + 供货钩子，情绪化代入感）
-// 可用 AUDIENCE_DM_SCRIPTS_JSON 环境变量覆盖（JSON 字符串数组）。
-const AUDIENCE_DM_SCRIPTS_DEFAULT = [
-  "Hey — thanks for the love on our recent piece 🙌 means a lot coming from someone with your eye. I run InkFlow — we're the wholesale house for the ink, cartridges and aftercare you burn through daily. No pitch, just: if your supplier ever ghosts you mid-session, reply 'catalog' and I'll send our artist price list. Glad you're here ✌️",
-  "Noticed you hanging out on our page — appreciate you 🙏 Your work's got a point of view, so I figured you'd care about supply that just shows up on time. I'm with InkFlow (wholesale ink + needles + aftercare). Whenever you want a backup source that doesn't vanish, say the word and I'll shoot over the list. Zero pressure 👍",
-  "Saw you liked our stuff — thank you, genuinely. Around tattoo studios I keep hearing 'I just want my supplier to not disappear on me' — kind of our whole thing at InkFlow (ink, carts, aftercare, wholesale). If you ever want to compare or grab a sample kit, reply and I'll send it. Happy to have you around ✌️"
-];
-let AUDIENCE_DM_SCRIPTS: string[] = AUDIENCE_DM_SCRIPTS_DEFAULT;
-try { if (process.env.AUDIENCE_DM_SCRIPTS_JSON) AUDIENCE_DM_SCRIPTS = JSON.parse(process.env.AUDIENCE_DM_SCRIPTS_JSON); } catch {}
-if (!Array.isArray(AUDIENCE_DM_SCRIPTS) || !AUDIENCE_DM_SCRIPTS.length) AUDIENCE_DM_SCRIPTS = AUDIENCE_DM_SCRIPTS_DEFAULT;
+// 2026-08-11(补): 加西班牙语（es）池 —— 面向 TX/CA/FL 等西语纹身师，按 detectLangForHandle 选语言。
+// 可用 AUDIENCE_DM_SCRIPTS_JSON 环境变量覆盖：
+//   - JSON 数组 → 当作 en 池填充（向后兼容旧用法）；
+//   - JSON 对象 {en:[...], es:[...]} → 直接覆盖两语言池。
+const AUDIENCE_DM_SCRIPTS_DEFAULT: Record<string, string[]> = {
+  en: [
+    "Hey — thanks for the love on our recent piece 🙌 means a lot coming from someone with your eye. I run InkFlow — we're the wholesale house for the ink, cartridges and aftercare you burn through daily. No pitch, just: if your supplier ever ghosts you mid-session, reply 'catalog' and I'll send our artist price list. Glad you're here ✌️",
+    "Noticed you hanging out on our page — appreciate you 🙏 Your work's got a point of view, so I figured you'd care about supply that just shows up on time. I'm with InkFlow (wholesale ink + needles + aftercare). Whenever you want a backup source that doesn't vanish, say the word and I'll shoot over the list. Zero pressure 👍",
+    "Saw you liked our stuff — thank you, genuinely. Around tattoo studios I keep hearing 'I just want my supplier to not disappear on me' — kind of our whole thing at InkFlow (ink, carts, aftercare, wholesale). If you ever want to compare or grab a sample kit, reply and I'll send it. Happy to have you around ✌️"
+  ],
+  es: [
+    "¡Hola! Gracias por el cariño a nuestra última pieza 🙌 Significa mucho viniendo de alguien con tu ojo. Soy parte de InkFlow — somos el proveedor mayorista de la tinta, los cartuchos y el aftercare que usas a diario. Sin pitch: si tu proveedor alguna vez te deja tirado a mitad de sesión, responde 'catálogo' y te mando nuestra lista de precios para artistas. ¡Qué bueno tenerte por aquí! ✌️",
+    "Te vi por nuestra página — te agradezco 🙏 Tu trabajo tiene una voz propia, así que supuse que te importa un proveedor que simplemente llega a tiempo. Estoy con InkFlow (tinta, agujas y aftercare al por mayor). Cuando quieras una fuente de respaldo que no desaparezca, dímelo y te paso la lista. Cero presión 👍",
+    "Vi que te gustó lo nuestro — gracias, de verdad. En los estudios de tatuaje siempre escucho 'solo quiero un proveedor que no me abandona' — básicamente eso somos en InkFlow (tinta, cartuchos, aftercare, al por mayor). Si alguna vez quieres comparar o pedir un kit de muestra, respóndeme y te lo mando. Me alegra tenerte por acá ✌️"
+  ]
+};
+let AUDIENCE_DM_SCRIPTS: Record<string, string[]> = AUDIENCE_DM_SCRIPTS_DEFAULT;
+try {
+  if (process.env.AUDIENCE_DM_SCRIPTS_JSON) {
+    const parsed = JSON.parse(process.env.AUDIENCE_DM_SCRIPTS_JSON);
+    if (Array.isArray(parsed)) AUDIENCE_DM_SCRIPTS = { en: parsed, es: AUDIENCE_DM_SCRIPTS_DEFAULT.es };
+    else if (parsed && typeof parsed === 'object') AUDIENCE_DM_SCRIPTS = parsed as Record<string, string[]>;
+  }
+} catch {}
+if (!AUDIENCE_DM_SCRIPTS || !AUDIENCE_DM_SCRIPTS.en || !AUDIENCE_DM_SCRIPTS.en.length) {
+  AUDIENCE_DM_SCRIPTS = AUDIENCE_DM_SCRIPTS_DEFAULT;
+}
 const hashStr = (s: string) => { let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0; return Math.abs(h); };
 const pickFromPool = (pool: string[], key: string) => pool[hashStr(key || 'anon') % pool.length];
+// 暖受众 DM 按语言选池（es/en；其他语言 fallback en）。复用 detectLangForHandle 检测对方主页语言。
+const getAudienceDmScript = (handle: string, lang: string): string => {
+  const pool = (AUDIENCE_DM_SCRIPTS[lang] || AUDIENCE_DM_SCRIPTS.en || AUDIENCE_DM_SCRIPTS_DEFAULT.en);
+  return pickFromPool(pool, handle);
+};
 // 本地化优先层（2026-08-07）：基于 WebSearch 调研的本地商务话术，含本地痛点钩子
 // （EU REACH 墨水禁令 / 日本先信任后生意）。无本地化版的语言 fallback 到翻译版。
 // 完整档案见 D:\harvests\_tools\localized-dm-playbook.md
@@ -1285,7 +1308,8 @@ const checkAudienceReciprocate = async () => {
       // 可选：对暖线索发软性 DM（受 AUDIENCE_DM_DAILY_MAX + 限制信号保护）
       if (dmEnabled && dmToday < dmCap) {
         try {
-          const script = pickFromPool(AUDIENCE_DM_SCRIPTS, h);
+          const alang = (await detectLangForHandle(h)) || 'en';
+          const script = getAudienceDmScript(h, alang);
           await executeDmTask({ target_handle: h, script_content: script } as any);
           dmToday++;
           likeState.audienceDmByDay = likeState.audienceDmByDay || {};
