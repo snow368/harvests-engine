@@ -7,7 +7,7 @@ import os from 'node:os';
 import { createWorker } from 'tesseract.js';
 import { generateComment, getFromPool, refillPool, clearRecentHistory, detectTattooStyle } from './comment-generator';
 import { analyzePostImage, isVisionEnabled, buildVisionDescription } from './vision-analyze';
-import { detectPostType } from './tattoo-voice';
+import { detectPostType, detectSubject, isPiercingHandle } from './tattoo-voice';
 
 // 2026-08-07 全局兜底：捕获未处理异常/拒绝，避免单任务内的异步错误直接杀死整个进程
 // （此前 bot 在首个任务执行中静默退出，导致任务永远停在 leased、无法 done/failed，违反"需要跑通"要求）。
@@ -2548,6 +2548,11 @@ const shouldTryFollow = (handle: string, likeSummary: LikeActionSummary, command
 
 const tryFollowOnProfile = async (handle: string, likeSummary: LikeActionSummary, command?: CommandPayload): Promise<FollowActionSummary> => {
   if (!page) return { attempted: 0, followed: 0, skipped: true, reason: 'no_page' };
+  // 穿孔号不关注（整个不碰，不污染回关/DM 漏斗）
+  if (isPiercingHandle(handle)) {
+    logBehavior('follow_skip_piercing_handle', { handle });
+    return { attempted: 0, followed: 0, skipped: true, reason: 'follow_skip_piercing_handle' };
+  }
   const gate = shouldTryFollow(handle, likeSummary, command);
   dbg(`[dbg-follow] gate=${JSON.stringify(gate)} handle=${handle}`);
   if (!gate.ok) return { attempted: 0, followed: 0, skipped: true, reason: gate.reason };
@@ -2807,6 +2812,30 @@ const tryCommentWithStrategy = async (handle: string, facts?: ProfileFacts, like
     } catch {}
   }
 
+  // ===== 主题闸门：穿孔整个不碰（文字先判，判不出借现有 visionDescription 二次判定，不额外调 API）=====
+  let subj: string = (chosen.meta.subject && chosen.meta.subject.subject) || 'unknown';
+  if (subj === 'piercing') {
+    logBehavior('comment_skip_piercing', { handle, ownerHandle: chosen.meta.ownerHandle, source: chosen.meta.subject?.source });
+    return { attempted: 1, posted: 0, skipped: true, reason: 'piercing_skip' };
+  }
+  if (subj === 'unknown' && visionDescription) {
+    const v = detectSubject('', [visionDescription], chosen.meta.ownerHandle || '');
+    subj = v.subject;
+    logBehavior('comment_subject_vision', { handle, subject: subj, source: v.source });
+    if (subj === 'piercing') {
+      logBehavior('comment_skip_piercing_vision', { handle, ownerHandle: chosen.meta.ownerHandle });
+      return { attempted: 1, posted: 0, skipped: true, reason: 'piercing_skip' };
+    }
+    if (subj === 'unknown') {
+      logBehavior('comment_skip_unknown', { handle, ownerHandle: chosen.meta.ownerHandle });
+      return { attempted: 1, posted: 0, skipped: true, reason: 'subject_unknown_skip' };
+    }
+  }
+  if (subj === 'unknown') {
+    logBehavior('comment_skip_unknown', { handle, ownerHandle: chosen.meta.ownerHandle });
+    return { attempted: 1, posted: 0, skipped: true, reason: 'subject_unknown_skip' };
+  }
+
   const text = await buildCommentText(facts, {
     ...chosen.meta,
     caption: facts?.sampleCaption,
@@ -2970,12 +2999,13 @@ const readModalMeta = async (primaryStyle: string, expectedHandle = '', follower
   if (isReel) score -= 2;
   // Post-type scoring: prefer content posts, deprioritize ads/booking
   const postType = detectPostType(caption, altHints ? [altHints] : []);
+  const subject = detectSubject(caption, altHints ? [altHints] : [], ownerHandle);
   if (postType === 'healed') score += 2;
   else if (postType === 'before_after') score += 2;
   else if (postType === 'wip') score += 1;
   else if (postType === 'booking') score -= 3;
   else if (postType === 'flash') score -= 4;
-  return { url, postKey, ownerHandle, isOwnerPost, dt, ageDays, score, positive, promo, cta, styleBoost, isReel, likeCount, commentCount, postType, postStyle, styleConfidence, styleSource, postImageSrc };
+  return { url, postKey, ownerHandle, isOwnerPost, dt, ageDays, score, positive, promo, cta, styleBoost, isReel, likeCount, commentCount, postType, postStyle, styleConfidence, styleSource, postImageSrc, subject };
 };
 
 const closeModal = async () => {
@@ -3125,6 +3155,11 @@ const tryLikeWithStrategy = async (handle: string, facts?: ProfileFacts, command
   for (const c of candidates) {
     if (liked >= maxLikes) break;
     if (c.score < 1) continue;
+    // 穿孔帖不点赞（整个不碰）
+    if (c.meta.subject?.subject === 'piercing') {
+      logBehavior('like_skip_piercing', { handle, idx: c.idx, ownerHandle: c.meta.ownerHandle || '' });
+      continue;
+    }
     try {
       await tiles.nth(c.idx).scrollIntoViewIfNeeded();
       await page.waitForTimeout(jitter(900, 2000));

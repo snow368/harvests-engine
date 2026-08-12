@@ -223,3 +223,51 @@ export const getSpanishFallback = (): string => {
   const all = [...SPANISH_PATTERNS.praise, ...SPANISH_PATTERNS.short];
   return all[Math.floor(Math.random() * all.length)];
 };
+
+// ========== 主题识别：纹身 / 穿孔（评论·点赞·关注闸门：穿孔整个不碰） ==========
+export type SubjectKind = 'tattoo' | 'piercing' | 'unknown';
+export interface SubjectResult {
+  subject: SubjectKind;
+  source: 'handle' | 'caption' | 'alt' | 'vision' | 'default';
+  signals: string[];
+  visionUsed: boolean;
+}
+
+// 仅用穿孔专属 token，避免误杀 "pierc_and_ink" 这类纹身工作室
+const HANDLE_PIERCING_TOKENS = ['piercing', 'piercer', 'bodypierc', 'dermal', 'microdermal'];
+export const isPiercingHandle = (handle: string): boolean => {
+  const h = (handle || '').toLowerCase().replace(/^@/, '').replace(/\s+/g, '');
+  return HANDLE_PIERCING_TOKENS.some((k) => h.includes(k));
+};
+
+const STRONG_PIERCING = [
+  'piercing', 'piercer', 'pierced', 'nose ring', 'belly ring', 'navel', 'industrial',
+  'helix', 'labret', 'septum', 'daith', 'tragus', 'rook', 'conch', 'dermal', 'microdermal',
+  'ear piercing', 'surface bar', 'nostril', 'forward helix', 'snug', 'orbital',
+  'body jewelry', 'body jewellery', 'implant grade', 'barbell', 'stud', 'hoop',
+  'cartilage', 'gauge', 'gauges', 'stretching', 'stretched', 'plug', 'plugs',
+];
+const TATTOO_SIGNALS = [
+  'tattoo', 'tattooed', 'tattooer', 'tattooist', 'ink', 'flash sheet', 'sleeve',
+  'blackwork', 'whip shading', 'linework', 'fineline', 'fine line',
+];
+
+export const detectSubject = (caption: string, alts: string[] = [], ownerHandle = ''): SubjectResult => {
+  const text = `${caption} ${alts.join(' ')}`.toLowerCase();
+  // 1) handle 优先：@bodypiercingbykayla / @dermal.decor.piercing 等信号在 handle 里
+  if (isPiercingHandle(ownerHandle)) {
+    return { subject: 'piercing', source: 'handle', signals: [`handle:${ownerHandle}`], visionUsed: false };
+  }
+  // 2) 文字强信号：穿孔解剖词直接判穿孔
+  const pHit = STRONG_PIERCING.filter((k) => text.includes(k));
+  if (pHit.length) {
+    return { subject: 'piercing', source: 'caption', signals: pHit.slice(0, 3), visionUsed: false };
+  }
+  // 3) 文字纹身信号：命中纹身词 → 判纹身（本 bot 主场景）
+  const tHit = TATTOO_SIGNALS.filter((k) => text.includes(k));
+  if (tHit.length) {
+    return { subject: 'tattoo', source: 'caption', signals: tHit.slice(0, 3), visionUsed: false };
+  }
+  // 4) 两边都没信号 → 交给识图（调用方借 visionDescription 二次判定）
+  return { subject: 'unknown', source: 'default', signals: [], visionUsed: false };
+};
