@@ -5,9 +5,10 @@ import { execSync } from 'node:child_process';
 import path from 'node:path';
 import os from 'node:os';
 import { createWorker } from 'tesseract.js';
-import { generateComment, getFromPool, refillPool, clearRecentHistory, detectTattooStyle } from './comment-generator';
+import { generateComment, getFromPool, refillPool, clearRecentHistory, detectTattooStyle, getInteractionFallback, extractTechniqueHintsFromVision } from './comment-generator';
 import { analyzePostImage, isVisionEnabled, buildVisionDescription } from './vision-analyze';
-import { detectPostType, detectSubject, isPiercingHandle } from './tattoo-voice';
+import { detectPostType, detectSubject, isPiercingHandle, detectPostIntent, reconcileIntentWithVision, intentEngagement } from './tattoo-voice';
+import { isCommentBlacklisted } from './comment-blacklist';
 
 // 2026-08-07 全局兜底：捕获未处理异常/拒绝，避免单任务内的异步错误直接杀死整个进程
 // （此前 bot 在首个任务执行中静默退出，导致任务永远停在 leased、无法 done/failed，违反"需要跑通"要求）。
@@ -1185,6 +1186,78 @@ const checkIncomingFollowBacks = async () => {
     // 🔁 回关互惠：礼貌回关本轮新粉（受日关注上限 + 限制信号保护；与主动关注共享预算）
     for (const h of newFans) {
       try { await reciprocalFollowBack(h); } catch {}
+      await sleep(jitter(3000, 6000));
+    }
+  } catch {}
+};
+
+// 2026-08-12: 评论互动回流——扫描通知页"X 赞了你的评论 / 回复了你的评论"，
+// 仅在【当天检测、次日回关】的节奏下，对 detectSubject==='tattoo' 的互动者回关
+// （复用 reciprocalFollowBack 的 dedup/日上限/限制信号保护）。粉丝/穿孔/未知不跟，保 B2B 受众质量。
+// 检测与关注分离：检测到即开主页读 bio 判相关性并记录 followAt(≈次日)，次日 sweep 才真正回关，
+// 避免"人家一赞你立刻回关"的 bot 信号，也更自然。
+let commentEngagerTick = 0;
+const checkCommentEngagers = async () => {
+  try {
+    commentEngagerTick = (commentEngagerTick + 1) % 20;
+    if (commentEngagerTick !== 0) return;
+    if (!BOT_FOLLOW_ENABLED || !page) return;
+    const selfIds = new Set([BOT_ID, ...(ACCOUNT_IDS || [])].map((x) => String(x).toLowerCase()));
+    // 1) 扫通知 Others 页（含"赞了你的评论/回复了你的评论"的互动信号）
+    await page.goto(`${IG_BASE}/notifications/others/`, { waitUntil: 'domcontentloaded', timeout: 45000 });
+    await page.waitForTimeout(jitter(2000, 3500));
+    for (let s = 0; s < 3; s++) {
+      await page.mouse.wheel(0, 1500).catch(() => {});
+      await page.waitForTimeout(jitter(1200, 2200));
+    }
+    // 2) 抽取互动者：通知项含 actor 链接 + 描述文案（liked your comment / replied to your comment）
+    const raw = await page.evaluate(() => {
+      const out: { handle: string; text: string }[] = [];
+      const links = Array.from(document.querySelectorAll('a[href^="/"]')) as any[];
+      for (const link of links) {
+        const href = (link.getAttribute('href') || '').replace(/[?#].*$/, '').replace(/^\/+|\/+$/g, '');
+        if (!/^[A-Za-z0-9._]{2,30}$/.test(href)) continue;
+        let node: any = link;
+        for (let i = 0; i < 4 && node; i++) node = node.parentElement;
+        const text = (node ? node.innerText : (link as any).innerText || '').replace(/\s+/g, ' ').trim();
+        out.push({ handle: href, text });
+      }
+      return out;
+    }).catch(() => [] as { handle: string; text: string }[]);
+    const engagers: string[] = [];
+    for (const n of raw) {
+      if (selfIds.has(n.handle.toLowerCase())) continue;
+      if (/liked your comment|replied to your comment/i.test(n.text)) engagers.push(n.handle);
+    }
+    if (!engagers.length) return;
+    // 3) Pass A：当日检测新互动者，开主页读 bio 判相关性，记录次日 followAt（不立即回关）
+    for (const h of engagers.slice(0, 20)) {
+      const st = (likeState.follows!.byHandle![h] || (likeState.follows!.byHandle![h] = {})) as any;
+      if (st.followedAt || st.commentEngagerProcessed) continue;
+      try {
+        await openProfile(h);
+        await page.waitForTimeout(jitter(1000, 2000));
+        const facts = await captureProfileFacts().catch(() => null);
+        const subject = facts ? detectSubject(facts.bio, [], h).subject : 'unknown';
+        st.commentEngagerProcessed = true;
+        st.commentEngagerDetectedAt = Date.now();
+        st.commentEngagerSubject = subject;
+        st.commentEngagerFollowAt = Date.now() + jitter(20 * 3600_000, 28 * 3600_000); // 次日回关
+        saveLikeState(likeState);
+        logBehavior('comment_engager_detected', { handle: h, subject });
+        if (subject !== 'tattoo') logBehavior('comment_engager_skip', { handle: h, subject });
+      } catch {}
+      await sleep(jitter(2500, 5000));
+    }
+    // 4) Pass B：遍历持久化状态，次日已到点的 tattoo 互动者才真正回关（不依赖当前页）
+    for (const h of Object.keys(likeState.follows?.byHandle || {})) {
+      const st = likeState.follows!.byHandle![h] as any;
+      if (!st || st.followedAt || !st.commentEngagerFollowAt) continue;
+      if (Date.now() < st.commentEngagerFollowAt) continue;
+      if (st.commentEngagerSubject && st.commentEngagerSubject !== 'tattoo') continue; // 仅 tattoo 相关
+      logBehavior('comment_engager_follow', { handle: h });
+      recordInteraction(h, 'follow', { reason: 'comment_engager', subject: st.commentEngagerSubject || 'tattoo' }).catch(() => {});
+      await reciprocalFollowBack(h);
       await sleep(jitter(3000, 6000));
     }
   } catch {}
@@ -2599,13 +2672,8 @@ const tryFollowOnProfile = async (handle: string, likeSummary: LikeActionSummary
 };
 
 const buildCommentText = async (facts?: ProfileFacts, postMeta?: any): Promise<string> => {
-  // 优先从预热池取
-  const pooled = getFromPool();
-  if (pooled) {
-    refillPool().catch(() => {}); // 异步补充
-    return pooled;
-  }
-
+  // ⚠️ 不再优先取预热池：池里是启动时脱离具体帖生成的泛评，回在真实帖上最像 bot。
+  // 改为实时按帖生成；仅在 DeepSeek 失败（超时/无 key）才退化为池或口语模板。
   // DeepSeek 实时生成
   const commentStyle = postMeta?.postStyle
     || getPrimaryStyle(facts)
@@ -2615,16 +2683,22 @@ const buildCommentText = async (facts?: ProfileFacts, postMeta?: any): Promise<s
   try {
     const result = await Promise.race([
       generateComment({
-        caption: facts?.sampleCaption?.slice(0, 300) || postMeta?.caption?.slice(0, 300),
-        imageAlt: facts?.imageAltHints?.join(' ').slice(0, 200),
+        caption: postMeta?.caption?.slice(0, 300) || facts?.sampleCaption?.slice(0, 300),
+        imageAlt: postMeta?.imageAlt || facts?.imageAltHints?.join(' ').slice(0, 200),
         artistHandle: facts?.title?.replace(/[\(\)@]/g, '').trim(),
         style: commentStyle,
         styleConfidence: styleConf,
+        techniqueHints: postMeta?.techniqueHints,
+        visionTechniqueHints: postMeta?.visionTechniqueHints,
         visionDescription: postMeta?.visionDescription,
         likeCount: postMeta?.likeCount,
         commentCount: postMeta?.commentCount,
-        isReel: postMeta?.isReel,
-      }),
+      isReel: postMeta?.isReel,
+      postIntent: postMeta?.postIntent,
+      postSummary: postMeta?.postSummary,
+      postTone: postMeta?.postTone,
+      sensitive: postMeta?.sensitive,
+    }),
       new Promise<{ text: string }>((_, reject) =>
         setTimeout(() => reject(new Error('comment_gen_timeout')), 8000)
       ),
@@ -2633,65 +2707,10 @@ const buildCommentText = async (facts?: ProfileFacts, postMeta?: any): Promise<s
     refillPool().catch(() => {});
     return result.text;
   } catch {
-    // Fallback: 模板库（按风格分层，保证不阻塞）
-    const fallbacks = {
-      professional: [
-        'Love the shading on this piece.',
-        'Clean linework, really nice result.',
-        'The composition here is on point.',
-        'Such solid work, great execution.',
-        'Incredible detail on this one.',
-        'The contrast in this is beautiful.',
-        'Really like the depth here.',
-        'Super clean. Great placement too.',
-        'The blackwork here is super tight.',
-        'Great saturation throughout.',
-        'Really consistent line weight here.',
-        'Those gradients are blended beautifully.',
-      ],
-      casual: [
-        'This is so clean!',
-        'Wow, this turned out amazing.',
-        'Straight fire as always.',
-        'This is really well done.',
-        'Such a cool piece.',
-        'Love how this came together.',
-        'This is beautiful work.',
-        'Absolutely love this style.',
-        'So good! The tones are perfect.',
-        'This hits different, really nice.',
-      ],
-      question: [
-        'Love this concept — how long did the session take?',
-        'Do you design these yourself or work from client ideas?',
-        'What inspired this piece? Genuinely curious.',
-        'How many sessions did this take you?',
-        'Do you tattoo in this style full time?',
-      ],
-      detail_focused: [
-        'Those fine lines in the background are so precise.',
-        'The stipple shading here is perfectly executed.',
-        'That color packing is seriously impressive.',
-        'Really love how you handled the negative space.',
-        'The texture work in the hair/fur is next level.',
-        'That whip shading gradient is super smooth.',
-        'The dot work detail is crazy good on this.',
-        'Crisp outlines and perfect fill, this is solid.',
-      ],
-      short_praise: [
-        'So clean!',
-        'Beautiful work!',
-        'Love this!',
-        'Amazing piece!',
-        'Incredible detail!',
-        'Super clean!',
-        'Fire!',
-        'Really nice!',
-      ],
-    };
-    // Flatten all categories and pick one
-    const allFallbacks = Object.values(fallbacks).flat();
-    return allFallbacks[randInt(0, allFallbacks.length - 1)];
+    // Fallback 链：预热池(仍有上下文时比固定模板自然) → 锚定本帖的互动钩子（绝不用泛泛 "fire"，否则无互动无涨粉）
+    const pooled = getFromPool();
+    if (pooled) return pooled;
+    return getInteractionFallback(postMeta?.postIntent, postMeta?.sensitive);
   }
 };
 
@@ -2755,6 +2774,12 @@ const tryCommentWithStrategy = async (handle: string, facts?: ProfileFacts, like
   const gate = shouldTryComment(handle, likeSummary);
   if (!gate.ok) return { attempted: 0, posted: 0, skipped: true, reason: gate.reason };
 
+  // 评论黑名单：被拉黑账号坚决不写评论（用户 2026-08-14 要求）
+  if (isCommentBlacklisted(handle)) {
+    logBehavior('comment_skip_blacklist', { handle, scope: 'profile' });
+    return { attempted: 0, posted: 0, skipped: true, reason: 'blacklisted_handle' };
+  }
+
   const tiles = page.locator('article a[href*="/p/"], article a[href*="/reel/"], main a[href*="/p/"], main a[href*="/reel/"]');
   const total = await tiles.count();
   // 评论评分候选数收敛到 5：只为后续点赞挑最优帖，无需打开全部（多帖 profile 会拖爆看门狗）。
@@ -2768,6 +2793,12 @@ const tryCommentWithStrategy = async (handle: string, facts?: ProfileFacts, like
       await tiles.nth(idx).click({ timeout: 8000 });
       await page.waitForTimeout(jitter(900, 1800));
       const meta = await readModalMeta(primaryStyle, '', facts?.followers);
+      // 帖子 owner / co-author 在黑名单 → 跳过该帖（不写评论）
+      if (isCommentBlacklisted(meta.ownerHandle, { caption: meta.caption })) {
+        logBehavior('comment_skip_blacklist', { handle, ownerHandle: meta.ownerHandle, scope: 'post' });
+        await closeModal().catch(() => {});
+        continue;
+      }
       const pinnedLikelyBoost = idx < 3 ? 3 : 0;
       const boostedScore = Number(meta.score || 0) + pinnedLikelyBoost;
       ranked.push({ idx, score: boostedScore, meta: { ...meta, pinnedLikelyBoost } });
@@ -2781,9 +2812,18 @@ const tryCommentWithStrategy = async (handle: string, facts?: ProfileFacts, like
   const qualifying = ranked.filter(
     (r) => r.score >= 3 && (r.meta.promo ?? 0) === 0 && (r.meta.ageDays ?? 9999) <= BOT_SKIP_OLD_POST_DAYS
   );
-  if (!qualifying.length) return { attempted: 1, posted: 0, skipped: true, reason: 'no_comment_candidate' };
-  qualifying.sort((a, b) => (a.meta.ageDays ?? 9999) - (b.meta.ageDays ?? 9999) || b.score - a.score);
-  const chosen = qualifying[0];
+  // 评论闸门（2026-08-14 用户硬要求·修正）：只评「文字识别出纹身意图」的帖。
+  // - social（生日/聚会/家人朋友）→ 直接跳过（纹身只是顺带入镜，评了=机器人）。
+  // - generic（文字无纹身意图信号）→ 直接跳过，绝不调 QWEN 去"识别这是什么帖"（傻逼了才用视觉救未知帖）。
+  // - 只有 text intent = tattoo（flash/healed/wip/portrait/memorial…）才进评论流程；
+  //   QWEN 视觉此时只用于「读懂这张纹身图」让评论更具体，不决定评不评。
+  const tattooQualifying = qualifying.filter((r) => intentEngagement(r.meta.postIntent || 'generic') === 'tattoo');
+  if (!tattooQualifying.length) {
+    logBehavior('comment_skip_no_tattoo_intent', { handle, totalQualifying: qualifying.length });
+    return { attempted: 1, posted: 0, skipped: true, reason: 'no_tattoo_intent_candidate' };
+  }
+  tattooQualifying.sort((a, b) => (a.meta.ageDays ?? 9999) - (b.meta.ageDays ?? 9999) || b.score - a.score);
+  const chosen = tattooQualifying[0];
 
   // ===== 视觉分析（仅对"将要评论"的最优帖触发，控成本/延迟，不影响浏览评分）=====
   // 文案 + 图片结合：视觉模型"看"图 -> 产出观测 TEXT -> 注入评论生成。
@@ -2812,6 +2852,14 @@ const tryCommentWithStrategy = async (handle: string, facts?: ProfileFacts, like
     } catch {}
   }
 
+  // 视觉辅助技法识别（2026-08-14 补·用户要"视觉辅助"）：从 QWEN 观测描述里提取技法词，
+  // 补进评论生成器的 TECHNIQUE DETAIL。这里"看到"的技法词来自视觉模型文字描述，
+  // 与作者自标的 caption 技法区分来源（prompt 里表述不同，诚实边界不同）。
+  // 去重：作者已在 caption 自标的技法不再重复认领，避免 prompt 里同技法列两次。
+  const visionTechHints: string[] = visionDescription
+    ? extractTechniqueHintsFromVision(visionDescription).filter((k) => !(chosen.meta.techniqueHints || []).includes(k))
+    : [];
+
   // ===== 主题闸门：穿孔整个不碰（文字先判，判不出借现有 visionDescription 二次判定，不额外调 API）=====
   let subj: string = (chosen.meta.subject && chosen.meta.subject.subject) || 'unknown';
   if (subj === 'piercing') {
@@ -2836,13 +2884,33 @@ const tryCommentWithStrategy = async (handle: string, facts?: ProfileFacts, like
     return { attempted: 1, posted: 0, skipped: true, reason: 'subject_unknown_skip' };
   }
 
+  // 视觉闭环：QWEN 观测到的悼念信号 → 升 sensitive（仅影响语气，不影响"评不评"；评不评已由文字意图闸门决定）
+  const reconciledIntent = reconcileIntentWithVision(
+    {
+      intent: (chosen.meta.postIntent as any) || 'generic',
+      summary: chosen.meta.postSummary || '',
+      tone: (chosen.meta.postTone as any) || 'casual',
+      sensitive: !!chosen.meta.sensitive,
+      keywords: [],
+    },
+    visionDescription
+  );
+
+  // 注意：social 帖已在候选筛选阶段(intentEngagement==='tattoo' 闸门)剔除，
+  // 这里不再用视觉补判社交——QWEN 只负责读图喂评论，不决定评不评。
+
   const text = await buildCommentText(facts, {
     ...chosen.meta,
-    caption: facts?.sampleCaption,
     style: tempStyle,
     styleConfidence: tempConf,
     styleSource: tempSource,
+    techniqueHints: chosen.meta.techniqueHints || [],
+    visionTechniqueHints: visionTechHints,
     visionDescription,
+    postSummary: reconciledIntent.summary,
+    postIntent: reconciledIntent.intent,
+    postTone: reconciledIntent.tone,
+    sensitive: reconciledIntent.sensitive,
   });
   pruneRecentCommentHashes();
   const textHash = hashString(normalizeForMatch(text));
@@ -2874,6 +2942,7 @@ const tryCommentWithStrategy = async (handle: string, facts?: ProfileFacts, like
       styleConfidence: tempConf || 'low',
       styleSource: tempSource || 'none',
       vision: !!visionDescription,
+      visionTech: visionTechHints,
       likeCount: Number(chosen.meta.likeCount || 0),
       commentCount: Number(chosen.meta.commentCount || 0),
       cta: Number(chosen.meta.cta || 0),
@@ -2970,6 +3039,7 @@ const readModalMeta = async (primaryStyle: string, expectedHandle = '', follower
   const postStyle = det.primary;
   const styleConfidence = det.confidence;
   const styleSource = det.source;
+  const techniqueHints = det.techniqueHints;
   const styleBoost = postStyle ? (styleConfidence === 'high' ? 3 : styleConfidence === 'medium' ? 2 : 1) : 0;
   const isReel = /\/reel\//i.test(url);
   let score = 0;
@@ -3000,12 +3070,13 @@ const readModalMeta = async (primaryStyle: string, expectedHandle = '', follower
   // Post-type scoring: prefer content posts, deprioritize ads/booking
   const postType = detectPostType(caption, altHints ? [altHints] : []);
   const subject = detectSubject(caption, altHints ? [altHints] : [], ownerHandle);
+  const intent = detectPostIntent(caption, altHints ? [altHints] : []);
   if (postType === 'healed') score += 2;
   else if (postType === 'before_after') score += 2;
   else if (postType === 'wip') score += 1;
   else if (postType === 'booking') score -= 3;
   else if (postType === 'flash') score -= 4;
-  return { url, postKey, ownerHandle, isOwnerPost, dt, ageDays, score, positive, promo, cta, styleBoost, isReel, likeCount, commentCount, postType, postStyle, styleConfidence, styleSource, postImageSrc, subject };
+  return { url, postKey, ownerHandle, isOwnerPost, dt, ageDays, score, positive, promo, cta, styleBoost, isReel, likeCount, commentCount, postType, postStyle, styleConfidence, styleSource, techniqueHints, postImageSrc, subject, caption, imageAlt: altHints, postIntent: intent.intent, postSummary: intent.summary, postTone: intent.tone, sensitive: intent.sensitive };
 };
 
 const closeModal = async () => {
@@ -3722,6 +3793,10 @@ const pollLoop = async () => {
       // ── 暖受众反关注：每 20 轮扫我们自己帖子下的点赞/评论者，主动关注新暖线索（可选发DM）──
       try {
         await checkAudienceReciprocate();
+      } catch {}
+      // ── 评论互动回流：每 20 轮扫通知页，tattoo 相关互动者次日回关 ──
+      try {
+        await checkCommentEngagers();
       } catch {}
       // ── 回关 rapport 阶梯：先点赞→(隔天)评论 建立熟悉感，再发 DM（内部已判断进度）──
       try {

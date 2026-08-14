@@ -5,7 +5,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { buildTattooArtistContext, detectPostType, getSpanishFallback } from './tattoo-voice';
+import { buildTattooArtistContext, detectPostType, getSpanishFallback, getIntentGuidance } from './tattoo-voice';
 
 const DEEPSEEK_API_KEY = (process.env.DEEPSEEK_API_KEY || '').trim();
 const DEEPSEEK_BASE = 'https://api.deepseek.com/v1';
@@ -69,12 +69,14 @@ const STATE_DIR = path.join(process.env.BOT_STATE_DIR || './data/bot_state');
 const DEDUP_FILE = path.join(STATE_DIR, 'comment_gen_dedup.json');
 
 // 评论风格模板池 - 轮换使用保证多样性
+// ⚠️ 2026-08-14 修订：移除 'question' 风格。用户硬要求：不靠提问引互动，
+// 而是靠「识图(vision)+识文字(caption)实时分析」产出针对当帖的具体观察陈述来引互动。
 const COMMENT_STYLES = [
-  'professional',    // 专业点评
-  'casual',          // 随性称赞
-  'question',        // 提问互动
+  'professional',    // 专业点评（克制，少占比）
+  'casual',          // 随性反应
   'short_praise',    // 简短赞美
-  'detail_focused',  // 关注细节
+  'detail_focused',  // 关注细节（识图/识文字后落到具体观察）
+  'slang',           // 真实口语/俚语（最不像 bot，新加）
 ];
 
 type CommentInput = {
@@ -83,10 +85,16 @@ type CommentInput = {
   artistHandle?: string;
   style?: string;           // tattoo style detected
   styleConfidence?: string; // 'high' | 'medium' | 'low' — alt-text verified
+  techniqueHints?: string[]; // 技法级细分（点刺/手雕/单针…），来自 caption/alt 文本（作者自标）
+  visionTechniqueHints?: string[]; // 技法级细分，来自视觉模型观测描述（IMAGE ANALYSIS 看到的技法）
   visionDescription?: string; // 视觉模型对图的观测描述（TEXT，安全可引用）；为空=无图信号
   likeCount?: number;
   commentCount?: number;
   isReel?: boolean;
+  postIntent?: string;       // canonical intent key from detectPostIntent
+  postSummary?: string;      // one-line understanding of what the author is saying
+  postTone?: string;         // respectful | casual | enthusiastic | technical | celebratory
+  sensitive?: boolean;       // true => commemorative/grief => must be respectful, no slang/joke
 };
 
 type GeneratedComment = {
@@ -107,7 +115,7 @@ const safeJsonParse = (text: string, fallback: any) => {
 /**
  * 从对话历史中提取最近生成的评论文本用于去重
  */
-const MAX_RECENT = 20;
+const MAX_RECENT = 40;
 
 const loadDedup = (): string[] => {
   try {
@@ -126,7 +134,7 @@ const saveDedup = (texts: string[]) => {
 
 let recentCommentTexts: string[] = loadDedup();
 
-const isTooSimilar = (text: string, threshold = 0.6): boolean => {
+const isTooSimilar = (text: string, threshold = 0.45): boolean => {
   const lower = text.toLowerCase().trim();
   for (const prev of recentCommentTexts) {
     const prevLower = prev.toLowerCase().trim();
@@ -151,6 +159,7 @@ export type StyleDetection = {
   all: string[];              // 命中的 canonical keys
   confidence: 'high' | 'medium' | 'low';
   source: 'hashtag' | 'caption' | 'alt' | 'none';
+  techniqueHints: string[];   // 技法级细分（点刺/手雕/单针…），来自 caption/alt 文本（VISION 安全）
 };
 
 const TATTOO_STYLE_TAXONOMY: { key: string; aliases: string[]; hashtags: string[] }[] = [
@@ -179,6 +188,12 @@ const TATTOO_STYLE_TAXONOMY: { key: string; aliases: string[]; hashtags: string[
   { key: 'minimalist', aliases: ['minimalist','minimal'], hashtags: ['minimalist','minimal','minimalisttattoo'] },
   { key: 'chicano', aliases: ['chicano','chicano style'], hashtags: ['chicano','chicanotattoo'] },
   { key: 'anime', aliases: ['anime','anime tattoo'], hashtags: ['anime','animetattoo','animatattoo'] },
+  // —— 扩细：常见自标子风格（让检测更精准，避免都归到宽泛 key）——
+  { key: 'biomechanical', aliases: ['biomechanical','biomech','bio mechanical','bio-mech'], hashtags: ['biomech','biomechanical','biomechtattoo'] },
+  { key: 'engraving', aliases: ['engraving style','engraving','etching','etch style','scratchboard'], hashtags: ['engravingtattoo','etchingtattoo','engraving'] },
+  { key: 'sketch', aliases: ['sketch style','sketchy','scratchy line','pencil sketch','sketch tattoo'], hashtags: ['sketchtattoo','sketchstyle','sketchtattoos'] },
+  { key: 'old english', aliases: ['old english','old english lettering','blackletter','gothic lettering'], hashtags: ['oldenglish','oldenglishlettering','blackletter','blacklettertattoo'] },
+  { key: 'portrait realism', aliases: ['portrait realism','photo realistic portrait','realistic portrait','hyper realistic portrait'], hashtags: ['portraitrealism','realisticportrait','hyperrealisticportrait'] },
 ];
 
 const extractHashtags = (text?: string): string[] => {
@@ -196,8 +211,135 @@ const aliasHit = (haystack: string, alias: string): boolean => {
   return new RegExp(`(^|[\s#])${esc}([\s#]|$)`, 'i').test(haystack);
 };
 
-export const detectTattooStyle = (caption?: string, alt?: string, providedHashtags?: string[]): StyleDetection => {
-  const cap = normAlias(caption || '');
+// ========== 技法级细分提示（2026-08-14 扩细·用户要求"风格识别扩细"）==========
+// 这是「风格之下的技法层级」区分——作者常在 caption/hashtag 自标，属 TEXT 信号（VISION 安全）。
+// 例：blackwork 下的「点刺 vs 实黑」、日式里的「手雕 tebori vs 机器」、fine line 的「single needle/bugpin」。
+// 这些都是作者自己写出来的技法词，bot 引用它们 = 引用文字（不靠看图编），所以安全且精准。
+const TECHNIQUE_HINTS: { key: string; re: RegExp }[] = [
+  { key: 'handpoked',       re: /(hand.?pok|hand poke|stick.?n.?poke|stick and poke|machine.?free|by hand no machine|non.?machine|done by hand)/i },
+  { key: 'tebori',         re: /(tebori|hand.?carv|hand.?poked (japanese|irezumi))/i },
+  { key: 'dotwork',        re: /(dotwork|stippl|stipple|pointillism|dot.?shad|dotted|stipple.?shad)/i },
+  { key: 'whip_shade',     re: /(whip.?shad|spit.?shad|whip shade|spit shade)/i },
+  { key: 'grey_wash',      re: /(grey.?wash|gray.?wash|wash shade|wash shading|wash (gradient|transition)|dilution)/i },
+  { key: 'single_needle',  re: /(single.?needle|bugpin|3.?rl|hairline|micro.?needle|one needle)/i },
+  { key: 'bold_lines',     re: /(bold.?will.?hold|bold lines|bold outline|bold will hold|thick outline)/i },
+  { key: 'color_packing',  re: /(color.?pack|packing color|solid color|packed color|color saturation)/i },
+  { key: 'negative_space', re: /(negative.?space|skin break|bare skin|skin breaks)/i },
+  { key: 'blackout',       re: /(blackout|black.?out|solid black|full black|100% black|all black)/i },
+  { key: 'freehand_line',  re: /(freehand line|freehand outline|drawn direct|no stencil outline)/i },
+  { key: 'fineline_botanical', re: /(fineline botanical|floral fineline|fine line flower|fine line floral|fineline floral)/i },
+  { key: 'micro',          re: /(microrealism|miniature|thumb.?sized|tiny piece|micro realism)/i },
+  { key: 'color_real',     re: /(color realism|colour realism|color realistic|colour realistic)/i },
+  { key: 'ornamental_dot', re: /(ornamental dot|dotted ornament|geometric dot|sacred geometry dot)/i },
+];
+
+// ========== 视觉辅助技法识别（2026-08-14 补·用户要"视觉辅助"）==========
+// 上面 TECHNIQUE_HINTS 匹配「作者 caption/alt 自标」的技法词（点刺/手雕…）。
+// 但实际很多帖作者不写技法词、只有图——此时视觉模型(Qwen-VL)产出的观测 TEXT 里会描述
+// 它看到的技法（"dotted shading"、"hand-poked look"、"stippled"、"single needle lines"、
+// "bold solid outlines"、"solid black fill"、"negative space" 等）。
+// 这层：从 visionDescription 文字描述里提取技法 key，补进评论生成器的 TECHNIQUE DETAIL，
+// 让 LLM 强制认领「视觉实际看到的技法」→ 评论更针对当帖、更像真看懂了图。
+// 诚实边界：这些词来自"别人替你看图后告诉你的文字"，所以 prompt 里允许当作观测细节引用，
+// 不复用文字 hint 的"do NOT claim you observed it visually"约束。
+const TECHNIQUE_HINTS_VISION: { key: string; re: RegExp }[] = [
+  { key: 'handpoked',   re: /(hand.?pok|hand.?poked|done by hand|machine.?free|no machine|non.?machine)/i },
+  { key: 'tebori',     re: /(tebori|hand.?carv|hand.?carved|hand.?pulled)/i },
+  { key: 'dotwork',     re: /(dotwork|dotted|stippl|pointillism|dot.?shad|made of dots|dotted shading)/i },
+  { key: 'whip_shade',  re: /(whip.?shad|spit.?shad|curved shade|whip.?like shade)/i },
+  { key: 'grey_wash',   re: /(grey.?wash|gray.?wash|wash (tone|shade|gradient|transition)|diluted (ink|black|grey))/i },
+  { key: 'single_needle', re: /(single.?needle|bugpin|hairline|thin needle|fine needle|whisper.?thin)/i },
+  { key: 'bold_lines',  re: /(bold (line|outline)|thick (line|outline)|heavy outline|solid outline|unapologetic line)/i },
+  { key: 'color_packing', re: /(color.?pack|packed color|solid color fill|saturated color|color fill)/i },
+  { key: 'negative_space', re: /(negative.?space|bare skin|skin break|skin left|untattooed|left un.?ink)/i },
+  { key: 'blackout',    re: /(blackout|solid black|full black|all black|black fill|edge.?to.?edge black)/i },
+  { key: 'freehand_line', re: /(freehand|drawn freehand|no stencil|directly drawn|freehand outline)/i },
+  { key: 'ornamental_dot', re: /(ornamental dot|dotted ornament|geometric dot|dotted pattern)/i },
+  { key: 'micro',       re: /(microrealism|miniature|thumbnail|tiny detailed|needle control at scale)/i },
+  { key: 'color_real',  re: /(color realism|colour realism|realistic color|color realistic)/i },
+];
+
+export const extractTechniqueHintsFromVision = (visionText?: string): string[] => {
+  if (!visionText || !visionText.trim()) return [];
+  const hay = visionText.toLowerCase();
+  const hits: string[] = [];
+  for (const { key, re } of TECHNIQUE_HINTS_VISION) {
+    if (re.test(hay)) hits.push(key);
+  }
+  return hits;
+};
+
+// 每条技法细分的「内行评论角度」——让评论写得更针对，不靠预置提问（用户硬要求）。
+export const TECHNIQUE_ANGLES: Record<string, string[]> = {
+  handpoked: [
+    'the hand-poke rhythm — every puncture deliberate, no machine cadence, you can feel the patience',
+    'pulling this machine-free takes real nerve on the linework — respect',
+    'the slightly irregular, hand-laid dots read as human, not mechanical',
+  ],
+  tebori: [
+    'the tebori hand-carving — that irregular bite only a hand-pulled needle gives, machines can’t fake it',
+    'hand-poked irezumi — the gradations have that soft, organic tebori fall-off',
+  ],
+  dotwork: [
+    'the whole gradient is built from dot density alone — no line, just rhythm',
+    'machine dotwork vs hand stipple, either way the spacing implies all the form',
+    'how the dotwork shading melts into the solid black at the edges',
+  ],
+  whip_shade: [
+    'that whip-shade pull on the fades — curved, not a hard scrub, proper trad',
+    'the spit-shade softness near the edges reads so old-school',
+  ],
+  grey_wash: [
+    'the grey-wash dilution control — soft transition without going muddy',
+    'pushing that contrast with wash alone, no solid black needed',
+  ],
+  single_needle: [
+    'the bugpin/single-needle discipline for that hairline — one wrong pass and it blows out',
+    'holding a whisper-thin taper on a single needle takes insane steadiness',
+  ],
+  bold_lines: [
+    'bold will hold — those outlines are built to age 20 years',
+    'the outline weight is unapologetic, exactly how trad should sit',
+  ],
+  color_packing: [
+    'the color packing — solid in one pass, no patchy gaps',
+    'saturation control so the color stays punchy, never muddy',
+  ],
+  negative_space: [
+    'the negative space does the work — bare skin reads as the highlight, not the black',
+    'how the skin breaks carve the form instead of outlines',
+  ],
+  blackout: [
+    'the full blackout saturation — zero holidays, edge-to-edge solid',
+    'holding that much packed black crisp at the border, no fuzzy halo',
+  ],
+  freehand_line: [
+    'drawn freehand, no stencil — the line confidence is wild',
+  ],
+  fineline_botanical: [
+    'the fineline botanical detail — leaf veins at hairline weight, steady hand',
+  ],
+  micro: [
+    'needle control at thumbnail scale — detail that stays readable once healed',
+  ],
+  color_real: [
+    'color realism value range — keeping it punchy but not cartoonish',
+  ],
+  ornamental_dot: [
+    'the ornamental dotwork rhythm — even spacing carrying the whole pattern',
+  ],
+};
+
+const extractTechniqueHints = (captionNorm: string, altNorm: string): string[] => {
+  const hay = `${captionNorm} ${altNorm}`;
+  const hits: string[] = [];
+  for (const { key, re } of TECHNIQUE_HINTS) {
+    if (re.test(hay)) hits.push(key);
+  }
+  return hits;
+};
+
+export const detectTattooStyle = (caption?: string, alt?: string, providedHashtags?: string[]): StyleDetection => {  const cap = normAlias(caption || '');
   const altNorm = normAlias(alt || '');
   const tags = (providedHashtags && providedHashtags.length ? providedHashtags : extractHashtags(caption))
     .map((t) => t.toLowerCase().replace(/[^a-z0-9]/g, ''));
@@ -220,9 +362,9 @@ export const detectTattooStyle = (caption?: string, alt?: string, providedHashta
     }
   }
 
-  if (selfLabeled.length) return { primary: selfLabeled[0], all: selfLabeled, confidence: 'high', source: selfSource };
-  if (altLabeled.length) return { primary: altLabeled[0], all: altLabeled, confidence: 'medium', source: 'alt' };
-  return { primary: '', all: [], confidence: 'low', source: 'none' };
+  if (selfLabeled.length) return { primary: selfLabeled[0], all: selfLabeled, confidence: 'high', source: selfSource, techniqueHints: extractTechniqueHints(cap, altNorm) };
+  if (altLabeled.length) return { primary: altLabeled[0], all: altLabeled, confidence: 'medium', source: 'alt', techniqueHints: extractTechniqueHints(cap, altNorm) };
+  return { primary: '', all: [], confidence: 'low', source: 'none', techniqueHints: extractTechniqueHints(cap, altNorm) };
 };
 
 // 风格专属「内行细节维度」——每风格 3-5 个懂行人才会注意的具体工艺点。
@@ -361,6 +503,40 @@ export const STYLE_DEEP_ANGLES: Record<string, string[]> = {
   ],
 };
 
+// ========== 兜底互动模板（仅 DeepSeek 连续失败/无 key 时触发，最后安全网）==========
+// ⚠️ 2026-08-14 修订：主体生成路径「零预置」——实时靠 VISION(识图) + caption(识文字) 由 LLM 分析出
+// 针对当帖的具体观察陈述，绝不靠写死的模板。这里只是 API 完全不可用时的最低保障：
+// 返回「针对帖型的具体陈述(非提问)」，至少在帖型层面不离谱，绝不掉进泛泛 "fire"。
+export const getInteractionFallback = (intent = 'generic', sensitive = false, caption = ''): string => {
+  if (sensitive) {
+    const s = [
+      'what a beautiful way to honor them',
+      'this is such a touching tribute',
+      'keeping their memory close — beautiful',
+      'a lovely tribute, the detail says it all',
+    ];
+    return s[Math.floor(Math.random() * s.length)];
+  }
+  // 尽量从 caption 里抓一个具体名词做观察锚点；抓不到就退回极简陈述
+  const map: Record<string, string[]> = {
+    flash_available: ['this sheet is so clean', 'these are fire, the layout on the sheet'],
+    pet_portrait: ['what a gorgeous tribute — the likeness is unreal', 'this is such a beautiful tribute'],
+    portrait: ['the eyes are alive on this', 'the tones on this portrait are dialed'],
+    healed: ['healed so crisp, the lines held', 'aged beautifully, the color still pops'],
+    wip: ['progress so far is clean', 'that linework already looking tight'],
+    coverup: ['the old piece is gone, clean cover', 'smart weave of the old ink into the new'],
+    booking: ['your work sells itself', 'this portfolio would make anyone book'],
+    convention: ['your booth is always packed', 'would love to catch you at a guest spot'],
+    bts: ['that setup is clean', 'dialed station'],
+    script_quote: ['the flow on that script is perfect', 'that lettering connection is clean'],
+    fan_art: ['this character is spot on', 'the cel-shaded look is clean'],
+    botanical_nature: ['that leaf detail is so clean', 'the composition flows with the body'],
+    generic: ['this is clean', 'the flow on this is something'],
+  };
+  const arr = map[intent] || map.generic;
+  return arr[Math.floor(Math.random() * arr.length)];
+};
+
 /**
  * 构建专业纹身师视角的 prompt
  */
@@ -391,6 +567,14 @@ const buildPrompt = (input: CommentInput, style: string): string => {
     `Stats: ${input.likeCount || '?'} likes, ${input.commentCount || '?'} comments`,
   ].filter(Boolean).join(' | ');
 
+  // ===== 帖子「意图理解」：先读懂作者想说什么（基于 caption + 风格识别），再据此写具体评论（2026-08-14）=====
+  // ⚠️ 用户硬要求：不要预置提问钩子、不要 question 风格。评论的具体性来自 LLM 实时消化
+  //   IMAGE ANALYSIS(识图) + caption(识文字)，不靠写死的模板。
+  const isGenericNoVision = !hasVision && (input.postIntent || 'generic') === 'generic';
+  const intentBlock = input.postSummary
+    ? `POST UNDERSTANDING (read this FIRST - your comment must be about THIS, not generic praise):\n${input.postSummary}\n${getIntentGuidance({ intent: input.postIntent || 'generic', summary: input.postSummary, tone: (input.postTone as any) || 'casual', sensitive: !!input.sensitive, keywords: [] })}${isGenericNoVision ? '\nSAFE MODE: no image analysis available and the caption is thin — you cannot tell the exact subject, so open with a genuine reaction based on whatever the caption or IMAGE ANALYSIS does tell you. Do NOT claim to understand the exact subject or technique.' : ''}`
+    : '';
+
   // 视觉规则：最高优先级。当无图观测时维持"只能读文字"；当有图观测时允许引用观测到的细节。
   const NEUTRAL_RULE = hasVision
     ? `VISION RULE (highest priority): You have an IMAGE ANALYSIS describing what was observed (see IMAGE ANALYSIS in Post context). You MAY reference those observed details — the subject, craft (linework/shading/composition/color/negative space), and palette — because they were reported by analysis, not imagined. Do NOT claim any visual quality NOT listed in the IMAGE ANALYSIS. You may ALSO reference the tattoo's subject/style if the caption states it. Never invent. Stay natural, like a fellow artist reacting to the post. No spam, no marketing.`
@@ -408,7 +592,22 @@ const buildPrompt = (input: CommentInput, style: string): string => {
     : `${NEUTRAL_RULE} (The style above is confirmed — from caption or image analysis — you may reference it and its craft; never claim you observed the visual result beyond the IMAGE ANALYSIS.)`;
 
   const deepNote = deepAngles.length
-    ? `\nSTYLE-DEEP MODE (safe — the artist self-identified "${input.style}" in text): engage with ${input.style}-specific CRAFT KNOWLEDGE using the angles below. The goal is SPECIFICITY — name one insider detail the way a fellow artist would, so the poster feels truly seen and hits like/reply. These are craft facts ABOUT THE STYLE (process/tradition/technique), NOT claims about their specific image — never say you observed the visual result of their piece. Style craft details to draw from:\n${deepAngles.map((a) => '- ' + a).join('\n')}\nPrefer a comment that names ONE specific detail above, then you may add a low-pressure question about how they approach it.`
+    ? `\nSTYLE-DEEP MODE (safe — the artist self-identified "${input.style}" in text): engage with ${input.style}-specific CRAFT KNOWLEDGE using the angles below. The goal is SPECIFICITY — name one insider detail the way a fellow artist would, so the poster feels truly seen and hits like/reply. These are craft facts ABOUT THE STYLE (process/tradition/technique), NOT claims about their specific image — never say you observed the visual result of their piece. Style craft details to draw from:\n${deepAngles.map((a) => '- ' + a).join('\n')}\nPrefer a comment that names ONE specific detail above, as a statement of recognition (no question).`
+    : '';
+
+  // 技法级细分块（2026-08-14 扩细 + 视觉辅助补层）：
+  //  - 文字 hint：作者 caption/alt 自标的具体技法（点刺/手雕/单针/实黑…），属 TEXT 信号，
+  //    引用时当作"作者自己提到的技法"认可，绝不断言这是从图上看到的。
+  //  - 视觉 hint：视觉模型观测描述里看到的技法（dotwork/hand-poked…），这些是"别人替你看图
+  //    后告诉你的文字"，可在 prompt 里当作观测细节引用（不同于文字 hint 的"别谎称看图"约束）。
+  const techHints = (input.techniqueHints || []).filter((k) => TECHNIQUE_ANGLES[k]);
+  const visionTechHints = (input.visionTechniqueHints || []).filter((k) => TECHNIQUE_ANGLES[k]);
+  const techniqueBlock = (techHints.length || visionTechHints.length)
+    ? `\nTECHNIQUE DETAIL — acknowledge ONE specific technique as a statement of recognition (no question), so the poster feels truly seen:\n${
+        techHints.map((k) => `- ${k} (author's caption mentions it — do NOT claim you observed it visually): ${TECHNIQUE_ANGLES[k][0]}`).join('\n')
+      }\n${
+        visionTechHints.map((k) => `- ${k} (the IMAGE ANALYSIS observed this technique in the tattoo — you MAY reference it as something actually seen in the image): ${TECHNIQUE_ANGLES[k][0]}`).join('\n')
+      }`
     : '';
 
   const lang = (COMMENT_LANG === 'auto' || COMMENT_LANG === 'es') && (input.caption || '').trim().length >= 10
@@ -424,14 +623,16 @@ const buildPrompt = (input: CommentInput, style: string): string => {
   };
   const langGuide = LANG_GUIDES[lang] || LANG_GUIDES['en'];
 
+  // ⚠️ 无 question 风格：所有风格都是「针对当帖的具体观察陈述」(非提问)。具体性来自 LLM 实时消化
+  //   IMAGE ANALYSIS(识图) + caption(识文字)，不靠预置钩子。互动靠"被看懂"引回复/关注。
   const STYLE_INSTRUCTIONS: Record<string, string> = {
-    professional: 'Tone: a fellow tattoo artist giving brief, respectful pro feedback. A statement, not a question.',
-    casual: 'Tone: a relaxed peer/fan reacting. A short statement, not a question.',
-    question: "Tone: curious peer. End with ONE genuine, low-pressure question. If a style is detected, make it style-relevant — ask about that style's process, tradition, or how it is built (e.g. for blackwork: how you plan the negative space; for japanese: the mikiri transitions). Questions drive replies. Keep it natural.",
-    short_praise: 'Tone: very short genuine praise (2-5 words). A statement, not a question.',
+    professional: 'Tone: a fellow tattoo artist giving brief, respectful pro feedback. Name ONE specific craft thing you noticed (from the caption or IMAGE ANALYSIS) as a statement. No question.',
+    casual: 'Tone: a relaxed peer reacting. OPEN with a specific thing you noticed about their post (subject/craft/palette/composition), stated plainly. No question.',
+    short_praise: 'Tone: a short genuine reaction (2-6 words) that names a SPECIFIC thing you saw. Punchy, statement only. No question.',
     detail_focused: deepAngles.length
-      ? `Tone: name ONE specific, insider craft detail about ${input.style} drawn from the STYLE-DEEP angles (e.g. "${deepAngles[0]}"). State it like a fellow artist who knows the style — this specificity is what earns the like. You may add a light, low-pressure question. Never claim you observed the visual quality of their piece.`
-      : 'Tone: reference a specific subject/theme the caption names (never visual technique), and you may add a light question. Do NOT claim visual quality.',
+      ? `Tone: name ONE specific, insider craft detail about ${input.style} drawn from the STYLE-DEEP angles (e.g. "${deepAngles[0]}"), as a statement of recognition like a fellow artist who knows the style. Never claim you observed the visual result of their piece. No question.`
+      : 'Tone: reference a specific subject/theme the caption names (never visual technique), as a statement. Do NOT claim visual quality. No question.',
+    slang: 'Tone: a REAL person hyping a peer on their phone — slang, lowercase, fragments OK — anchored in something specific you noticed, not just "fire". e.g. "ok the linework on this is clean af". Never sound like a brand. No question.',
   };
   const styleInstruction = STYLE_INSTRUCTIONS[style] || STYLE_INSTRUCTIONS.casual;
 
@@ -439,21 +640,26 @@ const buildPrompt = (input: CommentInput, style: string): string => {
 
 Post context: ${postContext}
 
+${intentBlock}
+
 ${langGuide}
 
-${styleConfNote}${deepNote}
+${styleConfNote}${deepNote}${techniqueBlock}
 
 Style instruction: ${styleInstruction}
 
-Rules:
-- NEVER sound like spam, bot, marketing, or a customer
-- NEVER mention buying anything, supplies, DM for info, check bio, etc.
-- ${hasVision ? 'You have an IMAGE ANALYSIS in Post context. You MAY reference its observed subject/craft/palette, but NEVER claim visual qualities beyond what it lists.' : 'You CANNOT see the image. Do NOT claim visual technique (shading/linework/composition/contrast/color) you did not observe.'}
-- If a tattoo style is detected and confidence is high, you MAY reference it and engage with its craft (the artist named the style in text, OR a vision model observed it — both safe). Never claim you observed the visual result beyond the IMAGE ANALYSIS.
-- You MAY name the tattoo's subject or style ONLY if the caption explicitly states it, or if the IMAGE ANALYSIS reports it; otherwise keep it general. Do NOT invent a subject the caption does not mention.
-- Use tattoo industry language naturally — don't force it
-- 6-20 words. If your style is "question", a short sentence ending in a question is perfect.
-- Max 1 emoji. Often no emoji is more authentic.
+Rules — write like a REAL HUMAN reacting on their phone, NOT a brand, NOT a critic:
+- NEVER sound like spam, bot, marketing, or a customer. BANNED phrases (instant fail): "great work as always", "this is really well done", "such a clean piece", "love this great work", "awesome tattoo", "really nice post". Those read as bot.
+${input.sensitive ? '- SENSITIVE / RESPECTFUL POST: this is personal or commemorative (e.g. a pet or human memorial). You MUST be warm and respectful. FORBIDDEN: slang (slaps, af, tho, bruh, hits different), jokes, hype, fragments, emoji spam. A simple heartfelt line acknowledging the subject is perfect. Never be flippant or casual-cool. No questions.' : `- INTERACTION IS THE GOAL (this is how you earn the follow), but WITHOUT questions. PROVE you saw THIS post: OPEN with ONE specific observation drawn from the caption or IMAGE ANALYSIS. A genuine specific reaction earns more than praise. Reference the material above; never invent.`}
+- NEVER mention buying, supplies, DM, bio, links, or promo.
+- ${hasVision ? 'You have an IMAGE ANALYSIS. You MAY reference its observed subject/craft/palette, but NEVER claim visual qualities beyond what it lists.' : 'You CANNOT see the image. Do NOT claim visual technique you did not observe.'}
+- ${input.sensitive ? 'Keep it short and warm. 1-20 words is fine.' : 'VARY YOUR LENGTH WILDLY: sometimes one word ("fire", "clean", "sick"), sometimes a fragment ("ok but the linework tho"), sometimes a full sentence. Do NOT aim for a fixed length. 1-35 words is fine.'}
+- ${input.sensitive ? '' : 'Use REAL casual register: slang (slaps, hits different, lowkey, ngl, af, tho, bruh, legit, mad), dropped punctuation, lowercase starts, run-on fragments, the occasional typo. Real comments are messy.'}
+- VARY YOUR OPENING — do NOT start most comments with "Love", "Great", "This", "Such", or "Awesome". React or fragment instead.
+- If a tattoo style is detected and confidence is high, you MAY reference its craft naturally (not as a lecture). Never claim you observed the visual result.
+- You MAY name the subject/style ONLY if the caption states it or IMAGE ANALYSIS reports it. Do NOT invent a subject.
+- Tattoo slang welcome (whip shade, packing, blowout, bold will hold) but don't force it.
+- Emoji: 0-1, usually none. No hashtags, no @mentions, no quotation marks around your comment.
 
 Return ONLY JSON: {"text": "your comment", "style": "tattoo_artist"}`;
 };
@@ -471,12 +677,12 @@ const callDeepSeek = async (prompt: string): Promise<string> => {
     body: JSON.stringify({
       model: 'deepseek-chat',
       messages: [
-        { role: 'system', content: 'You generate authentic Instagram comments. You respond only with valid JSON. You never sound like AI.' },
+        { role: 'system', content: 'You write Instagram comments that sound exactly like a real human on their phone — messy, slangy, varied length, never corporate. Your GOAL is to make the artist reply and want to follow: every comment opens with a specific observation that proves you actually saw their post (from the image analysis and caption) — NO questions, just a real reaction specific to their piece. Respond only with valid JSON.' },
         { role: 'user', content: prompt },
       ],
-      temperature: 0.9,  // Higher temperature for more variety
-      max_tokens: 80,
-      top_p: 0.95,
+      temperature: 1.0,  // max variety, avoid repetitive phrasing
+      max_tokens: 140,
+      top_p: 0.98,
     }),
   });
 
@@ -494,33 +700,25 @@ const callDeepSeek = async (prompt: string): Promise<string> => {
  */
 export const generateComment = async (input: CommentInput): Promise<GeneratedComment> => {
   if (!DEEPSEEK_API_KEY) {
-    // 无 API key 时直接用模板库
-    const fallbacks = [
-      'This is really well done.',
-      'Great work as always.',
-      'Such a clean piece.',
-      'This turned out great.',
-      'Really nice post.',
-      'Awesome tattoo.',
-      'Love this, great work.',
-      'This is solid work.',
-    ];
-    const fbText = fallbacks[Math.floor(Math.random() * fallbacks.length)];
+    // 无 API key 时直接用「锚定本帖」的互动模板（针对帖型的具体陈述，非提问）
+    const fbText = getInteractionFallback(input.postIntent, !!input.sensitive, input.caption);
     return { text: fbText, style: 'fallback' };
   }
 
-  // 风格 high（作者自标）时：把「细节化陈述」(detail_focused)权重拉到 30%，与提问(35%)一起成为主体——
-  // 懂行的具体细节最引赞，风格相关问题最引回复；纯赞美压到 5%。
-  // 有视觉观测时：即使风格未 high，也把"具体工艺陈述"权重抬高，让 Flash 看到的 subject/craft/palette 真正被用进评论，
-  // 避免退化成泛泛赞美（用户 2026-08-10："评论内容不精彩"）。
-  // medium（仅 IG alt 图猜测）/low 且无视觉时：退回提问为主力(45%)的通用策略，绝不假装懂风格。
+  // ⚠️ 2026-08-14 修订：移除 question 风格。权重重偏「针对当帖的具体观察陈述」：
+  //   detail_focused(识图/识文字后落到具体工艺观察) + casual(具体反应) + slang(锚定具体的口语)。
+  //   用户硬要求：不靠提问引互动，靠"被看懂"的具体观察引回复/关注；纯赞美(short_praise)压到最低。
   const conf = input.styleConfidence || 'low';
   const hasVision = !!(input.visionDescription && input.visionDescription.trim());
-  const weights = (conf === 'high')
-    ? [0.18, 0.12, 0.35, 0.05, 0.30]   // professional, casual, question, short_praise, detail_focused
+  const sensitive = !!input.sensitive;
+  // 敏感/纪念帖：绝不用俚语/玩梗/细节炫技，只走温暖尊重的口吻（且不提问）
+  const weights = sensitive
+    ? [0.40, 0.45, 0.15, 0.0, 0.0]   // professional, casual, short_praise, detail_focused, slang (后两者禁用于敏感帖)
+    : (conf === 'high')
+    ? [0.12, 0.13, 0.05, 0.40, 0.30]   // 风格 high：细节化具体观察 + 口语化具体反应 为主力
     : hasVision
-      ? [0.30, 0.15, 0.35, 0.05, 0.15] // 有视觉观测：偏具体工艺陈述 + 提问，把图里看到的东西说出来
-      : [0.15, 0.25, 0.45, 0.10, 0.05]; // professional, casual, question, short_praise, detail_focused
+      ? [0.15, 0.15, 0.05, 0.35, 0.30] // 有视觉观测：具体工艺/题材观察 + 口语化具体反应
+      : [0.10, 0.25, 0.10, 0.15, 0.40]; // 无视觉：口语化为主(读文字反应)，细节化保守(不假装看懂图)
   const r = Math.random();
   let acc = 0;
   let styleIdx = 1; // default casual
@@ -528,11 +726,12 @@ export const generateComment = async (input: CommentInput): Promise<GeneratedCom
     acc += weights[i];
     if (r <= acc) { styleIdx = i; break; }
   }
-  const style = COMMENT_STYLES[styleIdx];
+  let style = COMMENT_STYLES[styleIdx];
+  if (sensitive && (style === 'slang' || style === 'detail_focused')) style = 'casual';
 
   // 最多重试3次生成不重复的评论
   for (let attempt = 0; attempt < 3; attempt++) {
-    // 重试时降级上下文防重复，但高风格时继续走 detail_focused/question 保持细节化，不退回泛泛赞美
+    // 重试时降级上下文防重复，但高风格时继续走 detail_focused 保持细节化，不退回泛泛赞美
     const retryStyle = (attempt > 0 && style === 'short_praise') ? 'casual' : style;
     const prompt = buildPrompt(
       attempt > 0 ? { ...input, caption: '' } : input, // 重试时降级上下文
@@ -558,18 +757,8 @@ export const generateComment = async (input: CommentInput): Promise<GeneratedCom
     return { text, style, tokens: text.length };
   }
 
-  // 最终 fallback — 模板库
-  const fallbacks = [
-    'This is really well done.',
-    'Great work as always.',
-    'Such a clean piece.',
-    'This turned out great.',
-    'Really nice post.',
-    'Awesome tattoo.',
-    'Love this, great work.',
-    'This is solid work.',
-  ];
-  const fbText = fallbacks[Math.floor(Math.random() * fallbacks.length)];
+  // 最终 fallback（仅 DeepSeek 连续失败 3 次时触发）：用「针对帖型的具体陈述」模板，而非泛泛 "fire"
+  const fbText = getInteractionFallback(input.postIntent, sensitive, input.caption);
   recentCommentTexts.push(fbText);
   if (recentCommentTexts.length > MAX_RECENT) recentCommentTexts.shift();
   saveDedup(recentCommentTexts);
