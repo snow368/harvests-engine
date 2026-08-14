@@ -1,17 +1,21 @@
-/**
- * CSV → Neon DB 导入脚本
- * 用法: npx ts-node scripts/import-csv-to-db.ts [csv路径]
- * 默认读取 D:\MyCrawler_System\Data\Raw_Leads\WA_Raw.csv
+﻿/**
+ * CSV â†’ Neon DB å¯¼å…¥è„šæœ¬
+ * ç”¨æ³•: npx ts-node scripts/import-csv-to-db.ts [csvè·¯å¾„]
+ * é»˜è®¤è¯»å– D:\MyCrawler_System\Data\Raw_Leads\WA_Raw.csv
  */
 import { neon } from '@neondatabase/serverless';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { fileURLToPath } from 'node:url';
+import { dirname } from 'node:path';
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// 直接读 .env，不依赖 dotenv 包
+// ç›´æŽ¥è¯» .envï¼Œä¸ä¾èµ– dotenv åŒ…
 const envPath = path.resolve(__dirname, '..', '.env');
 if (fs.existsSync(envPath)) {
   const envContent = fs.readFileSync(envPath, 'utf-8');

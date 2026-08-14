@@ -1,19 +1,23 @@
-/**
- * 评论黑名单（2026-08-14）
- * 被拉黑账号 = 明确不喜欢被评论 / 要求不要互动的账号。
- * 命中后 bot 坚决不在其帖子下写评论（含其作为 owner 或 co-author 出现的帖子）。
+﻿/**
+ * è¯„è®ºé»‘åå•ï¼ˆ2026-08-14ï¼‰
+ * è¢«æ‹‰é»‘è´¦å· = æ˜Žç¡®ä¸å–œæ¬¢è¢«è¯„è®º / è¦æ±‚ä¸è¦äº’åŠ¨çš„è´¦å·ã€‚
+ * å‘½ä¸­åŽ bot åšå†³ä¸åœ¨å…¶å¸–å­ä¸‹å†™è¯„è®ºï¼ˆå«å…¶ä½œä¸º owner æˆ– co-author å‡ºçŽ°çš„å¸–å­ï¼‰ã€‚
  *
- * 数据来源（二者合并、去重）：
- *   1) 文件 <STATE_DIR>/comment_blacklist.json：
+ * æ•°æ®æ¥æºï¼ˆäºŒè€…åˆå¹¶ã€åŽ»é‡ï¼‰ï¼š
+ *   1) æ–‡ä»¶ <STATE_DIR>/comment_blacklist.jsonï¼š
  *        { "handles": [ { "handle": "xxx", "reason": "...", "mode": "comment"|"all" } ], "updatedAt": "ISO" }
- *        mode: "comment"（默认）仅禁止评论；"all" 禁止一切互动（赞/关注/评论）。
- *   2) 环境变量 COMMENT_BLACKLIST="handle1,handle2,..."（仅 comment 模式）。
+ *        mode: "comment"ï¼ˆé»˜è®¤ï¼‰ä»…ç¦æ­¢è¯„è®ºï¼›"all" ç¦æ­¢ä¸€åˆ‡äº’åŠ¨ï¼ˆèµž/å…³æ³¨/è¯„è®ºï¼‰ã€‚
+ *   2) çŽ¯å¢ƒå˜é‡ COMMENT_BLACKLIST="handle1,handle2,..."ï¼ˆä»… comment æ¨¡å¼ï¼‰ã€‚
  *
- * 匹配：被浏览的 profile handle、帖子 owner handle、caption 里 @ 到的共同作者，任一命中即拦截。
- * 大小写/前导 @ 自动归一。
+ * åŒ¹é…ï¼šè¢«æµè§ˆçš„ profile handleã€å¸–å­ owner handleã€caption é‡Œ @ åˆ°çš„å…±åŒä½œè€…ï¼Œä»»ä¸€å‘½ä¸­å³æ‹¦æˆªã€‚
+ * å¤§å°å†™/å‰å¯¼ @ è‡ªåŠ¨å½’ä¸€ã€‚
  */
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { dirname } from 'node:path';
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
 export interface BlacklistEntry {
   handle: string;
@@ -98,21 +102,21 @@ export const checkBlacklist = (
   for (const cand of candidates) {
     const entry = bl.handles.find((e) => e.handle === cand);
     if (!entry) continue;
-    // comment 模式：任何 entry 都拦截（评论是用户明确诉求，最严格）
-    // all 模式：仅 entry.mode==='all' 拦截（用于赞/关注等全量屏蔽）
+    // comment æ¨¡å¼ï¼šä»»ä½• entry éƒ½æ‹¦æˆªï¼ˆè¯„è®ºæ˜¯ç”¨æˆ·æ˜Žç¡®è¯‰æ±‚ï¼Œæœ€ä¸¥æ ¼ï¼‰
+    // all æ¨¡å¼ï¼šä»… entry.mode==='all' æ‹¦æˆªï¼ˆç”¨äºŽèµž/å…³æ³¨ç­‰å…¨é‡å±è”½ï¼‰
     if (want === 'comment') return { blacklisted: true, entry, matched: cand };
     if (want === 'all' && entry.mode === 'all') return { blacklisted: true, entry, matched: cand };
   }
   return { blacklisted: false, matched: '' };
 };
 
-/** 便捷封装：是否禁止写评论（默认查询） */
+/** ä¾¿æ·å°è£…ï¼šæ˜¯å¦ç¦æ­¢å†™è¯„è®ºï¼ˆé»˜è®¤æŸ¥è¯¢ï¼‰ */
 export const isCommentBlacklisted = (
   handle: string,
   opts?: { ownerHandle?: string; caption?: string }
 ): boolean => checkBlacklist(handle, { ...opts, mode: 'comment' }).blacklisted;
 
-/** 便捷封装：是否禁止一切互动（赞/关注/评论）。仅 mode==='all' 的条目触发。 */
+/** ä¾¿æ·å°è£…ï¼šæ˜¯å¦ç¦æ­¢ä¸€åˆ‡äº’åŠ¨ï¼ˆèµž/å…³æ³¨/è¯„è®ºï¼‰ã€‚ä»… mode==='all' çš„æ¡ç›®è§¦å‘ã€‚ */
 export const isAllEngageBlacklisted = (
   handle: string,
   opts?: { ownerHandle?: string; caption?: string }

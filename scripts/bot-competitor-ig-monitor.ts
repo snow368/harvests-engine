@@ -1,27 +1,27 @@
-/**
+﻿/**
  * bot-competitor-ig-monitor.ts
- * ─────────────────────────────────────────────────────────────────────────
- * 竞品 Instagram 新品监测 → 写回 AI Core 知识库（competitors:tattoo 租户）。
+ * â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+ * ç«žå“ Instagram æ–°å“ç›‘æµ‹ â†’ å†™å›ž AI Core çŸ¥è¯†åº“ï¼ˆcompetitors:tattoo ç§Ÿæˆ·ï¼‰ã€‚
  *
- * 背景：bot-worker-cloak.ts 的 supply_analysis 已经能抓竞品 supply 品牌 IG 并
- * 分析上新玩法，但它只做本地分析，从不把「新品」写回知识库。本脚本补上这最后一环：
- * 把竞品账号的帖子写成 memory_item（brand=竞品, first_seen=发帖时间），复用现有
- * 供给侧 diff 引擎（captureSnapshot / listIntelEvents）自动在「新品情报」板冒出。
+ * èƒŒæ™¯ï¼šbot-worker-cloak.ts çš„ supply_analysis å·²ç»èƒ½æŠ“ç«žå“ supply å“ç‰Œ IG å¹¶
+ * åˆ†æžä¸Šæ–°çŽ©æ³•ï¼Œä½†å®ƒåªåšæœ¬åœ°åˆ†æžï¼Œä»Žä¸æŠŠã€Œæ–°å“ã€å†™å›žçŸ¥è¯†åº“ã€‚æœ¬è„šæœ¬è¡¥ä¸Šè¿™æœ€åŽä¸€çŽ¯ï¼š
+ * æŠŠç«žå“è´¦å·çš„å¸–å­å†™æˆ memory_itemï¼ˆbrand=ç«žå“, first_seen=å‘å¸–æ—¶é—´ï¼‰ï¼Œå¤ç”¨çŽ°æœ‰
+ * ä¾›ç»™ä¾§ diff å¼•æ“Žï¼ˆcaptureSnapshot / listIntelEventsï¼‰è‡ªåŠ¨åœ¨ã€Œæ–°å“æƒ…æŠ¥ã€æ¿å†’å‡ºã€‚
  *
- * 复用：
- *  - Playwright 已登录 Chrome（默认 CDP http://localhost:9222，与 bot-worker 同 session）
- *  - _scrape_brand_posts.ts 的 post 页解析（caption + 图片 + postedAt，JSON script 提取）
- *  - AI Core createMemory 字段（见 D:\harvests-ai-core\packages\memory\src\index.ts）
+ * å¤ç”¨ï¼š
+ *  - Playwright å·²ç™»å½• Chromeï¼ˆé»˜è®¤ CDP http://localhost:9222ï¼Œä¸Ž bot-worker åŒ sessionï¼‰
+ *  - _scrape_brand_posts.ts çš„ post é¡µè§£æžï¼ˆcaption + å›¾ç‰‡ + postedAtï¼ŒJSON script æå–ï¼‰
+ *  - AI Core createMemory å­—æ®µï¼ˆè§ D:\harvests-ai-core\packages\memory\src\index.tsï¼‰
  *
- * 去重新品逻辑（即用户说的「先用 bot worker 比对下，后续发的就是新品」）：
- *  - 首跑 / --baseline：把竞品现有帖子全量灌入，first_seen = 真实发帖时间 → 不当新品
- *  - 增量：按 post shortcode 去重，从未见过的帖 → first_seen = now → 在「新品」板冒出
+ * åŽ»é‡æ–°å“é€»è¾‘ï¼ˆå³ç”¨æˆ·è¯´çš„ã€Œå…ˆç”¨ bot worker æ¯”å¯¹ä¸‹ï¼ŒåŽç»­å‘çš„å°±æ˜¯æ–°å“ã€ï¼‰ï¼š
+ *  - é¦–è·‘ / --baselineï¼šæŠŠç«žå“çŽ°æœ‰å¸–å­å…¨é‡çŒå…¥ï¼Œfirst_seen = çœŸå®žå‘å¸–æ—¶é—´ â†’ ä¸å½“æ–°å“
+ *  - å¢žé‡ï¼šæŒ‰ post shortcode åŽ»é‡ï¼Œä»Žæœªè§è¿‡çš„å¸– â†’ first_seen = now â†’ åœ¨ã€Œæ–°å“ã€æ¿å†’å‡º
  *
- * 用法：
- *  npx tsx scripts/bot-competitor-ig-monitor.ts            # 跑一轮增量（默认）
- *  npx tsx scripts/bot-competitor-ig-monitor.ts --baseline # 全量灌基线
- *  npx tsx scripts/bot-competitor-ig-monitor.ts --loop --interval-min 360  # 每 6h 一轮
- *  npx tsx scripts/bot-competitor-ig-monitor.ts --include-all  # 非关键词帖也存为 social_post
+ * ç”¨æ³•ï¼š
+ *  npx tsx scripts/bot-competitor-ig-monitor.ts            # è·‘ä¸€è½®å¢žé‡ï¼ˆé»˜è®¤ï¼‰
+ *  npx tsx scripts/bot-competitor-ig-monitor.ts --baseline # å…¨é‡çŒåŸºçº¿
+ *  npx tsx scripts/bot-competitor-ig-monitor.ts --loop --interval-min 360  # æ¯ 6h ä¸€è½®
+ *  npx tsx scripts/bot-competitor-ig-monitor.ts --include-all  # éžå…³é”®è¯å¸–ä¹Ÿå­˜ä¸º social_post
  */
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
 import fs from 'node:fs';
@@ -29,18 +29,22 @@ import path from 'node:path';
 import dns from 'node:dns';
 import { fileURLToPath } from 'node:url';
 import 'dotenv/config';
+import { fileURLToPath } from 'node:url';
+import { dirname } from 'node:path';
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
-// Windows 上 localhost 常先解析到 IPv6(::1)，而 Chrome 的 CDP 只监听 127.0.0.1(IPv4)。
-// 这会导致 connectOverCDP 的 WebSocket 握手失败、被误报为「CDP 不可用」。强制 IPv4 优先。
+// Windows ä¸Š localhost å¸¸å…ˆè§£æžåˆ° IPv6(::1)ï¼Œè€Œ Chrome çš„ CDP åªç›‘å¬ 127.0.0.1(IPv4)ã€‚
+// è¿™ä¼šå¯¼è‡´ connectOverCDP çš„ WebSocket æ¡æ‰‹å¤±è´¥ã€è¢«è¯¯æŠ¥ä¸ºã€ŒCDP ä¸å¯ç”¨ã€ã€‚å¼ºåˆ¶ IPv4 ä¼˜å…ˆã€‚
 dns.setDefaultResultOrder('ipv4first');
 
-// ── 配置（与 bot-worker-real.ts 同源，方便 VPS 复用 env） ───────────────────
+// â”€â”€ é…ç½®ï¼ˆä¸Ž bot-worker-real.ts åŒæºï¼Œæ–¹ä¾¿ VPS å¤ç”¨ envï¼‰ â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const IG_BASE = (process.env.INSTAGRAM_BASE || 'https://www.instagram.com').replace(/\/+$/, '');
 const AI_CORE_BASE = (process.env.AI_CORE_BASE || 'https://harvests-ai-core-api.inkflowapp.workers.dev').replace(/\/+$/, '');
 const AI_CORE_AUTH = process.env.AI_CORE_AUTH || 'Bearer dev';
 const CDP_URL = (process.env.BOT_CDP_URL || 'http://127.0.0.1:9222').trim();
-// 本机代理（GFW 下抓 IG 必需）。如 http://127.0.0.1:7890 或 socks5://127.0.0.1:7891
-// 兼容：用户常只设 HTTPS_PROXY/HTTP_PROXY，浏览器也必须走同一代理才能抓到 IG
+// æœ¬æœºä»£ç†ï¼ˆGFW ä¸‹æŠ“ IG å¿…éœ€ï¼‰ã€‚å¦‚ http://127.0.0.1:7890 æˆ– socks5://127.0.0.1:7891
+// å…¼å®¹ï¼šç”¨æˆ·å¸¸åªè®¾ HTTPS_PROXY/HTTP_PROXYï¼Œæµè§ˆå™¨ä¹Ÿå¿…é¡»èµ°åŒä¸€ä»£ç†æ‰èƒ½æŠ“åˆ° IG
 const BOT_PROXY = (process.env.BOT_PROXY || '').trim();
 const BROWSER_PROXY = (BOT_PROXY || process.env.HTTPS_PROXY || process.env.HTTP_PROXY || '').trim();
 const PROFILE_DIR = process.env.BOT_PROFILE_DIR || path.join(process.cwd(), 'data', 'bot_profiles', 'competitor_ig');
@@ -52,21 +56,21 @@ const STATE_FILE = path.join(ENGINE_DIR, 'data', 'competitor_ig_state.json');
 const MAX_POSTS_PER_BRAND = 20;
 const MAX_SCROLL = 6;
 
-// 「新品」触发关键词（命中视为上新候选）
+// ã€Œæ–°å“ã€è§¦å‘å…³é”®è¯ï¼ˆå‘½ä¸­è§†ä¸ºä¸Šæ–°å€™é€‰ï¼‰
 const NEW_PRODUCT_KEYWORDS = [
   'new', 'launch', 'drop', 'release', 'restock', 'back in stock', 'pre-order', 'preorder',
   'now available', 'just dropped', 'now live', 'fresh drop',
-  '上架', '上新', '新品', '新款', '补货', '现货', '开售', '首发', '预售',
+  'ä¸Šæž¶', 'ä¸Šæ–°', 'æ–°å“', 'æ–°æ¬¾', 'è¡¥è´§', 'çŽ°è´§', 'å¼€å”®', 'é¦–å‘', 'é¢„å”®',
 ];
-// 次要信号：caption 里出现 SKU 形态（如 CON-1209MG / PEACH-0803RL）
+// æ¬¡è¦ä¿¡å·ï¼šcaption é‡Œå‡ºçŽ° SKU å½¢æ€ï¼ˆå¦‚ CON-1209MG / PEACH-0803RLï¼‰
 const SKU_RE = /\b(PEACH-|CON-|AES-|COG-|CAN-BU-|KW-|MG|RL|RS|MAG)\b[\w-]*/i;
 
 const jitter = (min: number, max: number) => Math.floor(Math.random() * (max - min + 1)) + min;
 
-// ── 读取监视列表 ──────────────────────────────────────────────────────────
+// â”€â”€ è¯»å–ç›‘è§†åˆ—è¡¨ â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 function loadWatchList(): { brand: string; handle: string; tenant: string }[] {
   const out: { brand: string; handle: string; tenant: string }[] = [];
-  // 1) JSON 配置文件（与 _scrape_brand_posts.ts 用 data/brand_database.json 同一约定）
+  // 1) JSON é…ç½®æ–‡ä»¶ï¼ˆä¸Ž _scrape_brand_posts.ts ç”¨ data/brand_database.json åŒä¸€çº¦å®šï¼‰
   if (fs.existsSync(WATCH_FILE)) {
     try {
       const cfg = JSON.parse(fs.readFileSync(WATCH_FILE, 'utf8'));
@@ -74,14 +78,14 @@ function loadWatchList(): { brand: string; handle: string; tenant: string }[] {
         if (c.brand && c.handle && c.handle !== 'REPLACE_WITH_REAL_HANDLE') {
           out.push({ brand: c.brand, handle: String(c.handle).replace(/^@/, ''), tenant: c.tenant || 'competitors:tattoo' });
         } else if (c.handle === 'REPLACE_WITH_REAL_HANDLE') {
-          console.warn(`[warn] ${c.brand}: handle 仍是占位符，跳过（请在 data/competitor_watch.json 填入真实 IG handle）`);
+          console.warn(`[warn] ${c.brand}: handle ä»æ˜¯å ä½ç¬¦ï¼Œè·³è¿‡ï¼ˆè¯·åœ¨ data/competitor_watch.json å¡«å…¥çœŸå®ž IG handleï¼‰`);
         }
       }
     } catch (e: any) {
-      console.warn('[warn] 读取 competitor_watch.json 失败:', e.message);
+      console.warn('[warn] è¯»å– competitor_watch.json å¤±è´¥:', e.message);
     }
   }
-  // 2) 环境变量覆盖：COMPETITOR_HANDLES=painpleasure:@handle,brand2:@handle2
+  // 2) çŽ¯å¢ƒå˜é‡è¦†ç›–ï¼šCOMPETITOR_HANDLES=painpleasure:@handle,brand2:@handle2
   const env = (process.env.COMPETITOR_HANDLES || '').split(',').map((s) => s.trim()).filter(Boolean);
   for (const e of env) {
     const [brand, handle] = e.split(':').map((s) => s.trim());
@@ -90,7 +94,7 @@ function loadWatchList(): { brand: string; handle: string; tenant: string }[] {
   return out;
 }
 
-// ── 本地去重状态 ──────────────────────────────────────────────────────────
+// â”€â”€ æœ¬åœ°åŽ»é‡çŠ¶æ€ â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 function loadState(): Record<string, { lastRun: string; seen: Record<string, string> }> {
   if (!fs.existsSync(STATE_FILE)) return {};
   try { return JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')); } catch { return {}; }
@@ -99,7 +103,7 @@ function saveState(s: Record<string, { lastRun: string; seen: Record<string, str
   fs.writeFileSync(STATE_FILE, JSON.stringify(s, null, 2), 'utf8');
 }
 
-// ── AI Core 写回（mirror bot-worker-real.ts 的 aicorePost） ─────────────────
+// â”€â”€ AI Core å†™å›žï¼ˆmirror bot-worker-real.ts çš„ aicorePostï¼‰ â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 async function aicorePost(tenant: string, body: Record<string, any>): Promise<any> {
   const url = `${AI_CORE_BASE}/${tenant}/memory`;
   try {
@@ -123,7 +127,7 @@ async function aicorePost(tenant: string, body: Record<string, any>): Promise<an
   }
 }
 
-// ── 浏览器：优先 CDP 复用已登录 session，否则 persistent ───────────────────
+// â”€â”€ æµè§ˆå™¨ï¼šä¼˜å…ˆ CDP å¤ç”¨å·²ç™»å½• sessionï¼Œå¦åˆ™ persistent â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 async function launchBrowser(): Promise<{ browser: Browser; context: BrowserContext; page: Page; viaCdp: boolean }> {
   try {
     const browser = await chromium.connectOverCDP(CDP_URL);
@@ -134,7 +138,7 @@ async function launchBrowser(): Promise<{ browser: Browser; context: BrowserCont
     return { browser, context, page, viaCdp: true };
   } catch (e: any) {
     const reason = e?.message?.split('\n')[0] || e?.code || 'unknown';
-    console.log(`[browser] CDP 不可用 (${reason})，回退 persistent profile ${PROFILE_DIR}`);
+    console.log(`[browser] CDP ä¸å¯ç”¨ (${reason})ï¼Œå›žé€€ persistent profile ${PROFILE_DIR}`);
     const ctxOpts: any = {
       headless: false, channel: 'chrome',
       viewport: { width: 1280, height: 900 },
@@ -144,7 +148,7 @@ async function launchBrowser(): Promise<{ browser: Browser; context: BrowserCont
     };
     if (BROWSER_PROXY) {
       ctxOpts.proxy = { server: BROWSER_PROXY };
-      console.log(`[browser] 使用代理 ${BROWSER_PROXY}`);
+      console.log(`[browser] ä½¿ç”¨ä»£ç† ${BROWSER_PROXY}`);
     }
     const context = await chromium.launchPersistentContext(PROFILE_DIR, ctxOpts);
     const page = context.pages()[0] || await context.newPage();
@@ -152,7 +156,7 @@ async function launchBrowser(): Promise<{ browser: Browser; context: BrowserCont
   }
 }
 
-// ── 抓主页 tile 链接（复用 _scrape_brand_posts 选择器） ───────────────────
+// â”€â”€ æŠ“ä¸»é¡µ tile é“¾æŽ¥ï¼ˆå¤ç”¨ _scrape_brand_posts é€‰æ‹©å™¨ï¼‰ â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 async function scrapeProfileTiles(page: Page, handle: string, maxN: number): Promise<string[]> {
   await page.goto(`${IG_BASE}/${handle}/`, { waitUntil: 'domcontentloaded', timeout: 30000 });
   await page.waitForSelector('main', { state: 'visible', timeout: 20000 }).catch(() => {});
@@ -171,9 +175,9 @@ async function scrapeProfileTiles(page: Page, handle: string, maxN: number): Pro
   return [...seen].slice(0, maxN);
 }
 
-// ── 抓 post 页内容（复用 _scrape_brand_posts.scrapePost 的 JSON 提取） ──────
-// ── 抓 post 页完整内容（caption + 全部图片 + 评论 + 互动量） ─────────────
-// 返回整篇帖子素材，供 content pipeline 生成社媒图/视频直接取用。
+// â”€â”€ æŠ“ post é¡µå†…å®¹ï¼ˆå¤ç”¨ _scrape_brand_posts.scrapePost çš„ JSON æå–ï¼‰ â”€â”€â”€â”€â”€â”€
+// â”€â”€ æŠ“ post é¡µå®Œæ•´å†…å®¹ï¼ˆcaption + å…¨éƒ¨å›¾ç‰‡ + è¯„è®º + äº’åŠ¨é‡ï¼‰ â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// è¿”å›žæ•´ç¯‡å¸–å­ç´ æï¼Œä¾› content pipeline ç”Ÿæˆç¤¾åª’å›¾/è§†é¢‘ç›´æŽ¥å–ç”¨ã€‚
 async function scrapePost(page: Page, url: string): Promise<{
   caption: string; imageUrl: string; postedAt: string;
   imageUrls: string[]; comments: { author: string; text: string; likes: number }[];
@@ -181,20 +185,20 @@ async function scrapePost(page: Page, url: string): Promise<{
 }> {
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 25000 });
   await page.waitForTimeout(jitter(1500, 2500));
-  // 登录墙检测：未登录时 IG 会把 /p/xxx 重定向到 /accounts/login 或塞登录弹窗
+  // ç™»å½•å¢™æ£€æµ‹ï¼šæœªç™»å½•æ—¶ IG ä¼šæŠŠ /p/xxx é‡å®šå‘åˆ° /accounts/login æˆ–å¡žç™»å½•å¼¹çª—
   const loginWall = await page.evaluate(() => {
     const u = location.href;
     if (/\/accounts\/login/i.test(u)) return 'redirected to /accounts/login';
     const t = document.body?.innerText || '';
-    if (/log in to see|Log in to Instagram|登录以查看|请先登录/i.test(t) &&
+    if (/log in to see|Log in to Instagram|ç™»å½•ä»¥æŸ¥çœ‹|è¯·å…ˆç™»å½•/i.test(t) &&
         !document.querySelector('script[type="application/json"]')) return 'login wall dialog';
     return '';
   }).catch(() => '');
-  if (loginWall) throw new Error(`login wall (${loginWall}) — 该 Chrome profile 未登录 Instagram`);
-  // 优先从 post 页内嵌 JSON 抽取完整结构（caption / carousel 图 / 评论 / 互动）
-  // ⚠️ 此块内禁止出现具名函数(声明/表达式都不行)：tsx(esbuild keepNames)会给具名函数
-  //    注入 __name() 包装，而 page.evaluate 会把函数序列化到浏览器执行，浏览器无 __name
-  //    定义会抛 ReferenceError。故 pick 改为内联属性访问，保留零具名函数。
+  if (loginWall) throw new Error(`login wall (${loginWall}) â€” è¯¥ Chrome profile æœªç™»å½• Instagram`);
+  // ä¼˜å…ˆä»Ž post é¡µå†…åµŒ JSON æŠ½å–å®Œæ•´ç»“æž„ï¼ˆcaption / carousel å›¾ / è¯„è®º / äº’åŠ¨ï¼‰
+  // âš ï¸ æ­¤å—å†…ç¦æ­¢å‡ºçŽ°å…·åå‡½æ•°(å£°æ˜Ž/è¡¨è¾¾å¼éƒ½ä¸è¡Œ)ï¼štsx(esbuild keepNames)ä¼šç»™å…·åå‡½æ•°
+  //    æ³¨å…¥ __name() åŒ…è£…ï¼Œè€Œ page.evaluate ä¼šæŠŠå‡½æ•°åºåˆ—åŒ–åˆ°æµè§ˆå™¨æ‰§è¡Œï¼Œæµè§ˆå™¨æ—  __name
+  //    å®šä¹‰ä¼šæŠ› ReferenceErrorã€‚æ•… pick æ”¹ä¸ºå†…è”å±žæ€§è®¿é—®ï¼Œä¿ç•™é›¶å…·åå‡½æ•°ã€‚
   const data = await page.evaluate(() => {
     const scripts = Array.from(document.querySelectorAll('script[type="application/json"]'));
     let media: any = null;
@@ -244,7 +248,7 @@ async function scrapePost(page: Page, url: string): Promise<{
       postedAt: data.postedAt || '',
     };
   }
-  // 兜底：只拿 caption + og:image（评论/多图拿不到）
+  // å…œåº•ï¼šåªæ‹¿ caption + og:imageï¼ˆè¯„è®º/å¤šå›¾æ‹¿ä¸åˆ°ï¼‰
   const caption = await page.locator('div[role="dialog"] ul > li').first().innerText().catch(() => '')
     || await page.locator('article h1').first().innerText().catch(() => '');
   const imageUrl = await page.evaluate(() => document.querySelector('meta[property="og:image"]')?.getAttribute('content') || '').catch(() => '');
@@ -269,19 +273,19 @@ function keywordHits(text: string): string[] {
   return NEW_PRODUCT_KEYWORDS.filter((k) => lower.includes(k.toLowerCase()));
 }
 
-// 评论相关性分类：判断一条评论是否"对项目有用"，并标注意图。
-// 注意：这里只打标签，不丢弃——整篇帖子（含全部评论）都会存，方便 content
-// pipeline 取完整上下文；"有用"标签用于留言洞察筛选。
+// è¯„è®ºç›¸å…³æ€§åˆ†ç±»ï¼šåˆ¤æ–­ä¸€æ¡è¯„è®ºæ˜¯å¦"å¯¹é¡¹ç›®æœ‰ç”¨"ï¼Œå¹¶æ ‡æ³¨æ„å›¾ã€‚
+// æ³¨æ„ï¼šè¿™é‡Œåªæ‰“æ ‡ç­¾ï¼Œä¸ä¸¢å¼ƒâ€”â€”æ•´ç¯‡å¸–å­ï¼ˆå«å…¨éƒ¨è¯„è®ºï¼‰éƒ½ä¼šå­˜ï¼Œæ–¹ä¾¿ content
+// pipeline å–å®Œæ•´ä¸Šä¸‹æ–‡ï¼›"æœ‰ç”¨"æ ‡ç­¾ç”¨äºŽç•™è¨€æ´žå¯Ÿç­›é€‰ã€‚
 const COMMENT_INTENT_KEYWORDS: Record<string, string[]> = {
-  product_question: ['where', 'buy', 'price', 'how much', 'cost', 'available', 'in stock', 'restock', 'link', 'shop', 'order', '哪', '买', '多少钱', '有货', '补货', '链接', '求', '入手', '同款', '现货', '店铺'],
-  complaint: ['broken', 'broke', 'sucks', 'disappointed', 'fake', 'scam', 'terrible', 'bad quality', '差', '坏', '假', '坑', '失望', '垃圾', '劣质', '退货', '投诉'],
-  lead: ['want', 'need', 'looking for', 'interested', 'dm me', 'want this', '想要', '需要', '私', '感兴趣', '求购', '蹲'],
-  praise: ['love', 'amazing', 'great', 'perfect', 'obsessed', '好看', '喜欢', '美', '绝', '爱了', '太棒', 'nice'],
+  product_question: ['where', 'buy', 'price', 'how much', 'cost', 'available', 'in stock', 'restock', 'link', 'shop', 'order', 'å“ª', 'ä¹°', 'å¤šå°‘é’±', 'æœ‰è´§', 'è¡¥è´§', 'é“¾æŽ¥', 'æ±‚', 'å…¥æ‰‹', 'åŒæ¬¾', 'çŽ°è´§', 'åº—é“º'],
+  complaint: ['broken', 'broke', 'sucks', 'disappointed', 'fake', 'scam', 'terrible', 'bad quality', 'å·®', 'å', 'å‡', 'å‘', 'å¤±æœ›', 'åžƒåœ¾', 'åŠ£è´¨', 'é€€è´§', 'æŠ•è¯‰'],
+  lead: ['want', 'need', 'looking for', 'interested', 'dm me', 'want this', 'æƒ³è¦', 'éœ€è¦', 'ç§', 'æ„Ÿå…´è¶£', 'æ±‚è´­', 'è¹²'],
+  praise: ['love', 'amazing', 'great', 'perfect', 'obsessed', 'å¥½çœ‹', 'å–œæ¬¢', 'ç¾Ž', 'ç»', 'çˆ±äº†', 'å¤ªæ£’', 'nice'],
 };
 function classifyComment(text: string): { useful: boolean; intent: string } {
   const t = (text || '').toLowerCase();
   if (!t.trim()) return { useful: false, intent: 'empty' };
-  // 纯表情 / 过短 = 噪音，不打有用标签
+  // çº¯è¡¨æƒ… / è¿‡çŸ­ = å™ªéŸ³ï¼Œä¸æ‰“æœ‰ç”¨æ ‡ç­¾
   const stripped = t.replace(/[\p{Emoji}\s]/gu, '');
   if (stripped.length < 3) return { useful: false, intent: 'noise' };
   for (const [intent, kws] of Object.entries(COMMENT_INTENT_KEYWORDS)) {
@@ -290,10 +294,10 @@ function classifyComment(text: string): { useful: boolean; intent: string } {
   return { useful: false, intent: 'other' };
 }
 
-// ── 主流程 ────────────────────────────────────────────────────────────────
+// â”€â”€ ä¸»æµç¨‹ â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 async function runCompetitor(c: { brand: string; handle: string; tenant: string }, opts: { baseline: boolean; includeAll: boolean }, state: Record<string, any>) {
   const tiles = await scrapeProfileTiles(page!, c.handle, MAX_POSTS_PER_BRAND);
-  console.log(`\n[${c.brand}] @${c.handle}: ${tiles.length} 帖`);
+  console.log(`\n[${c.brand}] @${c.handle}: ${tiles.length} å¸–`);
   const brandState = state[c.brand] || { lastRun: '', seen: {} as Record<string, string> };
   let wroteNew = 0, wroteBaseline = 0, skipped = 0, wrotePosts = 0, fetchFail = 0;
 
@@ -301,7 +305,7 @@ async function runCompetitor(c: { brand: string; handle: string; tenant: string 
     const code = shortcodeFromUrl(url);
     const alreadySeen = !!brandState.seen[code];
     const post = await scrapePost(page!, url).catch((e: any) => {
-      console.warn(`  [抓取失败] ${code}: ${(e && e.message) || e}`);
+      console.warn(`  [æŠ“å–å¤±è´¥] ${code}: ${(e && e.message) || e}`);
       return null;
     });
     if (!post) { skipped++; fetchFail++; continue; }
@@ -309,17 +313,17 @@ async function runCompetitor(c: { brand: string; handle: string; tenant: string 
     const hasSku = SKU_RE.test(post.caption);
     const isNewProduct = hits.length > 0 || hasSku;
 
-    // 记录到 seen（无论是否写入，避免重复处理）
+    // è®°å½•åˆ° seenï¼ˆæ— è®ºæ˜¯å¦å†™å…¥ï¼Œé¿å…é‡å¤å¤„ç†ï¼‰
     if (!alreadySeen) brandState.seen[code] = post.postedAt || new Date().toISOString();
 
     if (alreadySeen) { skipped++; continue; }
 
-    // 整篇帖子（图 + 评论 + 互动量）全量写入 competitor_post，作为 content
-    // pipeline 生成社媒图/视频的原料，以及留言洞察的数据源。每条新帖都写一次。
+    // æ•´ç¯‡å¸–å­ï¼ˆå›¾ + è¯„è®º + äº’åŠ¨é‡ï¼‰å…¨é‡å†™å…¥ competitor_postï¼Œä½œä¸º content
+    // pipeline ç”Ÿæˆç¤¾åª’å›¾/è§†é¢‘çš„åŽŸæ–™ï¼Œä»¥åŠç•™è¨€æ´žå¯Ÿçš„æ•°æ®æºã€‚æ¯æ¡æ–°å¸–éƒ½å†™ä¸€æ¬¡ã€‚
     await writeCompetitorPost(c, code, post, hits);
     wrotePosts++;
 
-    // 首跑/--baseline：全量灌入，first_seen = 真实发帖时间（不当新品）
+    // é¦–è·‘/--baselineï¼šå…¨é‡çŒå…¥ï¼Œfirst_seen = çœŸå®žå‘å¸–æ—¶é—´ï¼ˆä¸å½“æ–°å“ï¼‰
     if (opts.baseline) {
       await writeMemory(c, code, post, false, hits, opts.includeAll);
       wroteBaseline++;
@@ -327,7 +331,7 @@ async function runCompetitor(c: { brand: string; handle: string; tenant: string 
       continue;
     }
 
-    // 增量：只写「新品」候选；非关键词帖默认跳过（--include-all 才存 social_post）
+    // å¢žé‡ï¼šåªå†™ã€Œæ–°å“ã€å€™é€‰ï¼›éžå…³é”®è¯å¸–é»˜è®¤è·³è¿‡ï¼ˆ--include-all æ‰å­˜ social_postï¼‰
     if (isNewProduct) {
       await writeMemory(c, code, post, true, hits, true);
       wroteNew++;
@@ -341,9 +345,9 @@ async function runCompetitor(c: { brand: string; handle: string; tenant: string 
   brandState.lastRun = new Date().toISOString();
   state[c.brand] = brandState;
   const seenSkip = skipped - fetchFail;
-  console.log(`[${c.brand}] 本轮: 整帖(competitor_post)写 ${wrotePosts}, 新品写 ${wroteNew}, 基线写 ${wroteBaseline}, 跳过 ${skipped}(抓取失败 ${fetchFail} / 已见过 ${seenSkip})`);
+  console.log(`[${c.brand}] æœ¬è½®: æ•´å¸–(competitor_post)å†™ ${wrotePosts}, æ–°å“å†™ ${wroteNew}, åŸºçº¿å†™ ${wroteBaseline}, è·³è¿‡ ${skipped}(æŠ“å–å¤±è´¥ ${fetchFail} / å·²è§è¿‡ ${seenSkip})`);
   if (fetchFail > 0 && wrotePosts === 0) {
-    console.log(`  ⚠️ 全部 ${fetchFail} 篇详情抓取失败。最常见原因：该 Chrome profile 未登录 Instagram（详情页 /p/ 被登录墙拦），或代理不稳导致 goto 超时。上面的 [抓取失败] 行给出了每篇的真实原因。`);
+    console.log(`  âš ï¸ å…¨éƒ¨ ${fetchFail} ç¯‡è¯¦æƒ…æŠ“å–å¤±è´¥ã€‚æœ€å¸¸è§åŽŸå› ï¼šè¯¥ Chrome profile æœªç™»å½• Instagramï¼ˆè¯¦æƒ…é¡µ /p/ è¢«ç™»å½•å¢™æ‹¦ï¼‰ï¼Œæˆ–ä»£ç†ä¸ç¨³å¯¼è‡´ goto è¶…æ—¶ã€‚ä¸Šé¢çš„ [æŠ“å–å¤±è´¥] è¡Œç»™å‡ºäº†æ¯ç¯‡çš„çœŸå®žåŽŸå› ã€‚`);
   }
 }
 
@@ -378,9 +382,9 @@ async function writeMemory(
   });
 }
 
-// 写整篇帖子素材（caption + 全部图片 + 评论 + 互动量）为 competitor_post 类型。
-// 这是 content pipeline 生成社媒图/视频的原料，也是「留言洞察」的数据源。
-// 评论逐条打 useful/intent 标签（不打标签不丢弃），方便前端筛选「有用留言」。
+// å†™æ•´ç¯‡å¸–å­ç´ æï¼ˆcaption + å…¨éƒ¨å›¾ç‰‡ + è¯„è®º + äº’åŠ¨é‡ï¼‰ä¸º competitor_post ç±»åž‹ã€‚
+// è¿™æ˜¯ content pipeline ç”Ÿæˆç¤¾åª’å›¾/è§†é¢‘çš„åŽŸæ–™ï¼Œä¹Ÿæ˜¯ã€Œç•™è¨€æ´žå¯Ÿã€çš„æ•°æ®æºã€‚
+// è¯„è®ºé€æ¡æ‰“ useful/intent æ ‡ç­¾ï¼ˆä¸æ‰“æ ‡ç­¾ä¸ä¸¢å¼ƒï¼‰ï¼Œæ–¹ä¾¿å‰ç«¯ç­›é€‰ã€Œæœ‰ç”¨ç•™è¨€ã€ã€‚
 async function writeCompetitorPost(
   c: { brand: string; handle: string; tenant: string },
   code: string,
@@ -421,7 +425,7 @@ async function writeCompetitorPost(
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-// ── 入口 ──────────────────────────────────────────────────────────────────
+// â”€â”€ å…¥å£ â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 let page: Page | null = null;
 async function main() {
   const args = process.argv.slice(2);
@@ -432,11 +436,11 @@ async function main() {
 
   const watch = loadWatchList();
   if (watch.length === 0) {
-    console.error('没有可监视的竞品（data/competitor_watch.json 为空或全是占位符，或 COMPETITOR_HANDLES 未设）。退出。');
+    console.error('æ²¡æœ‰å¯ç›‘è§†çš„ç«žå“ï¼ˆdata/competitor_watch.json ä¸ºç©ºæˆ–å…¨æ˜¯å ä½ç¬¦ï¼Œæˆ– COMPETITOR_HANDLES æœªè®¾ï¼‰ã€‚é€€å‡ºã€‚');
     process.exit(1);
   }
   console.log(`=== Competitor IG Monitor (baseline=${baseline}, includeAll=${includeAll}) ===`);
-  console.log(`监视: ${watch.map((w) => `${w.brand}@${w.handle}`).join(', ')}`);
+  console.log(`ç›‘è§†: ${watch.map((w) => `${w.brand}@${w.handle}`).join(', ')}`);
 
   const { browser, page: p, viaCdp } = await launchBrowser();
   page = p;
@@ -445,7 +449,7 @@ async function main() {
     const state = loadState();
     for (const c of watch) {
       try { await runCompetitor(c, { baseline, includeAll }, state); }
-      catch (e: any) { console.warn(`[${c.brand}] 失败: ${e.message?.slice(0, 100)}`); }
+      catch (e: any) { console.warn(`[${c.brand}] å¤±è´¥: ${e.message?.slice(0, 100)}`); }
       await sleep(jitter(2000, 4000));
     }
     saveState(state);
@@ -453,16 +457,16 @@ async function main() {
 
   await tick();
   if (loop) {
-    console.log(`\n进入循环模式，每 ${intervalMin} 分钟一轮 (Ctrl+C 退出)`);
+    console.log(`\nè¿›å…¥å¾ªçŽ¯æ¨¡å¼ï¼Œæ¯ ${intervalMin} åˆ†é’Ÿä¸€è½® (Ctrl+C é€€å‡º)`);
     while (true) { await sleep(intervalMin * 60_000); await tick(); }
   }
-  // CDP 模式复用 bot-worker 的 Chrome，绝不关闭；仅 persistent 回退时才关
+  // CDP æ¨¡å¼å¤ç”¨ bot-worker çš„ Chromeï¼Œç»ä¸å…³é—­ï¼›ä»… persistent å›žé€€æ—¶æ‰å…³
   if (!viaCdp) {
     try { await browser.close(); } catch {}
   }
 }
 
-// 仅在直接运行时执行（被 import 时不跑，方便将来复用函数）
+// ä»…åœ¨ç›´æŽ¥è¿è¡Œæ—¶æ‰§è¡Œï¼ˆè¢« import æ—¶ä¸è·‘ï¼Œæ–¹ä¾¿å°†æ¥å¤ç”¨å‡½æ•°ï¼‰
 const invoked = process.argv[1]?.replace(/\\/g, '/').endsWith('bot-competitor-ig-monitor.ts');
 if (invoked) {
   main().catch((e) => { console.error('Fatal:', e?.message || e); process.exit(1); });

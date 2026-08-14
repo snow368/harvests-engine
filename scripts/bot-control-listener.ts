@@ -1,25 +1,29 @@
-/**
+﻿/**
  * bot-control-listener.ts
- * ─────────────────────────────────────────────────────────────────────────
- * VPS 控制平面 listener：把 cloud-api 的 bot 指令队列翻译成 pm2 启停。
+ * â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+ * VPS æŽ§åˆ¶å¹³é¢ listenerï¼šæŠŠ cloud-api çš„ bot æŒ‡ä»¤é˜Ÿåˆ—ç¿»è¯‘æˆ pm2 å¯åœã€‚
  *
- * 链路：前端「Run/Stop」→ cloud-api POST /api/bot/worker/start|stop
- *       → 写 D1 bot_commands(pending) → 本 listener 轮询 GET /api/bot/commands
- *       → 执行 pm2 start/stop <进程> → POST /api/bot/commands/report 回写结果。
+ * é“¾è·¯ï¼šå‰ç«¯ã€ŒRun/Stopã€â†’ cloud-api POST /api/bot/worker/start|stop
+ *       â†’ å†™ D1 bot_commands(pending) â†’ æœ¬ listener è½®è¯¢ GET /api/bot/commands
+ *       â†’ æ‰§è¡Œ pm2 start/stop <è¿›ç¨‹> â†’ POST /api/bot/commands/report å›žå†™ç»“æžœã€‚
  *
- * 这样前台无需直连 VPS，只需 cloud-api 一个出口即可远程操控 pm2 守护的 bot。
+ * è¿™æ ·å‰å°æ— éœ€ç›´è¿ž VPSï¼Œåªéœ€ cloud-api ä¸€ä¸ªå‡ºå£å³å¯è¿œç¨‹æ“æŽ§ pm2 å®ˆæŠ¤çš„ botã€‚
  *
- * 环境变量：
- *   CLOUD_API_BASE  默认 https://harvests-cloud-api.inkflowapp.workers.dev
- *   BOT_API_TOKEN   必须与 cloud-api 的 BOT_API_TOKEN 一致（默认 vps-bot-secret-2024）
- *   LISTENER_INTERVAL_MS  轮询间隔，默认 10000
+ * çŽ¯å¢ƒå˜é‡ï¼š
+ *   CLOUD_API_BASE  é»˜è®¤ https://harvests-cloud-api.inkflowapp.workers.dev
+ *   BOT_API_TOKEN   å¿…é¡»ä¸Ž cloud-api çš„ BOT_API_TOKEN ä¸€è‡´ï¼ˆé»˜è®¤ vps-bot-secret-2024ï¼‰
+ *   LISTENER_INTERVAL_MS  è½®è¯¢é—´éš”ï¼Œé»˜è®¤ 10000
  *
- * 启动：npx tsx scripts/bot-control-listener.ts   （或加入 ecosystem.config.cjs）
+ * å¯åŠ¨ï¼šnpx tsx scripts/bot-control-listener.ts   ï¼ˆæˆ–åŠ å…¥ ecosystem.config.cjsï¼‰
  */
 import { exec } from 'node:child_process';
 import { promisify } from 'node:util';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { dirname } from 'node:path';
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
 const execAsync = promisify(exec);
 
@@ -27,7 +31,7 @@ const CLOUD_API_BASE = (process.env.CLOUD_API_BASE || 'https://harvests-cloud-ap
 const BOT_API_TOKEN = process.env.BOT_API_TOKEN || 'vps-bot-secret-2024';
 const INTERVAL_MS = Number(process.env.LISTENER_INTERVAL_MS || '10000');
 
-// functionId → pm2 进程名（与 ecosystem.config.cjs 的 name 对齐）
+// functionId â†’ pm2 è¿›ç¨‹åï¼ˆä¸Ž ecosystem.config.cjs çš„ name å¯¹é½ï¼‰
 const FUNCTION_TO_PM2: Record<string, string> = {
   ig_outreach: 'bot-worker',
   competitor_ig: 'competitor-ig-monitor',
@@ -37,8 +41,8 @@ const FUNCTION_TO_PM2: Record<string, string> = {
   general_intel: 'general-intel',
 };
 
-// 前端配置落盘路径（与 bot-general-intel.ts 约定一致）：listener 在 start 时把
-// 前端卡片的 env 写入该文件，worker 启动时读取并合并（前端配置优先于 ecosystem.env）。
+// å‰ç«¯é…ç½®è½ç›˜è·¯å¾„ï¼ˆä¸Ž bot-general-intel.ts çº¦å®šä¸€è‡´ï¼‰ï¼šlistener åœ¨ start æ—¶æŠŠ
+// å‰ç«¯å¡ç‰‡çš„ env å†™å…¥è¯¥æ–‡ä»¶ï¼Œworker å¯åŠ¨æ—¶è¯»å–å¹¶åˆå¹¶ï¼ˆå‰ç«¯é…ç½®ä¼˜å…ˆäºŽ ecosystem.envï¼‰ã€‚
 const CONFIG_DIR = path.resolve(__dirname, '..', 'data');
 const GENERAL_INTEL_CONFIG = path.join(CONFIG_DIR, 'general-intel.config.json');
 
@@ -59,7 +63,7 @@ async function fetchCommands(): Promise<Cmd[]> {
 async function runPm2(pm2Name: string, action: 'start' | 'stop'): Promise<{ ok: boolean; error?: string }> {
   try {
     if (action === 'start') {
-      // 若已运行则 restart，否则 start；统一用 restart 最稳
+      // è‹¥å·²è¿è¡Œåˆ™ restartï¼Œå¦åˆ™ startï¼›ç»Ÿä¸€ç”¨ restart æœ€ç¨³
       await execAsync(`pm2 restart ${pm2Name} || pm2 start ${pm2Name}`);
     } else {
       await execAsync(`pm2 stop ${pm2Name}`);
@@ -85,25 +89,25 @@ async function report(id: string, ok: boolean, error?: string) {
 async function tick() {
   const cmds = await fetchCommands();
   if (cmds.length === 0) return;
-  console.log(`[listener] ${cmds.length} 条指令`);
+  console.log(`[listener] ${cmds.length} æ¡æŒ‡ä»¤`);
   for (const cmd of cmds) {
     if (!cmd.pm2) {
-      console.warn(`[listener] ${cmd.functionId} 无对应 pm2 进程，跳过`);
+      console.warn(`[listener] ${cmd.functionId} æ— å¯¹åº” pm2 è¿›ç¨‹ï¼Œè·³è¿‡`);
       await report(cmd.id, false, `no pm2 mapping for ${cmd.functionId}`);
       continue;
     }
-    // 通用情报机器人：start 时把前端配置(env)落盘，供 worker 启动读取
+    // é€šç”¨æƒ…æŠ¥æœºå™¨äººï¼šstart æ—¶æŠŠå‰ç«¯é…ç½®(env)è½ç›˜ï¼Œä¾› worker å¯åŠ¨è¯»å–
     if (cmd.action === 'start' && cmd.functionId === 'general_intel' && cmd.env && Object.keys(cmd.env).length > 0) {
       try {
         fs.mkdirSync(CONFIG_DIR, { recursive: true });
         fs.writeFileSync(GENERAL_INTEL_CONFIG, JSON.stringify(cmd.env, null, 2), 'utf8');
-        console.log(`[listener] 写入通用情报配置 → ${GENERAL_INTEL_CONFIG}`);
+        console.log(`[listener] å†™å…¥é€šç”¨æƒ…æŠ¥é…ç½® â†’ ${GENERAL_INTEL_CONFIG}`);
       } catch (e: any) {
-        console.warn(`[listener] 写通用情报配置失败: ${e.message}`);
+        console.warn(`[listener] å†™é€šç”¨æƒ…æŠ¥é…ç½®å¤±è´¥: ${e.message}`);
       }
     }
     const r = await runPm2(cmd.pm2, cmd.action);
-    console.log(`[listener] ${cmd.action} ${cmd.pm2} → ${r.ok ? 'OK' : 'ERR ' + r.error}`);
+    console.log(`[listener] ${cmd.action} ${cmd.pm2} â†’ ${r.ok ? 'OK' : 'ERR ' + r.error}`);
     await report(cmd.id, r.ok, r.error);
   }
 }
@@ -112,7 +116,7 @@ async function main() {
   console.log(`=== Bot Control Listener ===`);
   console.log(`cloud-api: ${CLOUD_API_BASE}`);
   console.log(`interval: ${INTERVAL_MS}ms`);
-  // 立即跑一轮，再进入循环
+  // ç«‹å³è·‘ä¸€è½®ï¼Œå†è¿›å…¥å¾ªçŽ¯
   while (true) {
     try { await tick(); } catch (e: any) { console.warn(`[listener] tick error: ${e.message}`); }
     await new Promise((r) => setTimeout(r, INTERVAL_MS));
