@@ -24,13 +24,14 @@
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 // ============ Config ============
 // é˜²å¾¡ï¼šæ¸…æŽ‰æœ¬åœ°ä»£ç† envï¼ˆæœ¬æœº/VPS çš„ 127.0.0.1:10808 ä»£ç†ç«¯å£åœ¨æ²™ç®±é‡Œä¸å­˜åœ¨ï¼Œä¼šè®© node fetch / python urllib å¤±è´¥ï¼‰
 for (const k of ['HTTPS_PROXY','HTTP_PROXY','https_proxy','http_proxy','ALL_PROXY','all_proxy','NODE_USE_ENV_PROXY']) {
   delete process.env[k];
 }
-const ENGINE_DIR = __dirname; // scripts/
+const ENGINE_DIR = path.dirname(fileURLToPath(import.meta.url)); // scripts/
 const CLOUD_API_BASE = (process.env.CLOUD_API_BASE || 'https://harvests-cloud-api.inkflowapp.workers.dev').replace(/\/+$/, '');
 const BOT_API_TOKEN = (process.env.BOT_API_TOKEN || 'vps-bot-secret-2024').trim();
 const POLL_INTERVAL_MS = Number(process.env.SCRAPE_POLL_INTERVAL_MS) || 60_000;
