@@ -1064,7 +1064,7 @@ async def main():
     if not task_cities:
         if JOB_ID:
             cloud_status('completed', cities_done=len(all_cities), cities_total=len(all_cities), artists_found=len(done_shops))
-        print(json.dumps({"type": "done", "message": "All cities already scraped", "total_shops": len(done_shops)}))
+        print(json.dumps({"type": "done", "message": "All cities already scraped", "total_shops": len(done_shops), "complete": True}))
         await conn.close()
         return
 
@@ -1127,6 +1127,7 @@ async def main():
             # 检查浏览器连接（和旧版一样的检查逻辑）
             if not browser.is_connected():
                 print(json.dumps({"type": "error", "message": f"Browser disconnected at {city}, aborting"}))
+                had_error = True
                 break
 
             print(json.dumps({
@@ -1143,6 +1144,7 @@ async def main():
                 if found == -1:
                     # 重试仍被挡：跳过该城（不标记完成，便于后续重跑重试），继续下一城
                     print(json.dumps({"type": "warn", "message": f"CAPTCHA persists at {city}; skipping for now"}))
+                    had_error = True
                 else:
                     total_found += found
                     success_count += 1
@@ -1184,7 +1186,8 @@ async def main():
         "total_shops": total_shops,
         "state": STATE,
         "csv": MASTER_CSV,
-        "progress_log": PROGRESS_LOG
+        "progress_log": PROGRESS_LOG,
+        "complete": not had_error
     }))
 
 if __name__ == "__main__":

@@ -166,9 +166,11 @@ async function resolveCities(state: string, country: string): Promise<string[]> 
   return [];
 }
 
-function runScraper(state: string, country: string, citiesFile: string, jobId: any): Promise<{ code: number; lastFound: number }> {
+function runScraper(state: string, country: string, citiesFile: string, jobId: any): Promise<{ code: number; lastFound: number; complete: boolean }> {
   return new Promise((resolve) => {
     let lastFound = 0;
+    let complete = false;
+    let stdoutBuffer = '';
     const args = [
       'python_scraper.py',
       '--state', state,
@@ -182,7 +184,7 @@ function runScraper(state: string, country: string, citiesFile: string, jobId: a
       // æ˜¾å¼æŒ‡å®šè¾“å‡ºç›®å½• = å¼•æ“Žæ ¹/data/scrape_outputï¼ˆä¸Žæ¡¥æŽ¥è„šæœ¬ _import_maps_to_d1.py è¯»å–è·¯å¾„ä¸€è‡´ï¼‰ã€‚
       // âš ï¸ 2026-08-06 ä¿®å¤ï¼šENGINE_DIR=__dirname=scripts/ï¼Œè‹¥ä¸ä¼  --output-dirï¼Œscraper çš„ cwd ç›¸å¯¹è·¯å¾„
       //    ä¼šå†™åˆ° scripts/data/scrape_output/ï¼Œä¸Žæ¡¥æŽ¥è¯»çš„ data/scrape_output/ åˆ†è£‚ï¼Œå¯¼è‡´æ¡¥æŽ¥è¯»ä¸åˆ°æ–°æ•°æ®ã€‚
-      '--output-dir', path.join(path.resolve(__dirname, '..'), 'data', 'scrape_output'),
+      '--output-dir', path.join(path.resolve(ENGINE_DIR, '..'), 'data', 'scrape_output'),
     ];
     console.log(`[maps-scrape-sched] â–¶ launching scraper ${state} (${country}) [cdp=${CDP_URL || 'headless'}]`);
     const child = spawn(PYTHON, args, { cwd: ENGINE_DIR, env: SCRAPER_ENV });
@@ -191,28 +193,41 @@ function runScraper(state: string, country: string, citiesFile: string, jobId: a
       child.kill('SIGKILL');
     }, MAX_RUNTIME_MS);
     // è§£æž scraper çš„è¿›åº¦è¾“å‡ºï¼Œå®žæ—¶æ›´æ–°äº‘ç«¯è¿›åº¦æ¡ï¼ˆscraper è‡ªèº« cloud_status å¶å‘ 403ï¼Œè¿™é‡Œå…œåº•ï¼‰
+    const processOutputLine = (line: string) => {
+      if (!line) return;
+      try {
+        const j = JSON.parse(line);
+        if (j && j.type === 'progress' && j.phase === 'end' && typeof j.current === 'number') {
+          lastFound = Number(j.shops_found) || lastFound;
+          setJobStatus(jobId, 'running', undefined, {
+            cities_done: j.current,
+            cities_total: j.total,
+            artists_found: j.shops_found || 0,
+          });
+        } else if (j && j.type === 'done' && typeof j.complete === 'boolean') {
+          complete = j.complete;
+          lastFound = Number(j.total_shops) || lastFound;
+        }
+      } catch { /* not a json progress line */ }
+    };
     child.stdout.on('data', (d) => {
       process.stdout.write(`[scraper:${state}] ${d}`);
-      const str = d.toString();
-      for (const raw of str.split('\n')) {
-        const line = raw.trim();
-        if (!line) continue;
-        try {
-          const j = JSON.parse(line);
-          if (j && j.type === 'progress' && j.phase === 'end' && typeof j.current === 'number') {
-            lastFound = Number(j.shops_found) || lastFound;
-            setJobStatus(jobId, 'running', undefined, {
-              cities_done: j.current,
-              cities_total: j.total,
-              artists_found: j.shops_found || 0,
-            });
-          }
-        } catch { /* not a json progress line */ }
-      }
+      stdoutBuffer += d.toString();
+      const lines = stdoutBuffer.split('\n');
+      stdoutBuffer = lines.pop() || '';
+      for (const raw of lines) processOutputLine(raw.trim());
     });
     child.stderr.on('data', (d) => process.stderr.write(`[scraper:${state}|err] ${d}`));
-    child.on('close', (code) => { clearTimeout(watchdog); resolve({ code: code ?? -1, lastFound }); });
-    child.on('error', (err) => { clearTimeout(watchdog); console.error(`[maps-scrape-sched] spawn error ${state}:`, err.message); resolve(-1); });
+    child.on('close', (code) => {
+      clearTimeout(watchdog);
+      processOutputLine(stdoutBuffer.trim());
+      resolve({ code: code ?? -1, lastFound, complete });
+    });
+    child.on('error', (err) => {
+      clearTimeout(watchdog);
+      console.error(`[maps-scrape-sched] spawn error ${state}:`, err.message);
+      resolve({ code: -1, lastFound, complete: false });
+    });
   });
 }
 
@@ -241,17 +256,23 @@ async function processOne(job: any): Promise<void> {
   const citiesFile = path.join(queueDir, `${state}_cities.txt`);
   fs.writeFileSync(citiesFile, cities.join('\n'), 'utf-8');
 
-  const { code, lastFound } = await runScraper(state, country, citiesFile, id);
+  const { code, lastFound, complete } = await runScraper(state, country, citiesFile, id);
   console.log(`[maps-scrape-sched] ${state} scraper exited code=${code}`);
   // scraper æ­£å¸¸é€€å‡º(code 0)ï¼šä¸»åŠ¨ç½® completedï¼ˆä¸ä¾èµ– scraper è‡ªèº« cloud_status ä¸ŠæŠ¥ï¼Œ
   // å…¶ urllib å¶å‘è¢« Cloudflare æ‹¦ 403 å¯¼è‡´ completed æ¼æŠ¥ï¼Œä»»åŠ¡å¡åœ¨ runningï¼‰
-  if (code === 0) {
+  if (code === 0 && complete) {
     await setJobStatus(id, 'completed', undefined, {
       cities_done: cities.length,
       cities_total: cities.length,
       artists_found: lastFound,
     });
     console.log(`[maps-scrape-sched] ${state} marked completed (cities=${cities.length}, artists=${lastFound})`);
+  } else if (code === 0) {
+    await setJobStatus(id, 'running', 'incomplete cities remain; scheduler will resume', {
+      cities_total: cities.length,
+      artists_found: lastFound,
+    });
+    console.warn(`[maps-scrape-sched] ${state} has incomplete cities; leaving job running for resume`);
   } else {
     // å¼‚å¸¸é€€å‡º(-1/éž0)ä¸”ä» pending/runningï¼Œæ ‡ failed é˜²æ­»å¾ªçŽ¯
     const jobs = await fetchJobs();
