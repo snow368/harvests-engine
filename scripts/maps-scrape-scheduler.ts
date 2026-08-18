@@ -24,10 +24,6 @@
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { dirname } from 'node:path';
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
 
 // ============ Config ============
 // é˜²å¾¡ï¼šæ¸…æŽ‰æœ¬åœ°ä»£ç† envï¼ˆæœ¬æœº/VPS çš„ 127.0.0.1:10808 ä»£ç†ç«¯å£åœ¨æ²™ç®±é‡Œä¸å­˜åœ¨ï¼Œä¼šè®© node fetch / python urllib å¤±è´¥ï¼‰
