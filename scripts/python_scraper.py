@@ -12,6 +12,7 @@ import re
 import os
 import json
 import csv
+import hashlib
 import argparse
 from datetime import datetime
 from pathlib import Path
@@ -192,7 +193,8 @@ if not DATABASE_URL:
 UID = '6L5jF9zmRvcnyS9SRb559SnasxF3'
 INVALID_IG_SEGMENTS = {
     "p", "reel", "reels", "explore", "accounts", "stories",
-    "tv", "about", "developer", "directory", "legal", "privacy", "api"
+    "tv", "about", "developer", "directory", "legal", "privacy", "api",
+    "popular", "direct", "share", "meta", "instagram", "wix", "squarespace"
 }
 INVALID_FB_SEGMENTS = {"sharer", "plugins", "dialog", "help", "login", "profile.php", "profile"}
 
@@ -212,10 +214,79 @@ def normalize_string(s):
     if not s: return ""
     return re.sub(r'[^a-zA-Z0-9]', '', str(s)).lower()
 
-def generate_shop_id(name, address, phone):
-    raw = f"{name}_{address}_{phone}".lower()
-    raw = re.sub(r'[^a-z0-9]+', '_', raw)
-    return f"maps_{raw}"[:120]
+def canonical_address(value: str) -> str:
+    """Stable physical-address key across Google locale/rendering variants."""
+    value = str(value or "").strip().lower()
+    value = re.sub(r",?\s*united states\s*$", "", value)
+    value = re.sub(r"[^a-z0-9]", "", value)
+    return "" if value in {"", "na", "none"} else value
+
+
+def canonical_phone(value: str) -> str:
+    digits = re.sub(r"\D", "", str(value or ""))
+    return "" if digits in {"", "0"} else digits[-10:]
+
+
+def instagram_handle(value: str) -> str:
+    value = str(value or "").strip()
+    if not value or value.upper() == "N/A":
+        return ""
+    m = re.search(r"instagram\.com/([a-zA-Z0-9._-]+)", value, re.I)
+    handle = (m.group(1) if m else value.lstrip("@")).strip().lower()
+    if handle in INVALID_IG_SEGMENTS or not re.fullmatch(r"[a-z0-9._-]+", handle):
+        return ""
+    return handle
+
+
+def canonical_instagram_url(value: str):
+    handle = instagram_handle(value)
+    return f"https://www.instagram.com/{handle}" if handle else None
+
+
+def google_place_key(url: str) -> str:
+    """Extract Google's stable Maps feature id from a place URL."""
+    raw = urllib.parse.unquote(str(url or ""))
+    m = re.search(r"!1s([^!]+)", raw)
+    if m:
+        return re.sub(r"[^a-zA-Z0-9:_-]", "", m.group(1)).lower()
+    m = re.search(r"(ChIJ[a-zA-Z0-9_-]+)", raw)
+    return m.group(1).lower() if m else ""
+
+
+def shop_identity_keys(shop: dict):
+    keys = set()
+    place_id = str(shop.get("maps_place_id") or "").strip().lower()
+    address = canonical_address(shop.get("address", ""))
+    phone = canonical_phone(shop.get("phone", ""))
+    handle = instagram_handle(shop.get("instagram", ""))
+    name = normalize_string(shop.get("name", ""))
+    city = normalize_string(shop.get("city", ""))
+    if place_id:
+        keys.add(f"place:{place_id}")
+    if address:
+        keys.add(f"address:{address}")
+    if phone and name:
+        keys.add(f"phone:{phone}:{name}")
+    if handle and name:
+        keys.add(f"instagram:{handle}:{name}")
+    if name and city:
+        keys.add(f"city:{name}:{city}")
+    return keys
+
+
+def shop_dedupe_key(shop: dict) -> str:
+    keys = shop_identity_keys(shop)
+    for prefix in ("place:", "address:", "phone:", "instagram:", "city:"):
+        hit = next((key for key in keys if key.startswith(prefix)), None)
+        if hit:
+            return hit
+    return ""
+
+
+def generate_shop_id(name, address, phone, maps_place_id=""):
+    shop = {"name": name, "address": address, "phone": phone, "maps_place_id": maps_place_id}
+    stable = shop_dedupe_key(shop) or f"name:{normalize_string(name)}"
+    return "maps_" + hashlib.sha1(stable.encode("utf-8")).hexdigest()[:32]
 
 def clean_url(url):
     if not url:
@@ -277,7 +348,7 @@ def is_valid_instagram_url(url: str) -> bool:
     if not m:
         return False
     handle = m.group(1)
-    if handle in {"meta", "instagram"}:
+    if handle in INVALID_IG_SEGMENTS:
         return False
     return True
 
@@ -377,7 +448,13 @@ def load_finished():
                     city = normalize_string(row.get('City', ''))
                     shop = normalize_string(row.get('Shop Name', ''))
                     if shop and city:
-                        done_shops.add(f"{shop}_{city}")
+                        done_shops.add(f"city:{shop}:{city}")
+                    address = canonical_address(row.get('Address', ''))
+                    if address:
+                        done_shops.add(f"address:{address}")
+                    handle = instagram_handle(row.get('Instagram', ''))
+                    if handle and shop:
+                        done_shops.add(f"instagram:{handle}:{shop}")
         except:
             pass
     if os.path.exists(PROGRESS_LOG):
@@ -421,6 +498,10 @@ async def init_db():
         ''')
         for col in ['rating', 'facebook', 'email', 'tiktok']:
             await conn.execute(f"ALTER TABLE artists ADD COLUMN IF NOT EXISTS {col} TEXT")
+        await conn.execute("ALTER TABLE artists ADD COLUMN IF NOT EXISTS dedupe_key TEXT")
+        await conn.execute("ALTER TABLE artists ADD COLUMN IF NOT EXISTS maps_place_id TEXT")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_artists_maps_dedupe ON artists (import_region, dedupe_key)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_artists_maps_place ON artists (import_region, maps_place_id)")
         print(json.dumps({"type": "log", "message": "Neon DB connected"}))
         return conn
     except Exception as e:
@@ -429,15 +510,37 @@ async def init_db():
 
 async def save_shop(conn, shop):
     """保存到 Neon。连接失效时自动重连一次并返回新连接（无则返回原 conn）。"""
-    shop_id = generate_shop_id(shop['name'], shop.get('address', ''), shop.get('phone', ''))
+    dedupe_key = shop_dedupe_key(shop)
+    maps_place_id = str(shop.get('maps_place_id') or '').strip().lower() or None
+    address_key = canonical_address(shop.get('address', ''))
+    ig_url = canonical_instagram_url(shop.get('instagram', ''))
+    shop_id = generate_shop_id(shop['name'], shop.get('address', ''), shop.get('phone', ''), maps_place_id or '')
     rating_int = int(round(shop.get('rating', 0)))
     try:
+        # Match legacy rows before inserting. Older IDs changed when Google added
+        # ", United States" or the same shop appeared in a neighbouring-city search.
+        existing_id = await conn.fetchval('''
+            SELECT id FROM artists
+            WHERE source_type = 'maps_scrape' AND import_region = $1
+              AND (
+                ($2::text IS NOT NULL AND maps_place_id = $2)
+                OR ($3::text <> '' AND dedupe_key = $3)
+                OR ($4::text <> '' AND regexp_replace(
+                    regexp_replace(lower(trim(COALESCE(address, ''))), ',?\\s*united states\\s*$', '', 'i'),
+                    '[^a-z0-9]', '', 'g') = $4)
+              )
+            ORDER BY last_updated DESC NULLS LAST
+            LIMIT 1
+        ''', STATE, maps_place_id, dedupe_key, address_key)
+        if existing_id:
+            shop_id = existing_id
         await conn.execute('''
         INSERT INTO artists (id, uid, username, full_name, shop_name, stage,
                              rating, reviews, address, phone, website,
                              ig_handle, facebook, tiktok, email, city,
-                             source_type, entity_type, import_region, last_updated)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, NOW())
+                             source_type, entity_type, import_region, dedupe_key,
+                             maps_place_id, last_updated)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, NOW())
         ON CONFLICT (id) DO UPDATE SET
             full_name = EXCLUDED.full_name,
             shop_name = EXCLUDED.shop_name,
@@ -448,14 +551,19 @@ async def save_shop(conn, shop):
             facebook = COALESCE(EXCLUDED.facebook, artists.facebook),
             tiktok = COALESCE(EXCLUDED.tiktok, artists.tiktok),
             email = COALESCE(EXCLUDED.email, artists.email),
+            city = EXCLUDED.city,
+            dedupe_key = COALESCE(EXCLUDED.dedupe_key, artists.dedupe_key),
+            maps_place_id = COALESCE(EXCLUDED.maps_place_id, artists.maps_place_id),
             rating = EXCLUDED.rating,
             reviews = EXCLUDED.reviews,
             last_updated = NOW()
         ''', shop_id, UID,
             shop['name'].replace(' ', '_').lower(), shop['name'], shop['name'], 'outreach',
             rating_int, shop.get('reviewCount', 0), shop.get('address'), shop.get('phone'), shop.get('website'),
-            shop.get('instagram'), shop.get('facebook'), shop.get('tiktok'), shop.get('email'), shop['city'],
-            'maps_scrape', 'tattoo_shop', STATE)
+            ig_url, None if shop.get('facebook') == 'N/A' else shop.get('facebook'),
+            None if shop.get('tiktok') == 'N/A' else shop.get('tiktok'),
+            None if shop.get('email') == 'N/A' else shop.get('email'), shop['city'],
+            'maps_scrape', 'tattoo_shop', STATE, dedupe_key or None, maps_place_id)
         return conn
     except (asyncpg.exceptions.InterfaceError, asyncpg.PostgresError, OSError) as e:
         # 连接可能已被服务端关闭（长时间运行），重建连接重试一次
@@ -468,8 +576,9 @@ async def save_shop(conn, shop):
                 INSERT INTO artists (id, uid, username, full_name, shop_name, stage,
                                      rating, reviews, address, phone, website,
                                      ig_handle, facebook, tiktok, email, city,
-                                     source_type, entity_type, import_region, last_updated)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, NOW())
+                                     source_type, entity_type, import_region, dedupe_key,
+                                     maps_place_id, last_updated)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, NOW())
                 ON CONFLICT (id) DO UPDATE SET
                     full_name = EXCLUDED.full_name,
                     shop_name = EXCLUDED.shop_name,
@@ -480,14 +589,19 @@ async def save_shop(conn, shop):
                     facebook = COALESCE(EXCLUDED.facebook, artists.facebook),
                     tiktok = COALESCE(EXCLUDED.tiktok, artists.tiktok),
                     email = COALESCE(EXCLUDED.email, artists.email),
+                    city = EXCLUDED.city,
+                    dedupe_key = COALESCE(EXCLUDED.dedupe_key, artists.dedupe_key),
+                    maps_place_id = COALESCE(EXCLUDED.maps_place_id, artists.maps_place_id),
                     rating = EXCLUDED.rating,
                     reviews = EXCLUDED.reviews,
                     last_updated = NOW()
                 ''', shop_id, UID,
                     shop['name'].replace(' ', '_').lower(), shop['name'], shop['name'], 'outreach',
                     rating_int, shop.get('reviewCount', 0), shop.get('address'), shop.get('phone'), shop.get('website'),
-                    shop.get('instagram'), shop.get('facebook'), shop.get('tiktok'), shop.get('email'), shop['city'],
-                    'maps_scrape', 'tattoo_shop', STATE)
+                    ig_url, None if shop.get('facebook') == 'N/A' else shop.get('facebook'),
+                    None if shop.get('tiktok') == 'N/A' else shop.get('tiktok'),
+                    None if shop.get('email') == 'N/A' else shop.get('email'), shop['city'],
+                    'maps_scrape', 'tattoo_shop', STATE, dedupe_key or None, maps_place_id)
                 return new_conn
             except Exception as e2:
                 print(json.dumps({"type": "error", "message": f"DB reconnect failed: {shop['name']} | {str(e2)[:150]}"}))
@@ -675,11 +789,15 @@ async def scrape_city(page, context, city, done_shops, conn):
     shops_found = 0
     for url in urls:
         try:
+            place_id = google_place_key(url)
+            if place_id and f"place:{place_id}" in done_shops:
+                print(json.dumps({"type": "log", "message": f"Skipped duplicate place: {url}"}))
+                continue
             print(json.dumps({"type": "log", "message": f"Shop start: {url}"}))
             await page.goto(url, wait_until="commit", timeout=50000)
             await page.wait_for_selector('h1.DUwDvf', timeout=15000)
             name = (await page.locator('h1.DUwDvf').inner_text()).strip()
-            shop_key = f"{normalize_string(name)}_{normalize_string(city)}"
+            shop_key = f"city:{normalize_string(name)}:{normalize_string(city)}"
             if shop_key in done_shops:
                 print(json.dumps({"type": "log", "message": f"Skipped duplicate: {name}"}))
                 continue
@@ -697,6 +815,7 @@ async def scrape_city(page, context, city, done_shops, conn):
                 "tiktok": "N/A",
                 "email": "N/A"
             }
+            data["maps_place_id"] = place_id
 
             # 提取基本信息
             try:
@@ -804,6 +923,14 @@ async def scrape_city(page, context, city, done_shops, conn):
             if data["tiktok"] != "N/A" and not is_valid_tiktok_url(data["tiktok"]):
                 data["tiktok"] = "N/A"
 
+            # Cross-city duplicate guard. Google often returns the same physical
+            # shop for nearby city searches, sometimes with a country suffix added.
+            identity_keys = shop_identity_keys(data)
+            if identity_keys.intersection(done_shops):
+                print(json.dumps({"type": "log", "message": f"Skipped cross-city duplicate: {name}"}))
+                done_shops.update(identity_keys)
+                continue
+
             # 保存到 Neon DB（save_shop 自动重连，返回最新连接）
             try:
                 conn = await save_shop(conn, data)
@@ -830,11 +957,11 @@ async def scrape_city(page, context, city, done_shops, conn):
             append_to_csv(csv_row)
 
             shops_found += 1
-            done_shops.add(shop_key)
+            done_shops.update(identity_keys)
             print(json.dumps({
                 "type": "shop",
                 "task_id": TASK_ID,
-                "id": generate_shop_id(data["name"], data.get("address", ""), data.get("phone", "")),
+                "id": generate_shop_id(data["name"], data.get("address", ""), data.get("phone", ""), data.get("maps_place_id", "")),
                 "city": data.get("city", ""),
                 "shop_name": data.get("name", ""),
                 "address": data.get("address", ""),
@@ -877,8 +1004,21 @@ async def main():
     conn = await init_db()
 
     # 从 DB + CSV 双重查重
-    db_rows = await conn.fetch("SELECT id FROM artists WHERE source_type='maps_scrape' AND import_region=$1", STATE)
-    done_shops = {row['id'] for row in db_rows}
+    db_rows = await conn.fetch('''
+        SELECT shop_name, city, address, phone, ig_handle, dedupe_key, maps_place_id
+        FROM artists WHERE source_type='maps_scrape' AND import_region=$1
+    ''', STATE)
+    done_shops = set()
+    for row in db_rows:
+        if row.get('dedupe_key'):
+            done_shops.add(row['dedupe_key'])
+        if row.get('maps_place_id'):
+            done_shops.add(f"place:{str(row['maps_place_id']).lower()}")
+        done_shops.update(shop_identity_keys({
+            "name": row.get('shop_name'), "city": row.get('city'),
+            "address": row.get('address'), "phone": row.get('phone'),
+            "instagram": row.get('ig_handle'),
+        }))
     csv_done_cities, csv_done_shops = load_finished()
     done_shops.update(csv_done_shops)
 
