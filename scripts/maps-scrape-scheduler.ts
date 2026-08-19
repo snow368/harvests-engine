@@ -83,10 +83,10 @@ async function fetchJobs(): Promise<any[]> {
   }
 }
 
-async function setJobStatus(id: any, status: string, error?: string, extra?: Record<string, any>): Promise<void> {
+async function setJobStatus(id: any, status: string, error?: string | null, extra?: Record<string, any>): Promise<void> {
   try {
     const payload: Record<string, any> = { status, ...(extra || {}) };
-    if (error) payload.error = error;
+    if (error !== undefined) payload.error = error;
     await fetch(`${CLOUD_API_BASE}/api/maps-scrape/jobs/${id}/status`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${BOT_API_TOKEN}` },
@@ -166,10 +166,11 @@ async function resolveCities(state: string, country: string): Promise<string[]> 
   return [];
 }
 
-function runScraper(state: string, country: string, citiesFile: string, jobId: any): Promise<{ code: number; lastFound: number; complete: boolean }> {
+function runScraper(state: string, country: string, citiesFile: string, jobId: any): Promise<{ code: number; lastFound: number; complete: boolean; timedOut: boolean }> {
   return new Promise((resolve) => {
     let lastFound = 0;
     let complete = false;
+    let timedOut = false;
     let stdoutBuffer = '';
     const args = [
       'python_scraper.py',
@@ -189,6 +190,7 @@ function runScraper(state: string, country: string, citiesFile: string, jobId: a
     console.log(`[maps-scrape-sched] â–¶ launching scraper ${state} (${country}) [cdp=${CDP_URL || 'headless'}]`);
     const child = spawn(PYTHON, args, { cwd: ENGINE_DIR, env: SCRAPER_ENV });
     const watchdog = setTimeout(() => {
+      timedOut = true;
       console.error(`[maps-scrape-sched] ${state} exceeded MAX_RUNTIME (${(MAX_RUNTIME_MS / 3600000)}h), killing`);
       child.kill('SIGKILL');
     }, MAX_RUNTIME_MS);
@@ -221,12 +223,12 @@ function runScraper(state: string, country: string, citiesFile: string, jobId: a
     child.on('close', (code) => {
       clearTimeout(watchdog);
       processOutputLine(stdoutBuffer.trim());
-      resolve({ code: code ?? -1, lastFound, complete });
+      resolve({ code: code ?? -1, lastFound, complete, timedOut });
     });
     child.on('error', (err) => {
       clearTimeout(watchdog);
       console.error(`[maps-scrape-sched] spawn error ${state}:`, err.message);
-      resolve({ code: -1, lastFound, complete: false });
+      resolve({ code: -1, lastFound, complete: false, timedOut: false });
     });
   });
 }
@@ -245,7 +247,7 @@ async function processOne(job: any): Promise<void> {
     return;
   }
   // è®©å‰ç«¯è¿›åº¦æ¡ä»Žä¸€å¼€å§‹å°±æœ‰åˆ†æ¯ï¼›æ–­ç‚¹ç»­è·‘æ—¶ä¿ç•™å·²æœ‰ cities_doneï¼Œé¿å…è¿›åº¦æ¡å›žè·³å½’é›¶
-  await setJobStatus(id, 'running', undefined, {
+  await setJobStatus(id, 'running', null, {
     cities_total: cities.length,
     cities_done: Number(job.cities_done) || 0,
   });
@@ -256,11 +258,17 @@ async function processOne(job: any): Promise<void> {
   const citiesFile = path.join(queueDir, `${state}_cities.txt`);
   fs.writeFileSync(citiesFile, cities.join('\n'), 'utf-8');
 
-  const { code, lastFound, complete } = await runScraper(state, country, citiesFile, id);
-  console.log(`[maps-scrape-sched] ${state} scraper exited code=${code}`);
+  const { code, lastFound, complete, timedOut } = await runScraper(state, country, citiesFile, id);
+  console.log(`[maps-scrape-sched] ${state} scraper exited code=${code} timedOut=${timedOut}`);
   // scraper æ­£å¸¸é€€å‡º(code 0)ï¼šä¸»åŠ¨ç½® completedï¼ˆä¸ä¾èµ– scraper è‡ªèº« cloud_status ä¸ŠæŠ¥ï¼Œ
   // å…¶ urllib å¶å‘è¢« Cloudflare æ‹¦ 403 å¯¼è‡´ completed æ¼æŠ¥ï¼Œä»»åŠ¡å¡åœ¨ runningï¼‰
-  if (code === 0 && complete) {
+  if (timedOut) {
+    await setJobStatus(id, 'running', `runtime slice ${Math.round(MAX_RUNTIME_MS / 3600000)}h ended; scheduler will resume`, {
+      cities_total: cities.length,
+      artists_found: lastFound,
+    });
+    console.warn(`[maps-scrape-sched] ${state} runtime slice ended; keeping job running for checkpoint resume`);
+  } else if (code === 0 && complete) {
     await setJobStatus(id, 'completed', undefined, {
       cities_done: cities.length,
       cities_total: cities.length,
