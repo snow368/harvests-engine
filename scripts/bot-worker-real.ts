@@ -87,6 +87,8 @@ const BOT_API_TOKEN = (process.env.BOT_API_TOKEN || 'vps-bot-secret-2024').trim(
 const POLL_INTERVAL_MS = Math.max(1500, Number(process.env.BOT_POLL_INTERVAL_MS || 4000));
 const POLL_LIMIT = Math.max(1, Math.min(5, Number(process.env.BOT_POLL_LIMIT || 1)));
 const HEARTBEAT_INTERVAL_MS = Math.max(5000, Number(process.env.BOT_HEARTBEAT_INTERVAL_MS || 15000));
+const CONTROL_PAUSE_FILE = path.resolve(process.cwd(), 'data', 'control-pause', 'bot-worker.pause');
+let controlPauseLogged = false;
 const IG_BASE = (process.env.INSTAGRAM_BASE || 'https://www.instagram.com').replace(/\/+$/, '');
 const PROFILE_DIR = process.env.BOT_PROFILE_DIR || `./data/bot_profiles/${BOT_ID}`;
 const HEADLESS = String(process.env.BOT_HEADLESS || 'false').toLowerCase() === 'true';
@@ -3755,6 +3757,16 @@ let dmReplyTick = 0;
 const pollLoop = async () => {
   while (running) {
     try {
+      // A warm pause keeps the browser/session and heartbeat alive but does not
+      // poll or lease new tasks. The host control listener owns this flag.
+      if (fs.existsSync(CONTROL_PAUSE_FILE)) {
+        if (!controlPauseLogged) console.log(`[bot-real] control pause active: ${CONTROL_PAUSE_FILE}`);
+        controlPauseLogged = true;
+        await sleep(POLL_INTERVAL_MS);
+        continue;
+      }
+      if (controlPauseLogged) console.log('[bot-real] control pause cleared; resuming task polling');
+      controlPauseLogged = false;
       // ── 登录闸门：未登录则暂停一切任务派发，原地等登录，不抢任务、不标 failed ──
       const loggedIn = await waitUntilLoggedIn();
       if (!loggedIn) {

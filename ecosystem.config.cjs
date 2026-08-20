@@ -92,6 +92,25 @@ const apps = [
     out_file: path.join(LOGS_DIR, 'maps-scrape-scheduler-out.log'),
   },
 
+  // Maps output bridge is independent from the browser scraper. The VPS can
+  // keep D1/tasks synchronized while the headed scraper runs only on local PC.
+  {
+    name: 'maps-d1-bridge',
+    cwd: ENGINE_DIR,
+    script: './scripts/maps-d1-bridge.ts',
+    interpreter: 'node.exe',
+    node_args: '--import tsx',
+    ...DEFAULTS,
+    restart_delay: 10_000,
+    env: {
+      ...COMMON_ENV,
+      CLOUD_API_BASE: 'https://harvests.pages.dev',
+      SCRAPE_BRIDGE_INTERVAL_MS: '1800000',
+    },
+    error_file: path.join(LOGS_DIR, 'maps-d1-bridge-error.log'),
+    out_file: path.join(LOGS_DIR, 'maps-d1-bridge-out.log'),
+  },
+
   // ── 3. Backlink Scheduler ──────────────────────
   {
     name: 'backlink-scheduler',
@@ -282,9 +301,11 @@ const apps = [
     restart_delay: 5000,
     env: {
       ...COMMON_ENV,
-      CLOUD_API_BASE: 'https://harvests-cloud-api.inkflowapp.workers.dev',
+      CLOUD_API_BASE: 'https://harvests.pages.dev',
       BOT_API_TOKEN: 'vps-bot-secret-2024',
       LISTENER_INTERVAL_MS: '10000',
+      CONTROL_HOST_ID: 'vps-windows',
+      CONTROL_HOST_LABEL: 'Windows VPS',
     },
     error_file: path.join(LOGS_DIR, 'bot-control-listener-error.log'),
     out_file: path.join(LOGS_DIR, 'bot-control-listener-out.log'),
