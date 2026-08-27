@@ -11,6 +11,7 @@
  *   SCHEDULER_BOT_ID      — 目标 bot（默认 bot_ig_01）
  *   SCHEDULER_STATE       — 目标州代码（默认 ALL=不限；设 'OR' 等则只排该州 artists）
  *   SCHEDULER_BATCH_SIZE  — 每批抓取数（默认 10）
+ *   SCHEDULER_GENERATE_COMMENT_DRAFTS — 是否给任务写入评论草稿额度（默认 true；只生成待审草稿，不等于发布）
  */
 
 import fs from 'node:fs';
@@ -21,13 +22,30 @@ const BOT_ID = process.env.SCHEDULER_BOT_ID || 'bot_ig_01';
 const DAILY_LIMIT = Number(process.env.SCHEDULER_DAILY_LIMIT) || 50;
 const BATCH_SIZE = Math.min(20, Math.max(1, Number(process.env.SCHEDULER_BATCH_SIZE) || 10));
 const TARGET_STATE = (process.env.SCHEDULER_STATE || 'ALL').trim().toUpperCase();
-// 多州定向（西语浓度高州测试用）：SCHEDULER_STATES='TX,CA,FL' 优先于单州 SCHEDULER_STATE
-const TARGET_STATES = (process.env.SCHEDULER_STATES || '')
-  .split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
 const CLOUD_API_BASE = (process.env.CLOUD_API_BASE || 'https://harvests.pages.dev').replace(/\/+$/, '');
 const BOT_API_TOKEN = (process.env.BOT_API_TOKEN || 'vps-bot-secret-2024').trim();
+const GENERATE_COMMENT_DRAFTS = String(
+  process.env.SCHEDULER_GENERATE_COMMENT_DRAFTS ?? process.env.SCHEDULER_ALLOW_COMMENTS ?? 'true'
+).toLowerCase() !== 'false';
 
 const ENV_PATH = path.resolve(process.cwd(), '.env');
+
+const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
+
+const commentDraftRateForAge = (ageDays: number): number => {
+  if (ageDays < 3) return 0.12;    // 50 tasks -> about 6 draft candidates
+  if (ageDays < 7) return 0.22;    // 50 tasks -> about 11
+  if (ageDays < 14) return 0.32;   // 50 tasks -> about 16
+  if (ageDays < 30) return 0.45;   // 50 tasks -> about 22
+  return 0.55;                     // 50 tasks -> about 27
+};
+
+const shouldCreateCommentDraftForIndex = (index: number, target: number, total: number): boolean => {
+  if (target <= 0 || total <= 0) return false;
+  if (target >= total) return true;
+  // Evenly spread comment-draft tasks through the day instead of clustering them.
+  return Math.floor(((index + 1) * target) / total) > Math.floor((index * target) / total);
+};
 
 // ============ Load .env ============
 if (fs.existsSync(ENV_PATH)) {
@@ -49,14 +67,10 @@ async function fetchArtists(limit = 200): Promise<any[]> {
     }
     const data = await resp.json() as any;
     const items: any[] = data?.items || [];
-    // 州过滤：SCHEDULER_STATES（多州，如 'TX,CA,FL'）优先；否则 SCHEDULER_STATE 单州；ALL 不过滤
-    const filtered = (TARGET_STATE === 'ALL' && !TARGET_STATES.length)
+    // 可选州过滤（state 列）：ALL 不过滤；否则只保留该州
+    const filtered = TARGET_STATE === 'ALL'
       ? items
-      : items.filter((a: any) => {
-          const st = String(a.state || '').toUpperCase();
-          if (TARGET_STATES.length) return TARGET_STATES.includes(st);
-          return st === TARGET_STATE;
-        });
+      : items.filter((a: any) => String(a.state || '').toUpperCase() === TARGET_STATE);
     return filtered;
   } catch (e: any) {
     console.error('[ig-scheduler] fetch artists failed:', e?.message?.slice(0, 80));
@@ -67,37 +81,54 @@ async function fetchArtists(limit = 200): Promise<any[]> {
 async function main() {
   // 账号阶段：bot_accounts 在 D1，但 cloud-api 暂无安全的「只读」端点
   // （GET /api/automation/bot-account 是带副作用的 upsert），这里按新账号保守默认。
-  const acctAgeDays = 0;
-  const dbStage = 'new';
-  const dbSpeed = 2.5;
-
-  const autoStage = 'new';
-  const autoLimit = DAILY_LIMIT;
-  const autoSpeed = 2.5;
-
-  const acctStage = process.env.SCHEDULER_STAGE || dbStage || autoStage;
-  const effectiveLimit = Number(process.env.SCHEDULER_DAILY_LIMIT) || autoLimit;
-  const acctSpeed = Number(process.env.SCHEDULER_SPEED_FACTOR) || dbSpeed || autoSpeed;
+  let acctAgeDays = 0;
+  let dbStage = 'new';
+  let dbLimit = DAILY_LIMIT;
+  let dbSpeed = 2.5;
 
   // 2026-08-06：从 D1 读该 bot 的用户动作偏好（前台「动作偏好」面板保存的），
   // 生成任务时写进 payload，bot 按 likes/comments/follows 次数执行 → 前台设置真正生效。
   // 读不到偏好时回退：likes=2, comments=1, follows=0（默认），且按账号阶段定模式。
   let prefs: any = null;
+  let prefsReadOk = false;
   try {
     const pRes = await fetch(`${CLOUD_API_BASE}/api/automation/bot-prefs/by-bot?botId=${encodeURIComponent(BOT_ID)}&token=${BOT_API_TOKEN}`);
     if (pRes.ok) {
       const pData = await pRes.json() as any;
-      if (pData?.prefs) prefs = pData.prefs;
+      if (pData?.prefs) {
+        prefs = pData.prefs;
+        prefsReadOk = true;
+      }
     }
   } catch (e: any) {
     console.error('[ig-scheduler] fetch bot-prefs failed:', e?.message?.slice(0, 80));
   }
-  const likesPer = prefs ? (Number(prefs.likesPerSession) || 0) : 2;
-  const commentsPer = prefs ? (Number(prefs.commentsPerSession) || 0) : 1;
-  const followsPer = prefs ? (Number(prefs.followsPerSession) || 0) : 0;
+  if (!prefsReadOk) {
+    console.error('[ig-scheduler] bot-prefs unavailable; skip task creation rather than changing action rules');
+    return;
+  }
+  const likesPer = Number(prefs.likesPerSession) || 0;
+  acctAgeDays = Number(prefs.accountAgeDays || 0);
+  dbStage = String(prefs.accountStage || 'new');
+  dbLimit = Number(prefs.dailyTaskLimit || 0) || DAILY_LIMIT;
+  dbSpeed = Number(prefs.speedFactor || 0) || 2.5;
+
+  const acctStage = process.env.SCHEDULER_STAGE || dbStage;
+  const effectiveLimit = Number(process.env.SCHEDULER_DAILY_LIMIT) || dbLimit || DAILY_LIMIT;
+  const acctSpeed = Number(process.env.SCHEDULER_SPEED_FACTOR) || dbSpeed || 2.5;
+  const maxCommentDraftsPerSession = GENERATE_COMMENT_DRAFTS ? clamp(Number(prefs.commentsPerSession) || 0, 0, 2) : 0;
+  const commentDraftTarget = maxCommentDraftsPerSession > 0
+    ? clamp(
+      Number(process.env.SCHEDULER_COMMENT_DRAFT_DAILY_TARGET || 0)
+        || Math.round(effectiveLimit * commentDraftRateForAge(acctAgeDays) * (maxCommentDraftsPerSession / 2)),
+      0,
+      effectiveLimit,
+    )
+    : 0;
+  const followsPer = Number(prefs.followsPerSession) || 0;
   // 互动总开关：全 0 或未配置 → browse_only（只浏览）；任一 > 0 → browse_like（真互动）
-  const hasInteraction = likesPer > 0 || commentsPer > 0 || followsPer > 0;
-  console.log(`[ig-scheduler] bot-prefs: likes=${likesPer} comments=${commentsPer} follows=${followsPer} → ${hasInteraction ? 'browse_like' : 'browse_only'}`);
+  const hasInteraction = likesPer > 0 || commentDraftTarget > 0 || followsPer > 0;
+  console.log(`[ig-scheduler] bot-prefs: likes=${likesPer} commentDraftTarget=${commentDraftTarget}/${effectiveLimit} follows=${followsPer} age=${acctAgeDays}d → ${hasInteraction ? 'browse_like' : 'browse_only'}`);
 
   const today = new Date().toISOString().slice(0, 10);
   const startOfDay = new Date(today).getTime();
@@ -122,8 +153,7 @@ async function main() {
   // 从 Cloud API (D1) 读 artists
   const artists = await fetchArtists(Math.min(remaining * 3, 200));
   if (!artists.length) {
-    const scope = TARGET_STATES.length ? TARGET_STATES.join(',') : (TARGET_STATE !== 'ALL' ? TARGET_STATE : '');
-    console.log(`[ig-scheduler] No new artists available${scope ? ' for ' + scope : ''}`);
+    console.log(`[ig-scheduler] No new artists available${TARGET_STATE !== 'ALL' ? ' for ' + TARGET_STATE : ''}`);
     return;
   }
 
@@ -141,12 +171,16 @@ async function main() {
   const batch: Array<{ id: string; payload: any; runAt: number }> = [];
 
   for (const artist of artists) {
+    // Strict daily creation cap. fetchArtists intentionally over-fetches for
+    // validation/dedup, but the outgoing batch must never exceed remaining quota.
+    if (batch.length >= remaining) break;
     const handle = extractHandle(artist.ig_handle, artist.website);
     if (!handle || !isValidHandle(handle)) continue;
 
     const taskId = `ig_scheduled_${handle}_${now}_${Math.random().toString(36).slice(2, 6)}`;
     // 模式由「前台偏好是否有互动」决定：全 0 → browse_only；任一 >0 → browse_like
     const execMode = hasInteraction ? 'browse_like' : 'browse_only';
+    const commentsPer = shouldCreateCommentDraftForIndex(todayCount + batch.length, commentDraftTarget, effectiveLimit) ? 1 : 0;
     const payload = {
       id: taskId, taskType: 'ig_outreach', botId: BOT_ID,
       artistHandle: handle, shopName: String(artist.shop_name || ''),
@@ -189,10 +223,12 @@ async function main() {
     }
   }
 
-  const scope = TARGET_STATES.length ? TARGET_STATES.join(',') : TARGET_STATE;
-  console.log(`[ig-scheduler] Created ${created}/${batch.length} tasks (${todayCount}/${effectiveLimit} today) for bot=${BOT_ID} state=${scope} age=${acctAgeDays}d`);
+  console.log(`[ig-scheduler] Created ${created}/${batch.length} tasks (${todayCount}/${effectiveLimit} today) for bot=${BOT_ID} state=${TARGET_STATE} age=${acctAgeDays}d`);
 }
 
-console.log(`[ig-scheduler] Running every 5 mins (bot=${BOT_ID}, state=${TARGET_STATES.length ? TARGET_STATES.join(',') : TARGET_STATE}, daily=${DAILY_LIMIT})`);
-main().catch(e => console.error('[ig-scheduler] first run error:', e));
-setInterval(() => main().catch(e => console.error('[ig-scheduler] error:', e)), 5 * 60 * 1000);
+const invoked = process.argv[1]?.replace(/\\/g, '/').endsWith('ig-scheduler-lite.ts');
+if (invoked) {
+  console.log(`[ig-scheduler] Running every 5 mins (bot=${BOT_ID}, state=${TARGET_STATE}, daily=${DAILY_LIMIT})`);
+  main().catch(e => console.error('[ig-scheduler] first run error:', e));
+  setInterval(() => main().catch(e => console.error('[ig-scheduler] error:', e)), 5 * 60 * 1000);
+}
