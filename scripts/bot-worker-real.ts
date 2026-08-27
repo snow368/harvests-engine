@@ -1,22 +1,14 @@
 ﻿/* eslint-disable no-console */
-import 'dotenv/config';
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
 import fs from 'node:fs';
+import { execSync } from 'node:child_process';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
 import os from 'node:os';
-import { createHash } from 'node:crypto';
 import { createWorker } from 'tesseract.js';
-import { generateComment, sanitizeVerifiedFacts, validateGroundedComment } from './comment-generator';
-import { detectPostType } from './tattoo-voice';
-import { classifyPostMedia, type VisionGateResult } from './comment-vision-gate.js';
-import { addCorpusEntries } from './comment-corpus.js';
-import { analyzeTattooTechnique } from './comment-technical-vision.js';
-import {
-  enqueueCommentCandidate, claimPendingComment, finishCommentReview,
-  nextApprovedComment, markCommentPosted, getCommentQueueStats,
-  markCommentHumanApproved, markCommentHumanRejected, type CommentQueueItem,
-} from './comment-review-queue.js';
+import { generateComment, getFromPool, refillPool, clearRecentHistory, detectTattooStyle, getInteractionFallback, extractTechniqueHintsFromVision } from './comment-generator';
+import { analyzePostImage, isVisionEnabled, buildVisionDescription } from './vision-analyze';
+import { detectPostType, detectSubject, isPiercingHandle, detectPostIntent, reconcileIntentWithVision, intentEngagement } from './tattoo-voice';
+import { isCommentBlacklisted } from './comment-blacklist';
 
 // 2026-08-07 全局兜底：捕获未处理异常/拒绝，避免单任务内的异步错误直接杀死整个进程
 // （此前 bot 在首个任务执行中静默退出，导致任务永远停在 leased、无法 done/failed，违反"需要跑通"要求）。
@@ -94,8 +86,9 @@ const BOT_API_KEY = (process.env.BOT_API_KEY || '').trim();
 const BOT_API_TOKEN = (process.env.BOT_API_TOKEN || 'vps-bot-secret-2024').trim();
 const POLL_INTERVAL_MS = Math.max(1500, Number(process.env.BOT_POLL_INTERVAL_MS || 4000));
 const POLL_LIMIT = Math.max(1, Math.min(5, Number(process.env.BOT_POLL_LIMIT || 1)));
-const BOT_DAILY_TASK_LIMIT = Math.max(1, Number(process.env.BOT_DAILY_TASK_LIMIT || 50));
 const HEARTBEAT_INTERVAL_MS = Math.max(5000, Number(process.env.BOT_HEARTBEAT_INTERVAL_MS || 15000));
+const CONTROL_PAUSE_FILE = path.resolve(process.cwd(), 'data', 'control-pause', 'bot-worker.pause');
+let controlPauseLogged = false;
 const IG_BASE = (process.env.INSTAGRAM_BASE || 'https://www.instagram.com').replace(/\/+$/, '');
 const PROFILE_DIR = process.env.BOT_PROFILE_DIR || `./data/bot_profiles/${BOT_ID}`;
 const HEADLESS = String(process.env.BOT_HEADLESS || 'false').toLowerCase() === 'true';
@@ -123,29 +116,6 @@ const BOT_LIKE_COOLDOWN_MAX_HOURS = Math.max(BOT_LIKE_COOLDOWN_MIN_HOURS, Number
 const BOT_SKIP_OLD_POST_DAYS = Math.max(30, Number(process.env.BOT_SKIP_OLD_POST_DAYS || 180));
 const BOT_PREFER_RECENT_DAYS = Math.max(7, Number(process.env.BOT_PREFER_RECENT_DAYS || 30));
 const BOT_COMMENT_ENABLED = String(process.env.BOT_COMMENT_ENABLED || 'false').toLowerCase() === 'true';
-// Emergency-safe default: live comments stay off unless this hard kill switch is
-// explicitly disabled in addition to the normal live-comment confirmation flags.
-const BOT_COMMENT_DRAFT_HARD_DISABLED = String(process.env.BOT_COMMENT_DRAFT_HARD_DISABLED || 'false').toLowerCase() === 'true';
-const BOT_COMMENT_PUBLISH_HARD_DISABLED = String(
-  process.env.BOT_COMMENT_PUBLISH_HARD_DISABLED || process.env.BOT_COMMENT_HARD_DISABLED || 'true'
-).toLowerCase() !== 'false';
-// Dedicated read/review test mode. No likes, follows, DMs, auto-replies, or live comments.
-const BOT_VISION_TEST_MODE = String(process.env.BOT_VISION_TEST_MODE || 'false').toLowerCase() === 'true';
-// Safe by default: vision decisions and proposed comments are saved locally, never posted.
-// Live posting requires three explicit conditions: comments enabled, review mode false,
-// and an exact live confirmation string. A missing/typoed flag always falls back to review.
-const BOT_COMMENT_LIVE_CONFIRMED = process.env.BOT_COMMENT_LIVE_CONFIRM === 'I_UNDERSTAND_COMMENTS_WILL_POST';
-const BOT_COMMENT_REVIEW_MODE =
-  String(process.env.BOT_COMMENT_REVIEW_MODE || 'true').toLowerCase() !== 'false'
-  || !BOT_COMMENT_LIVE_CONFIRMED
-  || BOT_VISION_TEST_MODE;
-const COMMENT_REVIEW_DIR = path.resolve(process.cwd(), 'data', 'comment_review');
-const BOT_COMMENT_MAX_CAROUSEL_MEDIA = Math.max(1, Math.min(30, Number(process.env.BOT_COMMENT_MAX_CAROUSEL_MEDIA || 20)));
-const BOT_REEL_FRAME_COUNT = Math.max(3, Math.min(9, Number(process.env.VISION_REEL_FRAME_COUNT || 5)));
-const BOT_REVIEW_PAUSE_AFTER_DRAFT = String(process.env.BOT_REVIEW_PAUSE_AFTER_DRAFT || 'true').toLowerCase() === 'true';
-if (BOT_COMMENT_REVIEW_MODE && !fs.existsSync(COMMENT_REVIEW_DIR)) {
-  fs.mkdirSync(COMMENT_REVIEW_DIR, { recursive: true });
-}
 // 诊断日志开关：BOT_DEBUG=true 时打印点赞/关注决策链，用于排查为何没点赞/关注/DM。默认关闭避免刷屏。
 const BOT_DEBUG = String(process.env.BOT_DEBUG || 'false').toLowerCase() === 'true';
 const dbg = (...args: any[]) => { if (BOT_DEBUG) console.error(...args); };
@@ -165,12 +135,6 @@ const BOT_DAILY_BROWSE_TARGET_STABLE = Math.max(1, Number(process.env.BOT_DAILY_
 const BOT_OCR_ENABLED = String(process.env.BOT_OCR_ENABLED || 'false').toLowerCase() === 'true';
 // DM 日上限：回关后的号"慢慢"发，不无上限狂发（2026-08-07 新增）。0 = 不限。
 const BOT_DM_DAILY_MAX = Math.max(0, Number(process.env.BOT_DM_DAILY_MAX || 12));
-const BOT_DM_ENABLED = String(process.env.BOT_DM_ENABLED || 'false').toLowerCase() === 'true';
-const BOT_DM_LIVE_CONFIRMED = process.env.BOT_DM_LIVE_CONFIRM === 'I_UNDERSTAND_DMS_WILL_SEND';
-const BOT_DM_REVIEW_MODE =
-  String(process.env.BOT_DM_REVIEW_MODE || 'true').toLowerCase() !== 'false'
-  || !BOT_DM_LIVE_CONFIRMED;
-const BOT_CAN_SEND_DM = BOT_DM_ENABLED && !BOT_DM_REVIEW_MODE && !BOT_VISION_TEST_MODE;
 // 回关后到首次 DM 的自然预热窗口（小时），避免秒回关秒 DM 显得机械。0 = 直接发。
 const BOT_DM_WARMUP_HOURS = Math.max(0, Number(process.env.BOT_DM_WARMUP_HOURS || 4));
 // 账号绑定/自动化起始日（ISO）。用于按真实账号成熟天数连续爬坡关注/评论/点赞上限。
@@ -181,15 +145,48 @@ const BOT_ACCOUNT_BOUND_AT = String(process.env.BOT_ACCOUNT_BOUND_AT || '').trim
 // 不依赖 cloud-api 的 marketing_scripts 表（该表写入被 Firebase 中间件拦截，需部署才能改）。
 // 可用 BOT_DM_SCRIPTS_JSON 环境变量覆盖（JSON 字符串数组）。
 const BOT_DM_SCRIPTS_DEFAULT = [
-  "Hey — been quietly enjoying your work for a bit (that recent piece is fire 🔥). I run InkFlow, a wholesale supply house for tattoo studios — ink, cartridges, aftercare. If you ever want to compare pricing or grab a sample kit, just reply and I'll send our artist price list over. No rush at all 🙌",
-  "Hi! Been following your work — your linework's clean. Quick one: I help studios stay stocked through InkFlow (wholesale ink + needles + aftercare). Whenever you need a reliable backup source, reply 'catalog' and I'll shoot you the list. Zero pressure 👍",
-  "Love what you've been putting out. I'm with InkFlow — we supply tattoo studios wholesale (ink, carts, aftercare). If keeping stocked ever becomes a hassle, just hit reply and I'll send our artist rates. Glad to have you in the circle ✌️"
+  "Hey — I've been quietly following your work, and I keep coming back to your linework. There's a calm confidence in it that's rare. I run InkFlow — we're the wholesale house for the stuff you burn through daily: ink, cartridges, aftercare. No pitch, just… if supply ever lets you down mid-session (we've ALL been there 😅), reply 'catalog' and I'll send our artist price list. Glad I found your page 🙌",
+  "Quick honest one: your shading stopped me scrolling today. I've spent enough time around tattoo studios to know the difference between ink that flows and ink that fights you — and your pieces clearly come from the good stuff. I'm with InkFlow (wholesale ink + needles + aftercare). Whenever you want a backup source that just shows up on time, say the word and I'll send the list. Zero pressure 👍",
+  "Been enjoying your posts — there's a real point of view in your work, not just technique. I help tattoo artists stay stocked through InkFlow (ink, carts, aftercare, wholesale). The thing I hear most from artists is 'I just want my supplier to not ghost me' — that's kind of our whole thing. If you ever want to compare or grab a sample kit, reply and I'll shoot it over. Happy to have you in the circle ✌️"
 ];
 let BOT_DM_SCRIPTS: string[] = BOT_DM_SCRIPTS_DEFAULT;
 try { if (process.env.BOT_DM_SCRIPTS_JSON) BOT_DM_SCRIPTS = JSON.parse(process.env.BOT_DM_SCRIPTS_JSON); } catch {}
 if (!Array.isArray(BOT_DM_SCRIPTS) || !BOT_DM_SCRIPTS.length) BOT_DM_SCRIPTS = BOT_DM_SCRIPTS_DEFAULT;
+// 2026-08-11: 暖受众 DM 文案池（对我们帖子下点赞/评论的人，软性感谢 + 供货钩子，情绪化代入感）
+// 2026-08-11(补): 加西班牙语（es）池 —— 面向 TX/CA/FL 等西语纹身师，按 detectLangForHandle 选语言。
+// 可用 AUDIENCE_DM_SCRIPTS_JSON 环境变量覆盖：
+//   - JSON 数组 → 当作 en 池填充（向后兼容旧用法）；
+//   - JSON 对象 {en:[...], es:[...]} → 直接覆盖两语言池。
+const AUDIENCE_DM_SCRIPTS_DEFAULT: Record<string, string[]> = {
+  en: [
+    "Hey — thanks for the love on our recent piece 🙌 means a lot coming from someone with your eye. I run InkFlow — we're the wholesale house for the ink, cartridges and aftercare you burn through daily. No pitch, just: if your supplier ever ghosts you mid-session, reply 'catalog' and I'll send our artist price list. Glad you're here ✌️",
+    "Noticed you hanging out on our page — appreciate you 🙏 Your work's got a point of view, so I figured you'd care about supply that just shows up on time. I'm with InkFlow (wholesale ink + needles + aftercare). Whenever you want a backup source that doesn't vanish, say the word and I'll shoot over the list. Zero pressure 👍",
+    "Saw you liked our stuff — thank you, genuinely. Around tattoo studios I keep hearing 'I just want my supplier to not disappear on me' — kind of our whole thing at InkFlow (ink, carts, aftercare, wholesale). If you ever want to compare or grab a sample kit, reply and I'll send it. Happy to have you around ✌️"
+  ],
+  es: [
+    "¡Hola! Gracias por el cariño a nuestra última pieza 🙌 Significa mucho viniendo de alguien con tu ojo. Soy parte de InkFlow — somos el proveedor mayorista de la tinta, los cartuchos y el aftercare que usas a diario. Sin pitch: si tu proveedor alguna vez te deja tirado a mitad de sesión, responde 'catálogo' y te mando nuestra lista de precios para artistas. ¡Qué bueno tenerte por aquí! ✌️",
+    "Te vi por nuestra página — te agradezco 🙏 Tu trabajo tiene una voz propia, así que supuse que te importa un proveedor que simplemente llega a tiempo. Estoy con InkFlow (tinta, agujas y aftercare al por mayor). Cuando quieras una fuente de respaldo que no desaparezca, dímelo y te paso la lista. Cero presión 👍",
+    "Vi que te gustó lo nuestro — gracias, de verdad. En los estudios de tatuaje siempre escucho 'solo quiero un proveedor que no me abandona' — básicamente eso somos en InkFlow (tinta, cartuchos, aftercare, al por mayor). Si alguna vez quieres comparar o pedir un kit de muestra, respóndeme y te lo mando. Me alegra tenerte por acá ✌️"
+  ]
+};
+let AUDIENCE_DM_SCRIPTS: Record<string, string[]> = AUDIENCE_DM_SCRIPTS_DEFAULT;
+try {
+  if (process.env.AUDIENCE_DM_SCRIPTS_JSON) {
+    const parsed = JSON.parse(process.env.AUDIENCE_DM_SCRIPTS_JSON);
+    if (Array.isArray(parsed)) AUDIENCE_DM_SCRIPTS = { en: parsed, es: AUDIENCE_DM_SCRIPTS_DEFAULT.es };
+    else if (parsed && typeof parsed === 'object') AUDIENCE_DM_SCRIPTS = parsed as Record<string, string[]>;
+  }
+} catch {}
+if (!AUDIENCE_DM_SCRIPTS || !AUDIENCE_DM_SCRIPTS.en || !AUDIENCE_DM_SCRIPTS.en.length) {
+  AUDIENCE_DM_SCRIPTS = AUDIENCE_DM_SCRIPTS_DEFAULT;
+}
 const hashStr = (s: string) => { let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0; return Math.abs(h); };
 const pickFromPool = (pool: string[], key: string) => pool[hashStr(key || 'anon') % pool.length];
+// 暖受众 DM 按语言选池（es/en；其他语言 fallback en）。复用 detectLangForHandle 检测对方主页语言。
+const getAudienceDmScript = (handle: string, lang: string): string => {
+  const pool = (AUDIENCE_DM_SCRIPTS[lang] || AUDIENCE_DM_SCRIPTS.en || AUDIENCE_DM_SCRIPTS_DEFAULT.en);
+  return pickFromPool(pool, handle);
+};
 // 本地化优先层（2026-08-07）：基于 WebSearch 调研的本地商务话术，含本地痛点钩子
 // （EU REACH 墨水禁令 / 日本先信任后生意）。无本地化版的语言 fallback 到翻译版。
 // 完整档案见 D:\harvests\_tools\localized-dm-playbook.md
@@ -287,6 +284,8 @@ const BOT_RAPPORT_COMMENTS_DEFAULT = [
   "your style is unique — been enjoying your posts",
   "that piece is sick 💯",
   "mad respect for the detail here",
+  "how many sessions did this take you? been loving your work",
+  "do you design these yourself? curious",
 ];
 let BOT_RAPPORT_COMMENTS: string[] = BOT_RAPPORT_COMMENTS_DEFAULT;
 try { if (process.env.BOT_RAPPORT_COMMENTS_JSON) BOT_RAPPORT_COMMENTS = JSON.parse(process.env.BOT_RAPPORT_COMMENTS_JSON); } catch {}
@@ -503,6 +502,25 @@ const OFFERS: Array<{
   }
 ];
 
+// 🔴 下单目的地（2026-08-09 用户指定：www.peachtattoosupplies.com）
+// 所有 DM 末尾统一附上「在此下单」引导；未翻译语言 fallback 到英文句。
+const ORDER_URL = 'https://www.peachtattoosupplies.com';
+const ORDER_LINES: Record<string, string> = {
+  en: `Order anytime at ${ORDER_URL}`,
+  de: `Bestell jederzeit auf ${ORDER_URL}`,
+  nl: `Bestel wanneer je wilt op ${ORDER_URL}`,
+  fr: `Commandez à tout moment sur ${ORDER_URL}`,
+  ja: `ご注文はいつでも ${ORDER_URL} から`,
+  es: `Pide cuando quieras en ${ORDER_URL}`,
+  it: `Ordina quando vuoi su ${ORDER_URL}`,
+  pt: `Peça quando quiser em ${ORDER_URL}`,
+  pl: `Zamów kiedy chcesz na ${ORDER_URL}`,
+  tr: `İstediğin zaman sipariş ver: ${ORDER_URL}`,
+  cs: `Objednejte kdykoli na ${ORDER_URL}`,
+  ru: `Заказывайте в любое время на ${ORDER_URL}`,
+  sv: `Beställ när du vill på ${ORDER_URL}`,
+};
+
 // 按客户情况组装 DM：个性化钩子（回赞）→ 产品 pitch（按市场+语言）→ CTA（同语言）。
 // 仅使用 active 的 offer（未核实产品能力前示例保持关闭）；无可用 offer 时 fallback 到原固定文案池。
 const buildDmScript = (handle: string, lang: string, st: any): string => {
@@ -519,10 +537,13 @@ const buildDmScript = (handle: string, lang: string, st: any): string => {
     // 促销钩子：仅当该语言提供了翻译才附加（promo[lang] 存在），未翻译语言不附加，避免机翻/英文污染。
     const promo = offer.promo?.[lang];
     const cta = (offer.cta[lang] || offer.cta.en || '').trim();
-    return [opener, pitch, promo, cta].filter(Boolean).join(' ');
+    // 🔴 末尾统一附「在此下单」目的地（2026-08-09 用户指定 peachtattoosupplies.com）
+    const orderLine = ORDER_LINES[lang] || ORDER_LINES.en;
+    return [opener, pitch, promo, cta, orderLine].filter(Boolean).join(' ');
   }
   const baseScript = pickDmScript(handle, lang);
-  return st?.likedUsDetected ? `${LIKED_US_OPENERS_BY_LANG[lang] || LIKED_US_OPENERS_BY_LANG.en}${baseScript}` : baseScript;
+  const orderLine = ORDER_LINES[lang] || ORDER_LINES.en;
+  return st?.likedUsDetected ? `${LIKED_US_OPENERS_BY_LANG[lang] || LIKED_US_OPENERS_BY_LANG.en}${baseScript} ${orderLine}` : `${baseScript} ${orderLine}`;
 };
 
 
@@ -796,11 +817,10 @@ type LikeState = {
     byHandle?: Record<string, { lastCommentAt?: number }>;
     recentText?: Array<{ ts: number; hash: number }>;
   };
-  dm?: {
-    byDay?: Record<string, number>;
-  };
   // DM 去重：记录每个 handle 上次已回复的文案哈希，防止把 bot 自己的出站/上轮回复误当客户新消息反复自回复。
   dmSeen?: Record<string, number>;
+  // 🛑 账号休息（被动，IG 限制信号触发）：持久化，bot 重启也继续休息直到冷却结束
+  rest?: { until: number; reason: string; severity: string; at: number; count?: number };
 };
 const loadLikeState = (): LikeState => {
   try {
@@ -830,6 +850,7 @@ if (!likeState.comments.byDay) likeState.comments.byDay = {};
 if (!likeState.comments.byHandle) likeState.comments.byHandle = {};
 if (!likeState.comments.recentText) likeState.comments.recentText = [];
 if (!likeState.dm) likeState.dm = { byDay: {} };
+if (!likeState.rest) likeState.rest = { until: 0, reason: '', severity: '', at: 0 };
 if (!likeState.dm.byDay) likeState.dm.byDay = {};
 if (!likeState.dmSeen) likeState.dmSeen = {};
 
@@ -847,15 +868,17 @@ const recordDmSent = () => {
 // 因为该表写入被 Firebase 中间件拦截、且本环境无法部署 cloud-api（无 Cloudflare 凭证）。
 // 单次 DM 套 120s 硬超时，失败不标记 dmSent，下一轮可重试。返回本轮是否成功发出至少一条。
 const syncFollowBackDmQueue = async (): Promise<boolean> => {
-  if (!BOT_CAN_SEND_DM) return false;
   let sentAny = false;
   try {
     if (BOT_DM_DAILY_MAX > 0 && dmSentToday() >= BOT_DM_DAILY_MAX) return false;
     const byHandle = likeState.follows?.byHandle || {};
     const now = Date.now();
+    const selfIds = new Set([BOT_ID, ...(ACCOUNT_IDS || [])].map((x) => String(x).toLowerCase()));
     for (const [handle, raw] of Object.entries(byHandle)) {
       const st = raw as any;
-      if (!st?.followBackDetected || st.dmSent) continue;
+      // 🛑 self-DM 守卫：绝不给 bot 自己的账号发 DM（之前误把 raiha8833 当客户发了 2 条 self-DM）
+      if (selfIds.has(String(handle).toLowerCase())) continue;
+      if (!st?.followBackDetected || st.followBackRevoked || st.dmSent) continue;
       // 熟悉度门槛：评论开启时需 ≥2 赞 + 1 条真实评论；评论关闭时需 ≥3 赞。先建立关系，不硬推广。
       const rp = st.rapport || {};
       const rapportReady = BOT_COMMENT_ENABLED ? (rp.likedPosts >= 2 && rp.commentedAt > 0) : (rp.likedPosts >= 3);
@@ -993,7 +1016,6 @@ const rapportLikeComment = async (handle: string): Promise<boolean> => {
 // 每轮推进回关号的熟悉度阶梯：点赞 3 篇(每天 1 篇) → 真诚评论 → 赞对方评论。DM 由 syncFollowBackDmQueue 在预热后发。
 // 每个号每轮最多做 1 个 rapport 动作，且全局受 BOT_RAPPORT_DAILY_MAX 限制，确保"慢慢来"。
 const syncFollowBackRapport = async (): Promise<void> => {
-  if (BOT_VISION_TEST_MODE) return;
   try {
     if (BOT_RAPPORT_DAILY_MAX > 0 && getRapportToday() >= BOT_RAPPORT_DAILY_MAX) return;
     const byHandle = likeState.follows?.byHandle || {};
@@ -1004,8 +1026,9 @@ const syncFollowBackRapport = async (): Promise<void> => {
       if (!st?.followBackDetected || st.dmSent) continue; // DM 发完即停止 ladder
       if (!st.rapport) st.rapport = { likedPosts: 0, lastLikeAt: 0, firstLikeAt: 0, commentedAt: 0, commentLikedAt: 0 };
       const rp = st.rapport;
-      // 阶段1：点赞帖子。目标 RAPPORT_LIKE_TARGET(默认3) 篇，每天最多 1 篇（同天不重复），横跨多天显得是持续关注
-      if (rp.likedPosts < RAPPORT_LIKE_TARGET && !isSameDay(rp.lastLikeAt, now) && now - (rp.lastLikeAt || 0) > RAPPORT_LIKE_GAP_HOURS * 3600_000) {
+      // 阶段1：点赞帖子。目标 RAPPORT_LIKE_TARGET(默认3) 篇；仅按时间间隔(RAPPORT_LIKE_GAP_HOURS)节流，
+      // 不再强制"每天 1 篇"——放宽后回关号可在 ~1 天内攒够 ≥2 赞，更快跨过 DM-able 门槛。
+      if (rp.likedPosts < RAPPORT_LIKE_TARGET && now - (rp.lastLikeAt || 0) > RAPPORT_LIKE_GAP_HOURS * 3600_000) {
         const got = await rapportLikePosts(handle, 1);
         if (got > 0) {
           rp.likedPosts += got;
@@ -1048,20 +1071,83 @@ const syncFollowBackRapport = async (): Promise<void> => {
 let fbCheckTick = 0;
 const maybeCheckFollowBacks = async () => {
   try {
-    fbCheckTick = (fbCheckTick + 1) % 5;
+    fbCheckTick = (fbCheckTick + 1) % 2; // 🔼 每 5 轮 → 每 2 轮，更快发现回关
     if (fbCheckTick !== 0) return;
     const byHandle = likeState.follows?.byHandle || {};
-    const candidates = Object.entries(byHandle).filter(([, s]) => (s as any)?.followedAt && !(s as any)?.followBackDetected);
-    if (!candidates.length) return;
-    const [handle] = candidates[Math.floor(Math.random() * candidates.length)];
-    logBehavior('fb_recheck_open', { targetHandle: handle });
+    // 撤销池：已 detected 且未撤销的号（检测对方是否已取关）；发现池：已关注未检测的号
+    const detected = Object.entries(byHandle).filter(([, s]) => (s as any)?.followBackDetected && !(s as any)?.followBackRevoked);
+    const undetected = Object.entries(byHandle).filter(([, s]) => (s as any)?.followedAt && !(s as any)?.followBackDetected);
+    const pool = detected.length ? detected : undetected; // 优先复查已回关号是否仍关注（取关撤销）
+    if (!pool.length) return;
+    const [handle] = pool[Math.floor(Math.random() * pool.length)];
+    logBehavior('fb_recheck_open', { targetHandle: handle, mode: detected.length ? 'revoke_check' : 'discover' });
     await openProfile(handle);
+    // 撤销检测：打开后若 "Follows you" 已消失，标记 followBackRevoked（数据真实，不再计入有效回关/DM）
+    if (detected.length) {
+      try {
+        const followsYou = await page.locator('text="Follows you"').first().isVisible({ timeout: 2000 }).catch(() => false);
+        const st = (likeState.follows!.byHandle![handle] || {}) as any;
+        if (st.followBackDetected && !followsYou && !st.followBackRevoked) {
+          st.followBackRevoked = true;
+          saveLikeState(likeState);
+          logBehavior('follow_back_revoked', { handle });
+          recordInteraction(handle, 'follow_back_revoked', { handle }).catch(() => {});
+        }
+      } catch {}
+    }
   } catch {}
 };
 
 // 2026-08-07: 捕获「主动关注我们」的回流粉（如 tattooshops.be）。我们未必先关注过他们，
 // 故需定期查自己账号的 Followers 列表，发现新粉即记为 follow_back，复用 syncFollowBackDmQueue
 // 在预热窗口后发购买向 DM，并写入 harvests DB 时间线供前台可见。
+// 🔁 回关互惠（reciprocal follow-back）：对方主动关注我们 → 礼貌回关。
+// 这是 IG 上风险最低的关注动作（对方已先选我们），三大收益：
+//   ① 留住粉丝、降低取关率（互关关系更牢，followBackRevoked 更少 → DM-able 不流失）；
+//   ② 对方回关后常会来逛我们主页/点赞 → 经 checkWhoLikedUs 把 DM 预热窗口提前到 1h；
+//   ③ 直接增加互关数 = "吸引人关注回来" 的核心增长动作，且不依赖 scheduler 任务量。
+// 受全局日关注上限（BOT_FOLLOW_DAILY_MAX，与主动关注共享预算）+ 限制信号检测保护。
+const reciprocalFollowBack = async (handle: string): Promise<boolean> => {
+  try {
+    if (!BOT_FOLLOW_ENABLED || !page) return false;
+    const selfIds = new Set([BOT_ID, ...(ACCOUNT_IDS || [])].map((x) => String(x).toLowerCase()));
+    if (selfIds.has(String(handle).toLowerCase())) return false;
+    const st = (likeState.follows!.byHandle![handle] || {}) as any;
+    if (st.followedAt) return false; // 已关注过，不重复
+    // 日上限（与主动关注共享同一预算，避免双向超量触发 IG 风控）
+    const dayKey = todayKey();
+    const cap = getFollowDayCap();
+    const current = Number(likeState.follows!.byDay?.[dayKey] || 0);
+    if (cap > 0 && current >= cap) {
+      logBehavior('reciprocal_follow_skip_cap', { handle, current, cap });
+      return false;
+    }
+    await openProfile(handle);
+    await page.waitForTimeout(jitter(1200, 2400));
+    const followSelectors = ['header button', 'header div[role="button"]', 'main button', 'main div[role="button"]', 'button', 'div[role="button"]'];
+    let followBtn: any = null;
+    for (const sel of followSelectors) {
+      const cand = page.locator(sel).filter({ hasText: /^\s*Follow(\s+Back)?\s*$/i }).first();
+      if ((await cand.count()) > 0) { followBtn = cand; break; }
+    }
+    if (!followBtn) { logBehavior('reciprocal_follow_btn_not_found', { handle }); return false; }
+    await followBtn.click({ timeout: 6000 });
+    await page.waitForTimeout(jitter(1200, 2400));
+    // 🛑 限制信号检测（回关也可能触发 "Try again later"）
+    try {
+      const bsig = await detectBlockSignal();
+      if (bsig) { await triggerAccountRest(bsig.severity, bsig.text); return false; }
+    } catch {}
+    likeState.follows!.byDay![dayKey] = Number(likeState.follows!.byDay![dayKey] || 0) + 1;
+    st.followedAt = Date.now();
+    likeState.follows!.byHandle![handle] = st;
+    saveLikeState(likeState);
+    logBehavior('reciprocal_follow_done', { handle, dayCount: likeState.follows!.byDay![dayKey], dayCap: cap });
+    recordInteraction(handle, 'follow', { reciprocated: true, followedAt: Date.now() }).catch(() => {});
+    return true;
+  } catch { return false; }
+};
+
 let incomingFbTick = 0;
 const checkIncomingFollowBacks = async () => {
   try {
@@ -1079,22 +1165,103 @@ const checkIncomingFollowBacks = async () => {
         .filter((h: string) => /^[A-Za-z0-9._]{2,30}$/.test(h) && !['p', 'reel', 'explore', 'accounts', 'direct', 'tv', 'stories'].includes(h))
     ).catch(() => []);
     const sample = (handles || []).slice(0, 40);
+    const selfIds = new Set([BOT_ID, ...(ACCOUNT_IDS || [])].map((x) => String(x).toLowerCase()));
+    const newFans: string[] = []; // 🔁 收集本轮新粉，关弹窗后统一礼貌回关（避免逐个导航打断列表枚举）
     for (const h of sample) {
+      if (selfIds.has(String(h).toLowerCase())) continue; // 🛑 不会把 bot 自己记为回关
       const st = (likeState.follows!.byHandle![h] || (likeState.follows!.byHandle![h] = {})) as any;
       if (st.followBackDetected) continue; // 已处理过
       if (!countryCache[h]) countryCache[h] = { country: inferCountryFromHandle(h) };
       st.country = st.country || countryCache[h].country;
       st.followBackDetected = true;
       st.followBackDetectedAt = Date.now();
-      st.followedAt = st.followedAt || 0; // 对方主动关注我们，我们不一定要回关
+      st.followedAt = st.followedAt || 0; // 对方主动关注我们；下方统一礼貌回关
       st.dmEligibleAt = BOT_DM_WARMUP_HOURS > 0 ? Date.now() + BOT_DM_WARMUP_HOURS * 3600_000 : 0;
       st.dmSent = false;
       saveLikeState(likeState);
       recordInteraction(h, 'follow_back', { organic: true, followBackDetectedAt: st.followBackDetectedAt }).catch(() => {});
       logBehavior('incoming_follow_back', { handle: h });
+      newFans.push(h);
     }
     await page.keyboard.press('Escape').catch(() => {});
     await page.waitForTimeout(jitter(800, 1500));
+    // 🔁 回关互惠：礼貌回关本轮新粉（受日关注上限 + 限制信号保护；与主动关注共享预算）
+    for (const h of newFans) {
+      try { await reciprocalFollowBack(h); } catch {}
+      await sleep(jitter(3000, 6000));
+    }
+  } catch {}
+};
+
+// 2026-08-12: 评论互动回流——扫描通知页"X 赞了你的评论 / 回复了你的评论"，
+// 仅在【当天检测、次日回关】的节奏下，对 detectSubject==='tattoo' 的互动者回关
+// （复用 reciprocalFollowBack 的 dedup/日上限/限制信号保护）。粉丝/穿孔/未知不跟，保 B2B 受众质量。
+// 检测与关注分离：检测到即开主页读 bio 判相关性并记录 followAt(≈次日)，次日 sweep 才真正回关，
+// 避免"人家一赞你立刻回关"的 bot 信号，也更自然。
+let commentEngagerTick = 0;
+const checkCommentEngagers = async () => {
+  try {
+    commentEngagerTick = (commentEngagerTick + 1) % 20;
+    if (commentEngagerTick !== 0) return;
+    if (!BOT_FOLLOW_ENABLED || !page) return;
+    const selfIds = new Set([BOT_ID, ...(ACCOUNT_IDS || [])].map((x) => String(x).toLowerCase()));
+    // 1) 扫通知 Others 页（含"赞了你的评论/回复了你的评论"的互动信号）
+    await page.goto(`${IG_BASE}/notifications/others/`, { waitUntil: 'domcontentloaded', timeout: 45000 });
+    await page.waitForTimeout(jitter(2000, 3500));
+    for (let s = 0; s < 3; s++) {
+      await page.mouse.wheel(0, 1500).catch(() => {});
+      await page.waitForTimeout(jitter(1200, 2200));
+    }
+    // 2) 抽取互动者：通知项含 actor 链接 + 描述文案（liked your comment / replied to your comment）
+    const raw = await page.evaluate(() => {
+      const out: { handle: string; text: string }[] = [];
+      const links = Array.from(document.querySelectorAll('a[href^="/"]')) as any[];
+      for (const link of links) {
+        const href = (link.getAttribute('href') || '').replace(/[?#].*$/, '').replace(/^\/+|\/+$/g, '');
+        if (!/^[A-Za-z0-9._]{2,30}$/.test(href)) continue;
+        let node: any = link;
+        for (let i = 0; i < 4 && node; i++) node = node.parentElement;
+        const text = (node ? node.innerText : (link as any).innerText || '').replace(/\s+/g, ' ').trim();
+        out.push({ handle: href, text });
+      }
+      return out;
+    }).catch(() => [] as { handle: string; text: string }[]);
+    const engagers: string[] = [];
+    for (const n of raw) {
+      if (selfIds.has(n.handle.toLowerCase())) continue;
+      if (/liked your comment|replied to your comment/i.test(n.text)) engagers.push(n.handle);
+    }
+    if (!engagers.length) return;
+    // 3) Pass A：当日检测新互动者，开主页读 bio 判相关性，记录次日 followAt（不立即回关）
+    for (const h of engagers.slice(0, 20)) {
+      const st = (likeState.follows!.byHandle![h] || (likeState.follows!.byHandle![h] = {})) as any;
+      if (st.followedAt || st.commentEngagerProcessed) continue;
+      try {
+        await openProfile(h);
+        await page.waitForTimeout(jitter(1000, 2000));
+        const facts = await captureProfileFacts().catch(() => null);
+        const subject = facts ? detectSubject(facts.bio, [], h).subject : 'unknown';
+        st.commentEngagerProcessed = true;
+        st.commentEngagerDetectedAt = Date.now();
+        st.commentEngagerSubject = subject;
+        st.commentEngagerFollowAt = Date.now() + jitter(20 * 3600_000, 28 * 3600_000); // 次日回关
+        saveLikeState(likeState);
+        logBehavior('comment_engager_detected', { handle: h, subject });
+        if (subject !== 'tattoo') logBehavior('comment_engager_skip', { handle: h, subject });
+      } catch {}
+      await sleep(jitter(2500, 5000));
+    }
+    // 4) Pass B：遍历持久化状态，次日已到点的 tattoo 互动者才真正回关（不依赖当前页）
+    for (const h of Object.keys(likeState.follows?.byHandle || {})) {
+      const st = likeState.follows!.byHandle![h] as any;
+      if (!st || st.followedAt || !st.commentEngagerFollowAt) continue;
+      if (Date.now() < st.commentEngagerFollowAt) continue;
+      if (st.commentEngagerSubject && st.commentEngagerSubject !== 'tattoo') continue; // 仅 tattoo 相关
+      logBehavior('comment_engager_follow', { handle: h });
+      recordInteraction(h, 'follow', { reason: 'comment_engager', subject: st.commentEngagerSubject || 'tattoo' }).catch(() => {});
+      await reciprocalFollowBack(h);
+      await sleep(jitter(3000, 6000));
+    }
   } catch {}
 };
 
@@ -1141,6 +1308,119 @@ const checkWhoLikedUs = async (): Promise<void> => {
     await page.keyboard.press('Escape').catch(() => {});
     await page.waitForTimeout(jitter(800, 1500));
   } catch {}
+};
+
+// 2026-08-11: 暖受众反关注（audience reciprocation）
+// 主动关注我们自己帖子下「点赞/评论过」的人——他们已对我们的内容感兴趣，回关率远高于冷触达 artist。
+// 与 checkWhoLikedUs 的区别：后者只标记「已认识粉丝」的赞；本函数发现并关注「新」暖线索，扩大漏斗顶部。
+// 受 AUDIENCE_FOLLOW_DAILY_MAX（默认 20）+ 限制信号检测保护；AUDIENCE_DM_ENABLED 为真时对关注的暖线索发软性 DM。
+let audienceTick = 0;
+const checkAudienceReciprocate = async () => {
+  try {
+    audienceTick = (audienceTick + 1) % 20;
+    if (audienceTick !== 0) return;
+    if (!BOT_FOLLOW_ENABLED || !page) return;
+    const me = (ACCOUNT_IDS && ACCOUNT_IDS[0]) || '';
+    if (!me) return;
+    const dayKey = todayKey();
+    const followCap = Math.max(0, Number(process.env.AUDIENCE_FOLLOW_DAILY_MAX || 20));
+    const dmEnabled = /^(1|true|yes|on)$/i.test(process.env.AUDIENCE_DM_ENABLED || 'true');
+    const dmCap = Math.max(0, Number(process.env.AUDIENCE_DM_DAILY_MAX || 10));
+    const postsScan = Math.max(1, Math.min(8, Number(process.env.AUDIENCE_POSTS_SCAN || 3)));
+    let followedToday = Number((likeState.audienceFollowsByDay || {})[dayKey] || 0);
+    let dmToday = Number((likeState.audienceDmByDay || {})[dayKey] || 0);
+    const selfIds = new Set([BOT_ID, ...(ACCOUNT_IDS || [])].map((x) => String(x).toLowerCase()));
+    const seen = new Set<string>();
+    const isHandle = (h: string) => /^[A-Za-z0-9._]{2,30}$/.test(h) && !['p','reel','explore','accounts','direct','tv','stories','saved','reels'].includes(h);
+
+    await page.goto(`${IG_BASE}/${me}/`, { waitUntil: 'domcontentloaded', timeout: 45000 });
+    await page.waitForTimeout(jitter(1500, 3000));
+    const postLinks = await page.locator('a[href*="/p/"]').evaluateAll((els: any[]) =>
+      Array.from(new Set(els.map((e: any) => (e.getAttribute('href') || '').split('?')[0]).filter((h: string) => h.includes('/p/')).slice(0, postsScan)))
+    ).catch(() => [] as string[]);
+    for (const pl of postLinks) {
+      if (followedToday >= followCap && dmToday >= dmCap) break;
+      await page.goto(`${IG_BASE}${pl}`, { waitUntil: 'domcontentloaded', timeout: 45000 });
+      await page.waitForTimeout(jitter(1800, 3200));
+      // 评论者：帖子页评论区里的 handle 链接
+      const commenters = await page.locator('a[href^="/"]').evaluateAll((els: any[]) =>
+        els.map((e: any) => (e.getAttribute('href') || '').replace(/[?#].*$/, '').replace(/^\/+|\/+$/g, ''))
+          .filter((h: string) => isHandle(h))
+      ).catch(() => [] as string[]);
+      for (const h of commenters) { if (h) seen.add(h); }
+      // 点赞者：打开 liked_by 弹窗
+      const likedBy = page.locator('a[href*="/liked_by/"]').first();
+      if ((await likedBy.count()) > 0) {
+        await likedBy.click({ timeout: 8000 }).catch(() => {});
+        await page.waitForTimeout(jitter(2000, 3500));
+        const likers = await page.locator('a[href^="/"]').evaluateAll((els: any[]) =>
+          els.map((e: any) => (e.getAttribute('href') || '').replace(/[?#].*$/, '').replace(/^\/+|\/+$/g, ''))
+            .filter((h: string) => isHandle(h))
+        ).catch(() => [] as string[]);
+        for (const h of likers) { if (h) seen.add(h); }
+        await page.keyboard.press('Escape').catch(() => {});
+        await page.waitForTimeout(jitter(800, 1500));
+      }
+    }
+    let scanned = 0;
+    for (const h of Array.from(seen)) {
+      if (scanned++ > 60) break; // 每轮最多处理 60 个候选，避免单次过长
+      if (followedToday >= followCap && dmToday >= dmCap) break;
+      if (selfIds.has(h.toLowerCase())) continue;
+      const st: any = (likeState.follows!.byHandle![h] || (likeState.follows!.byHandle![h] = {}));
+      if (st.followedAt) continue; // 已关注过，跳过
+      if (followedToday >= followCap) continue; // 已达关注上限，本轮回填只处理新关注的
+      const ok = await followAudienceLead(h);
+      if (!ok) continue;
+      followedToday++;
+      st.followedAt = Date.now();
+      st.audienceFollowedAt = Date.now();
+      likeState.audienceFollowsByDay = likeState.audienceFollowsByDay || {};
+      likeState.audienceFollowsByDay[dayKey] = followedToday;
+      saveLikeState(likeState);
+      recordInteraction(h, 'follow', { audience: true, reason: 'audience_reciprocate', followedAt: Date.now() }).catch(() => {});
+      logBehavior('audience_follow_done', { handle: h, dayCount: followedToday, dayCap: followCap });
+      // 可选：对暖线索发软性 DM（受 AUDIENCE_DM_DAILY_MAX + 限制信号保护）
+      if (dmEnabled && dmToday < dmCap) {
+        try {
+          const alang = (await detectLangForHandle(h)) || 'en';
+          const script = getAudienceDmScript(h, alang);
+          await executeDmTask({ target_handle: h, script_content: script } as any);
+          dmToday++;
+          likeState.audienceDmByDay = likeState.audienceDmByDay || {};
+          likeState.audienceDmByDay[dayKey] = dmToday;
+          saveLikeState(likeState);
+        } catch {}
+      }
+      await sleep(jitter(3000, 6000));
+    }
+  } catch {}
+};
+
+// 暖受众关注：打开对方主页点 Follow（与 reciprocalFollowBack 同源逻辑），受限制信号保护。
+const followAudienceLead = async (handle: string): Promise<boolean> => {
+  try {
+    if (!BOT_FOLLOW_ENABLED || !page) return false;
+    const selfIds = new Set([BOT_ID, ...(ACCOUNT_IDS || [])].map((x) => String(x).toLowerCase()));
+    if (selfIds.has(String(handle).toLowerCase())) return false;
+    await openProfile(handle);
+    await page.waitForTimeout(jitter(1200, 2400));
+    const followSelectors = ['header button', 'header div[role="button"]', 'main button', 'main div[role="button"]', 'button', 'div[role="button"]'];
+    let followBtn: any = null;
+    for (const sel of followSelectors) {
+      const cand = page.locator(sel).filter({ hasText: /^\s*Follow(\s+Back)?\s*$/i }).first();
+      if ((await cand.count()) > 0) { followBtn = cand; break; }
+    }
+    if (!followBtn) { logBehavior('audience_follow_btn_not_found', { handle }); return false; }
+    await followBtn.click({ timeout: 6000 });
+    await page.waitForTimeout(jitter(1200, 2400));
+    try {
+      const bsig = await detectBlockSignal();
+      if (bsig) { await triggerAccountRest(bsig.severity, bsig.text); return false; }
+    } catch {}
+    logBehavior('audience_follow_clicked', { handle });
+    return true;
+  } catch { return false; }
 };
 
 const logBehavior = (event: string, data: Record<string, any> = {}) => {
@@ -1265,45 +1545,6 @@ const recordInteraction = async (handle: string, eventType: string, detail: Reco
   }
 };
 
-const syncCommentDraftForHumanReview = async (item: CommentQueueItem) => {
-  if (!item.proposedComment) return;
-  try {
-    await postJson('/api/drafts/ingest', {
-      drafts: [{
-        id: item.id,
-        handle: item.handle,
-        postUrl: item.postUrl,
-        postKey: item.postKey,
-        proposedComment: item.proposedComment,
-        groundingRisks: item.groundingRisks || [],
-        safeFacts: item.safeFacts || [],
-        lang: 'en',
-      }],
-    });
-    logBehavior('comment_draft_synced', { queueId: item.id, handle: item.handle, postUrl: item.postUrl });
-  } catch (e: any) {
-    logBehavior('comment_draft_sync_failed', { queueId: item.id, handle: item.handle, reason: String(e?.message || e).slice(0, 160) });
-  }
-};
-
-const syncHumanReviewedComments = async () => {
-  try {
-    const payload = await getJson('/api/drafts?status=approved&limit=200');
-    const items = Array.isArray(payload?.items) ? payload.items : [];
-    for (const draft of items) {
-      const draftId = String(draft?.draft_id || '').trim();
-      if (draftId) markCommentHumanApproved(draftId);
-    }
-    const rejected = await getJson('/api/drafts?status=rejected&limit=200').catch(() => null);
-    for (const draft of (Array.isArray(rejected?.items) ? rejected.items : [])) {
-      const draftId = String(draft?.draft_id || '').trim();
-      if (draftId) markCommentHumanRejected(draftId);
-    }
-  } catch (e: any) {
-    logBehavior('comment_human_review_sync_failed', { reason: String(e?.message || e).slice(0, 160) });
-  }
-};
-
 // Kills any orphaned Chromium still holding our profile directory — e.g. a
 // persistent browser whose JS handle died (page crash / context lost) but the
 // OS process lingers and keeps SingletonLock. Without this, a relaunch hits
@@ -1311,91 +1552,44 @@ const syncHumanReviewedComments = async () => {
 // 2026-08-08: browser crashed ~8min in, then 12 retries all failed).
 // NOTE: this does a host-wide `taskkill /IM chrome.exe` on Windows. On a host
 // running multiple bot accounts (matrix), scope this by --user-data-dir instead.
-// Kills any orphaned Chromium still holding our profile directory — e.g. a
-// persistent browser whose process died on its own (renderer crash / OOM /
-// spontaneous close) but the OS process lingers and keeps SingletonLock.
-// Without reliable cleanup, a relaunch hits "Failed to create a ProcessSingleton
-// for your profile directory" and the user is left staring at a FROZEN orphan
-// window while the live bot window never appears (seen 2026-08-10: browser
-// closed on its own mid-run, relaunch kept failing → visible window showed no
-// actions). This version WAITS until the orphan is actually gone + the lock is
-// releasable before returning, so the subsequent launch succeeds first try.
-const clearProfileLock = async () => {
-  const { execSync } = require('child_process');
+const clearProfileLock = () => {
   const ud = path.resolve(process.cwd(), PROFILE_DIR);
-  const profName = path.basename(ud);
   const lockFiles = ['SingletonLock', 'SingletonSocket', 'SingletonCookie', 'SingletonTimedLock'];
-
-  const killByProfile = (): number => {
-    if (process.platform !== 'win32') {
+  // 必须先杀孤儿 chrome，再删锁文件：活进程以独占方式握着 SingletonLock（ERROR code 32），
+  // 文件被打开时 fs.rmSync 删不掉。VPS 专用机，直接整机关所有 chrome 最可靠。
+  try {
+    if (process.platform === 'win32') {
+      try { execSync('taskkill /F /IM chrome.exe', { stdio: 'ignore' }); }
+      catch { /* 没有 chrome 在跑也正常 */ }
+    } else {
       try { execSync(`pkill -f "${ud}" || true`, { stdio: 'ignore' }); } catch {}
-      return 1;
     }
-    let pids: string[] = [];
-    try {
-      // Get-CimInstance runs as admin and enumerates across sessions (incl.
-      // session-0 orphans left by a previous pm2 run), unlike a naive taskkill.
-      const psList = `Get-CimInstance Win32_Process -Filter "name='chrome.exe'" | Where-Object { $_.CommandLine -like '*${ud}*' -or $_.CommandLine -like '*${profName}*' } | ForEach-Object { $_.ProcessId }`;
-      const encoded = Buffer.from(psList, 'utf16le').toString('base64');
-      const out = execSync(`powershell -NoProfile -NonInteractive -EncodedCommand ${encoded}`, { encoding: 'utf8' });
-      pids = (out.match(/\d+/g) || []).map((s: string) => s.trim()).filter(Boolean);
-    } catch {}
-    for (const pid of pids) {
-      try { execSync(`taskkill /F /PID ${pid}`, { stdio: 'ignore' }); } catch {}
-    }
-    return pids.length;
-  };
-
-  const profileProcsAlive = (): boolean => {
-    if (process.platform !== 'win32') return false;
-    try {
-      const psList = `Get-CimInstance Win32_Process -Filter "name='chrome.exe'" | Where-Object { $_.CommandLine -like '*${ud}*' -or $_.CommandLine -like '*${profName}*' } | ForEach-Object { $_.ProcessId }`;
-      const encoded = Buffer.from(psList, 'utf16le').toString('base64');
-      const out = execSync(`powershell -NoProfile -NonInteractive -EncodedCommand ${encoded}`, { encoding: 'utf8' });
-      return (out.match(/\d+/g) || []).length > 0;
-    } catch { return false; }
-  };
-
-  // 1) nuke stale lock files immediately
-  for (const f of lockFiles) { try { fs.rmSync(path.join(ud, f), { force: true }); } catch {} }
-  // 2) kill orphan chrome holding this profile
-  killByProfile();
-  // 3) wait until the orphan is actually gone AND SingletonLock is removable.
-  //    A just-killed chrome can hold the lock handle for a moment; launching
-  //    before that releases → "Lock file can not be created! Error code: 32".
-  const deadline = Date.now() + 8000;
-  let didHostKill = false;
-  while (Date.now() < deadline) {
-    let lockGone = true;
-    try { fs.rmSync(path.join(ud, 'SingletonLock'), { force: true }); } catch { lockGone = false; }
-    const alive = profileProcsAlive();
-    if (!alive && lockGone) return;
-    // keep the rest of the singleton files tidy each pass
-    for (const f of lockFiles) { try { fs.rmSync(path.join(ud, f), { force: true }); } catch {} }
-    // if still alive near the end, escalate to a host-wide kill (VPS is dedicated)
-    if (!didHostKill && Date.now() > deadline - 4000) {
-      try { execSync('taskkill /F /IM chrome.exe', { stdio: 'ignore' }); } catch {}
-      didHostKill = true;
-    }
-    await sleep(600);
+  } catch (e) {
+    console.warn('[bot-real] clearProfileLock: kill failed:', (e as any)?.message);
+  }
+  // 进程已死、锁文件不再被占用，删除残留锁文件。删不掉会在下一轮重试（ensureBrowser 有 12 次退避）兜底。
+  for (const f of lockFiles) {
+    try { fs.rmSync(path.join(ud, f), { force: true }); } catch {}
   }
 };
 
 const ensureBrowser = async () => {
+  // 已有一个在 instagram.com 的页面 → 直接复用，绝不重新开浏览器（避免多标签堆积）。
   if (context && page) {
     try {
       const url = page.url();
       if (url && url.includes('instagram.com')) return;
     } catch {}
+    // 有 context 但页面不在 IG（卡在 about:blank 等）→ 先关干净，再重建，不留孤儿。
+    try { await context.close(); } catch {}
     context = null as any; page = null as any;
   }
 
-  // Retry with backoff so a transiently-unavailable browser (e.g. external Chrome
-  // not yet up in CDP mode, or a slow first launch in persistent mode) does NOT
-  // crash the whole process. The process only exits after exhausting all retries,
-  // at which point pm2 restarts it and tries again.
-  const MAX_ATTEMPTS = 12;
-  const BACKOFF_MS = 15_000;
+  // Retry with backoff. 关键：每一次重试前，上一轮若已半启动了一个浏览器/标签页，
+  // 必须在 catch 里把它 context.close() 掉 —— 否则孤儿浏览器 + 孤儿标签会越积越多
+  // （之前"七八个 about:blank"就是这样来的：12 次重试每次都 newPage 且不清旧进程）。
+  const MAX_ATTEMPTS = 4;
+  const BACKOFF_MS = 8_000;
   let lastErr: any;
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     try {
@@ -1404,47 +1598,28 @@ const ensureBrowser = async () => {
         // Login session is saved in the profile directory.
         const profilePath = path.resolve(process.cwd(), PROFILE_DIR);
         if (!fs.existsSync(profilePath)) fs.mkdirSync(profilePath, { recursive: true });
-        const userDataDir = profilePath;
-        await clearProfileLock(); // kill any orphan Chrome + wait for lock release before launching
-        context = await chromium.launchPersistentContext(userDataDir, {
+        // 🔴 每次启动前：杀光所有孤儿 chrome + 删残留锁文件，确保不会撞 ProcessSingleton，
+        //    也不会因为上一次没退干净的 chrome 而反复失败重试。
+        clearProfileLock();
+        context = await chromium.launchPersistentContext(profilePath, {
           headless: HEADLESS,
           viewport: { width: 1280, height: 900 },
           args: [
             '--no-sandbox',
-            '--disable-gpu',
             '--disable-blink-features=AutomationControlled',
           ],
         }) as any;
-        // 自愈合：chromium 若自己崩了（renderer crash / OOM / 误关），立即清空
-        // context/page，下一次 ensureBrowser 会起一个全新可见窗口，避免留下"冻屏孤儿窗"。
-        try {
-          (context as any).on?.('close', () => {
-            console.warn('[bot-real] ⚠ browser context closed unexpectedly — will relaunch a fresh visible window on next cycle');
-            context = null as any; page = null as any;
-          });
-          const _b = (context as any).browser?.();
-          _b?.on?.('disconnected', () => {
-            console.warn('[bot-real] ⚠ browser disconnected unexpectedly — will relaunch a fresh visible window on next cycle');
-            context = null as any; page = null as any;
-          });
-        } catch {}
-        // Patch pages to hide automation
-        const existingPages = (context as any).pages?.() || [];
-        if (existingPages.length > 0) {
-          for (const p of existingPages) {
-            try {
-              if (p.url().includes('instagram.com')) { page = p; break; }
-            } catch {}
-          }
-        }
-        if (!page) {
-          page = await (context as any).newPage();
-        }
+        // 🔴 单标签铁律：Playwright 启动 persistent 时第一个页永远是 about:blank，
+        // 直接复用它并导航到 IG，绝不 newPage 开第二个/第三个标签。
+        const allPages = (context as any).pages?.() || [];
+        page = allPages[0] || (await (context as any).newPage());
         await page.addInitScript(() => {
           Object.defineProperty(navigator, 'webdriver', { get: () => false });
         });
-        if (!page.url() || !page.url().includes('instagram.com')) {
-          await page.goto(IG_BASE, { waitUntil: 'domcontentloaded', timeout: 45000 });
+        await page.goto(IG_BASE, { waitUntil: 'domcontentloaded', timeout: 45000 });
+        // 关掉当前页之外的一切标签（任何残留 about:blank / 其它页），保证永远只有唯一一个 IG 标签。
+        for (const p of ((context as any).pages?.() || [])) {
+          if (p !== page) { try { await p.close(); } catch {} }
         }
         await page.bringToFront().catch(() => {});
         console.log('[bot-real] launched persistent browser (stealth mode)');
@@ -1466,7 +1641,6 @@ const ensureBrowser = async () => {
       }
       if (!page) {
         page = await context.newPage();
-        // Attempt anti-detection before navigation (may not fully work in CDP mode).
         try {
           await page.addInitScript(() => {
             Object.defineProperty(navigator, 'webdriver', { get: () => false });
@@ -1479,15 +1653,11 @@ const ensureBrowser = async () => {
       return;
     } catch (e) {
       lastErr = e;
-      const msg = String(e?.message || e);
-      console.error(`[bot-real] browser ensure attempt ${attempt}/${MAX_ATTEMPTS} failed: ${msg}`);
-      // 锁还没释放（ProcessSingleton / profile already in use）：立刻再清一次孤儿 +
-      // 短等待，不要干等 15s，让可见窗口尽快重新弹出来。
-      if (/ProcessSingleton|profile is already in use|already in use|SingletonLock|Lock file can not be created/i.test(msg)) {
-        console.warn('[bot-real] profile lock still held — clearing orphan chrome and retrying shortly');
-        await clearProfileLock();
-        await sleep(2000);
-      } else if (attempt < MAX_ATTEMPTS) {
+      console.error(`[bot-real] browser ensure attempt ${attempt}/${MAX_ATTEMPTS} failed: ${e?.message || e}`);
+      // 🔴 失败后若留下了半残 context，立刻关掉它，避免孤儿进程/标签堆积（多标签根因）。
+      try { if (context) { await context.close(); } } catch {}
+      context = null as any; page = null as any;
+      if (attempt < MAX_ATTEMPTS) {
         await sleep(BACKOFF_MS);
       }
     }
@@ -1616,16 +1786,80 @@ const isOnLoginPage = async (): Promise<boolean> => {
   return false;
 };
 
-// 正向信号：只有真正登录后的首页才有这些元素（首页导航 / 私信入口）
-const isLoggedInPositive = async (): Promise<boolean> => {
-  if (!page) return false;
+// ── 账号休息（被动，2026-08-10）：IG 弹出"操作被限制/稍后再试/暂时被封"等信号时，
+//    整个账号停止一切动作（点赞/评论/关注/DM/回关复检），按严重程度休息 4–72h，
+//    并把这次休息记入数据（recordInteraction 'account_rest'，前台可见），休息完自动恢复。
+//    信号源自真实 DOM 文本，故为"数据驱动"——IG 没说限流就不休息；bot 重启也继续休息。 ──
+const BLOCK_PATTERNS: { re: RegExp; severity: 'soft' | 'hard' | 'checkpoint' }[] = [
+  // 硬封：临时封禁 / 禁止关注·点赞·评论 —— 长休息
+  { re: /temporarily blocked|we('|’)?ve temporarily|blocked from (following|liking|commenting|doing this)/i, severity: 'hard' },
+  // 软封：操作被拦截 / 稍后再试 / 请求过多 / 限制频率 —— 中休息
+  { re: /action (was )?blocked|this action has been blocked|we restrict certain activity|please try again later|try again later|too many requests|too many (actions|attempts)|limit how often you (can )?do/i, severity: 'soft' },
+  // 验证/安全检查：确认非机器人 / 异常活动 / 验证身份 —— 中短休息
+  { re: /confirm you('|’)?re (not )?a (robot|human)|security check|unusual (login )?activity|verify your (identity|account)|suspicious (login )?activity/i, severity: 'checkpoint' },
+];
+
+// 扫描当前页面（body + 所有 dialog）是否出现 IG 限制信号。返回 severity + 原文，或 null。
+const detectBlockSignal = async (): Promise<{ severity: string; text: string } | null> => {
+  if (!page) return null;
   try {
-    const loggedInMarkers = await page.locator('svg[aria-label="Home"], a[href="/direct/inbox/"], a[href="/"]').count();
-    if (loggedInMarkers > 0) return true;
+    const bodyText = (await page.locator('body').innerText().catch(() => '')) || '';
+    const dialogTexts = (await page.locator('div[role="dialog"]').allInnerTexts().catch(() => [] as string[])) || [];
+    const text = (bodyText + ' ' + dialogTexts.join(' ')).toLowerCase();
+    // 先粗筛强信号词，避免普通帖子正文误触发
+    if (!/(block|restrict|temporarily|suspicious|verify|security check|unusual activity|too many)/i.test(text)) return null;
+    for (const p of BLOCK_PATTERNS) {
+      const m = text.match(p.re);
+      if (m) return { severity: p.severity, text: m[0].slice(0, 140) };
+    }
   } catch {}
-  return false;
+  return null;
 };
 
+// 休息时长：按严重程度 + 账号阶段（新/过渡账号封得狠，休息加倍）
+const getRestCooldownMs = (severity: string): number => {
+  const stage = String(lastAccountStage || 'stable').toLowerCase();
+  const young = stage === 'new' || stage === 'transition';
+  if (severity === 'hard') return Math.round(jitter(24 * 3600_000, 72 * 3600_000) * (young ? 1.5 : 1));
+  if (severity === 'checkpoint') return jitter(2 * 3600_000, 6 * 3600_000);
+  return jitter(4 * 3600_000, 12 * 3600_000); // soft
+};
+
+const isAccountResting = (): boolean => {
+  const r = likeState.rest;
+  return !!r && typeof r.until === 'number' && Date.now() < r.until;
+};
+
+// 触发账号休息：停止一切动作直到冷却结束，记入数据，离开限制页
+const triggerAccountRest = async (severity: string, text: string) => {
+  if (isAccountResting()) return; // 已在休息中不重复触发
+  const cooldown = getRestCooldownMs(severity);
+  likeState.rest = {
+    until: Date.now() + cooldown,
+    reason: text,
+    severity,
+    at: Date.now(),
+    count: (likeState.rest?.count || 0) + 1,
+  };
+  saveLikeState(likeState);
+  breakUntil = Math.max(breakUntil, likeState.rest.until); // 同时挂起拟人休息逻辑
+  logBehavior('account_rest_triggered', {
+    severity,
+    text,
+    restUntil: new Date(likeState.rest.until).toISOString(),
+    restCount: likeState.rest.count,
+  });
+  console.log(`[bot-real] 🛑 ACCOUNT REST (${severity}): "${text}". Resting until ${new Date(likeState.rest.until).toISOString()} (~${Math.round(cooldown / 3600_000)}h). All actions paused; heartbeat/login kept alive.`);
+  // 记入数据：账号级事件（event_type=account_rest 不进客户 funnel 的 like/follow/dm 计数，前台可见"账号休息"）
+  recordInteraction(BOT_ID, 'account_rest', { severity, reason: text, restUntil: likeState.rest.until }).catch(() => {});
+  // 离开限制对话框，回到 IG 首页，避免弹窗卡住后续流程
+  if (page) { try { await page.goto(IG_BASE, { waitUntil: 'domcontentloaded', timeout: 20000 }); } catch {} }
+};
+
+// 🔴 登录闸门修复（2026-08-09）：之前用「正向标记」（Home svg / inbox 链接）判断已登录，
+// 但页面刚加载或 IG DOM 微调时这些标记缺失 → 误判 login state unclear 并永久暂停，
+// 而其实会话有效（任务已跑成）。改为：只要 URL 在 instagram.com 且不在登录/挑战页就放行；
+// 仅当确认在登录/挑战页、或页面根本没加载到 IG（about:blank）时才等待/暂停。
 const waitUntilLoggedIn = async (): Promise<boolean> => {
   // page 为 null 时先尝试拉起浏览器，避免在"无页面"状态下误判已登录去抢任务
   if (!page) {
@@ -1638,10 +1872,10 @@ const waitUntilLoggedIn = async (): Promise<boolean> => {
   let printed = false;
   for (let i = 0; i < 180; i++) { // 最多等 ~15 分钟
     try {
+      // 在登录/挑战页：不导航，避免打断用户正在输入的登录框，原地等
       if (await isOnLoginPage()) {
-        // 在登录/挑战页：不导航，避免打断用户正在输入的登录框，原地等
         if (!printed) {
-          console.log('[bot-real] ⏸  NOT logged in — pausing ALL task execution. Finish logging in on the IG window (username + password), then the bot auto-resumes. No tasks will be grabbed or marked failed while waiting.');
+          console.log('[bot-real] ⏸  NOT logged in / challenge — pausing ALL task execution. Finish logging in on the IG window (username + password), then the bot auto-resumes. No tasks will be grabbed or marked failed while waiting.');
           printed = true;
         }
         await sleep(5000);
@@ -1649,6 +1883,7 @@ const waitUntilLoggedIn = async (): Promise<boolean> => {
       }
       // 不在登录页 → 主动跳回 IG 首页，强制 IG 重新校验会话（过期会重定向到登录页）
       await page.goto(IG_BASE, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+      try { await page.waitForLoadState('domcontentloaded', { timeout: 8000 }); } catch {}
       // 跳回后可能已被踢到登录页
       if (await isOnLoginPage()) {
         if (!printed) {
@@ -1658,13 +1893,22 @@ const waitUntilLoggedIn = async (): Promise<boolean> => {
         await sleep(5000);
         continue;
       }
-      // 确有"已登录"正向信号 → 放行
-      if (await isLoggedInPositive()) return true;
-      // 介于两者之间（加载中/挑战页未识别）：继续等，宁可多等不误跑
+      // 🔴 关键：不再依赖脆弱 DOM 正向标记。只要 URL 在 instagram.com 且不在登录/挑战页 → 视为已登录放行。
+      const urlNow = (page.url() || '').toLowerCase();
+      if (!urlNow.includes('instagram.com')) {
+        // 页面还没真正加载到 IG（可能 about:blank / 加载失败）→ 重试，不误判为已登录去操作空白页
+        if (!printed) {
+          console.log('[bot-real] ⏸  page not on instagram.com yet (still loading/blank) — waiting for load.');
+          printed = true;
+        }
+        await sleep(5000);
+        continue;
+      }
       if (!printed) {
-        console.log('[bot-real] ⏸  login state unclear (loading/challenge) — pausing, waiting for you to resolve login.');
+        console.log('[bot-real] ✅ login confirmed (on instagram.com, not on login/challenge) — resuming tasks.');
         printed = true;
       }
+      return true;
     } catch {}
     await sleep(5000);
   }
@@ -2267,11 +2511,7 @@ const pruneRecentCommentHashes = () => {
 };
 
 const shouldTryComment = (handle: string, likeSummary?: LikeActionSummary) => {
-  if (BOT_COMMENT_DRAFT_HARD_DISABLED) return { ok: false, reason: 'comment_draft_hard_disabled' };
   if (!BOT_COMMENT_ENABLED) return { ok: false, reason: 'comment_disabled' };
-  if (BOT_COMMENT_REVIEW_MODE && BOT_REVIEW_PAUSE_AFTER_DRAFT && getCommentQueueStats().approved > 0) {
-    return { ok: false, reason: 'comment_review_waiting_for_human' };
-  }
 
   // No more "like first" or "first touch window" — comment when a good post is found.
   // Chance roll keeps volume human-scale.
@@ -2314,12 +2554,19 @@ const BOT_FOLLOW_POST_COOLDOWN_HOURS = Math.max(12, Number(process.env.BOT_FOLLO
 const BOT_FOLLOW_REQUIRE_LIKE = String(process.env.BOT_FOLLOW_REQUIRE_LIKE || 'false').toLowerCase() === 'true';
 
 const shouldTryFollow = (handle: string, likeSummary: LikeActionSummary, command?: CommandPayload, facts?: ProfileFacts) => {
+  // [0] 关注跳过自己（防御：不会去关注 bot 自身账号）
+  const selfIds = new Set([BOT_ID, ...(ACCOUNT_IDS || [])].map((x) => String(x).toLowerCase()));
+  if (selfIds.has(String(handle).toLowerCase())) return { ok: false, reason: 'self' };
+
   // [1] 总开关
   if (!BOT_FOLLOW_ENABLED) return { ok: false, reason: 'follow_disabled' };
 
-  // [2] 仅高优先级
+  // [2] 优先级闸门（默认仅 high；设 BOT_FOLLOW_PRIORITIES=high,medium 或 * 可放宽以提升关注量）
   const priority = String(command?.followPriority || '').toLowerCase();
-  if (priority && priority !== 'high') return { ok: false, reason: `follow_priority_${priority}` };
+  const allowedPriors = (process.env.BOT_FOLLOW_PRIORITIES || 'high').split(',').map((s) => s.trim().toLowerCase());
+  if (priority && !allowedPriors.includes(priority) && !allowedPriors.includes('*')) {
+    return { ok: false, reason: `follow_priority_${priority}` };
+  }
 
   // [3] 触达次数（至少访问过N次）
   const touchCount = likeState.touches?.[handle] || 0;
@@ -2376,6 +2623,11 @@ const shouldTryFollow = (handle: string, likeSummary: LikeActionSummary, command
 
 const tryFollowOnProfile = async (handle: string, likeSummary: LikeActionSummary, command?: CommandPayload): Promise<FollowActionSummary> => {
   if (!page) return { attempted: 0, followed: 0, skipped: true, reason: 'no_page' };
+  // 穿孔号不关注（整个不碰，不污染回关/DM 漏斗）
+  if (isPiercingHandle(handle)) {
+    logBehavior('follow_skip_piercing_handle', { handle });
+    return { attempted: 0, followed: 0, skipped: true, reason: 'follow_skip_piercing_handle' };
+  }
   const gate = shouldTryFollow(handle, likeSummary, command);
   dbg(`[dbg-follow] gate=${JSON.stringify(gate)} handle=${handle}`);
   if (!gate.ok) return { attempted: 0, followed: 0, skipped: true, reason: gate.reason };
@@ -2403,6 +2655,15 @@ const tryFollowOnProfile = async (handle: string, likeSummary: LikeActionSummary
   await followBtn.click({ timeout: 6000 });
   await page.waitForTimeout(jitter(1200, 2400));
 
+  // 🛑 检测 IG 限制信号（关注后常弹 "Action Blocked / Try again later"）
+  try {
+    const bsig = await detectBlockSignal();
+    if (bsig) {
+      await triggerAccountRest(bsig.severity, bsig.text);
+      return { attempted: 1, followed: 0, skipped: true, reason: `account_blocked_${bsig.severity}` };
+    }
+  } catch {}
+
   const dayKey = todayKey();
   likeState.follows!.byDay![dayKey] = Number(likeState.follows!.byDay![dayKey] || 0) + 1;
   likeState.follows!.byHandle![handle] = { followedAt: Date.now() };
@@ -2413,100 +2674,45 @@ const tryFollowOnProfile = async (handle: string, likeSummary: LikeActionSummary
 };
 
 const buildCommentText = async (facts?: ProfileFacts, postMeta?: any): Promise<string> => {
-  const visionFacts = Array.isArray(postMeta?.visionFacts)
-    ? postMeta.visionFacts.map((fact: unknown) => String(fact).trim()).filter(Boolean).slice(0, 8)
-    : [];
+  // ⚠️ 不再优先取预热池：池里是启动时脱离具体帖生成的泛评，回在真实帖上最像 bot。
+  // 改为实时按帖生成；仅在 DeepSeek 失败（超时/无 key）才退化为池或口语模板。
   // DeepSeek 实时生成
-  const commentStyle = visionFacts.length
-    ? ''
-    : (postMeta?.postStyle || getPrimaryStyle(facts) || '');
-  const styleConf = visionFacts.length ? 'low' : (postMeta?.styleConfidence || 'low');
+  const commentStyle = postMeta?.postStyle
+    || getPrimaryStyle(facts)
+    || '';
+  const styleConf = postMeta?.styleConfidence || 'low';
 
   try {
     const result = await Promise.race([
       generateComment({
         caption: postMeta?.caption?.slice(0, 300) || facts?.sampleCaption?.slice(0, 300),
-        imageAlt: visionFacts.length
-          ? `Verified visual facts only: ${visionFacts.join('; ')}`.slice(0, 400)
-          : facts?.imageAltHints?.join(' ').slice(0, 200),
+        imageAlt: postMeta?.imageAlt || facts?.imageAltHints?.join(' ').slice(0, 200),
         artistHandle: facts?.title?.replace(/[\(\)@]/g, '').trim(),
         style: commentStyle,
         styleConfidence: styleConf,
+        techniqueHints: postMeta?.techniqueHints,
+        visionTechniqueHints: postMeta?.visionTechniqueHints,
+        visionDescription: postMeta?.visionDescription,
         likeCount: postMeta?.likeCount,
         commentCount: postMeta?.commentCount,
-        isReel: postMeta?.isReel,
-        tags: visionFacts,
-      }),
+      isReel: postMeta?.isReel,
+      postIntent: postMeta?.postIntent,
+      postSummary: postMeta?.postSummary,
+      postTone: postMeta?.postTone,
+      sensitive: postMeta?.sensitive,
+    }),
       new Promise<{ text: string }>((_, reject) =>
         setTimeout(() => reject(new Error('comment_gen_timeout')), 8000)
       ),
     ]);
+    // 异步补充池子
+    refillPool().catch(() => {});
     return result.text;
   } catch {
-    if (visionFacts.length) {
-      // A grounded comment must never silently fall back to an unverified claim.
-      // The queue reviewer will block this candidate and preserve the reason.
-      throw new Error('grounded_comment_generation_failed');
-    }
-    // Fallback: 模板库（按风格分层，保证不阻塞）
-    const fallbacks = {
-      professional: [
-        'Love the shading on this piece.',
-        'Clean linework, really nice result.',
-        'The composition here is on point.',
-        'Such solid work, great execution.',
-        'Incredible detail on this one.',
-        'The contrast in this is beautiful.',
-        'Really like the depth here.',
-        'Super clean. Great placement too.',
-        'The blackwork here is super tight.',
-        'Great saturation throughout.',
-        'Really consistent line weight here.',
-        'Those gradients are blended beautifully.',
-      ],
-      casual: [
-        'This is so clean!',
-        'Wow, this turned out amazing.',
-        'Straight fire as always.',
-        'This is really well done.',
-        'Such a cool piece.',
-        'Love how this came together.',
-        'This is beautiful work.',
-        'Absolutely love this style.',
-        'So good! The tones are perfect.',
-        'This hits different, really nice.',
-      ],
-      question: [
-        'Love this! How long did this session take?',
-        'The detail here is insane. What needle config did you use?',
-        'Beautiful work. Is this healed or fresh in the photo?',
-        'This is so clean. Do you design these yourself?',
-        'Love the tones. What ink brand do you prefer for this style?',
-      ],
-      detail_focused: [
-        'Those fine lines in the background are so precise.',
-        'The stipple shading here is perfectly executed.',
-        'That color packing is seriously impressive.',
-        'Really love how you handled the negative space.',
-        'The texture work in the hair/fur is next level.',
-        'That whip shading gradient is super smooth.',
-        'The dot work detail is crazy good on this.',
-        'Crisp outlines and perfect fill, this is solid.',
-      ],
-      short_praise: [
-        'So clean!',
-        'Beautiful work!',
-        'Love this!',
-        'Amazing piece!',
-        'Incredible detail!',
-        'Super clean!',
-        'Fire!',
-        'Really nice!',
-      ],
-    };
-    // Flatten all categories and pick one
-    const allFallbacks = Object.values(fallbacks).flat();
-    return allFallbacks[randInt(0, allFallbacks.length - 1)];
+    // Fallback 链：预热池(仍有上下文时比固定模板自然) → 锚定本帖的互动钩子（绝不用泛泛 "fire"，否则无互动无涨粉）
+    const pooled = getFromPool();
+    if (pooled) return pooled;
+    return getInteractionFallback(postMeta?.postIntent, postMeta?.sensitive);
   }
 };
 
@@ -2565,190 +2771,16 @@ const tryPostCommentOnOpenModal = async (text: string) => {
   return true;
 };
 
-type CapturedPostMedia = {
-  images: string[];
-  complete: boolean;
-  reason: string;
-};
-
-const blockedVisionResult = (reason: string,  mediaCount: number): VisionGateResult => ({
-  category: 'blocked', confidence: 0, reason, ok: false, mediaCount,
-  modelA: [], modelB: [], tattooMediaIndexes: [], safeFacts: [],
-});
-
-/**
- * 在已打开的帖子 modal 内只读少量公开评论（不滚动、不互动）。fail-open：
- * 任何异常返回空数组，不影响主任务。用于充实公开评论语料库。
- */
-const scrapeVisibleComments = async (maxCount = 20, excludeCaption?: string): Promise<string[]> => {
-  if (!page) return [];
-  try {
-    const texts = await page.evaluate((max: number, cap: string) => {
-      const dialog = document.querySelector('div[role="dialog"]') || document.querySelector('article') || document.body;
-      const nodes = Array.from(dialog.querySelectorAll('span[dir="auto"]'));
-      const out: string[] = [];
-      for (const n of nodes) {
-        const txt = (n.textContent || '').replace(/\s+/g, ' ').trim();
-        if (txt.length >= 8) out.push(txt);
-        if (out.length >= max) break;
-      }
-      return out;
-    }, maxCount, excludeCaption || '');
-    return (texts as string[]).filter(Boolean).filter((t) => !(cap && t === cap.trim()));
-  } catch {
-    return [];
-  }
-};
-
-/** Locate the largest post media; Reels prefer video over the same-sized poster image. */
-const findPrimaryPostMedia = async (root: any): Promise<any | null> => {
-  if (!page) return null;
-  const candidates = root.locator('img, video');
-  const count = await candidates.count();
-  const reelPage = /instagram\.com\/reels?\//i.test(page.url());
-  let best: { locator: any; score: number } | null = null;
-  for (let idx = 0; idx < count; idx++) {
-    const candidate = candidates.nth(idx);
-    try {
-      if (!(await candidate.isVisible())) continue;
-      const box = await candidate.boundingBox();
-      if (!box || box.width < 240 || box.height < 240) continue;
-      const area = box.width * box.height;
-      const tag = await candidate.evaluate((node: any) => node.tagName.toLowerCase());
-      const score = area * (reelPage && tag === 'video' ? 100 : 1);
-      if (!best || score > best.score) best = { locator: candidate, score };
-    } catch {}
-  }
-  return best?.locator || null;
-};
-
-const capturePrimaryPostFrames = async (root: any): Promise<{ images: Buffer[]; complete: boolean; reason: string }> => {
-  if (!page) return { images: [], complete: false, reason: 'no_page' };
-  const media = await findPrimaryPostMedia(root);
-  if (!media) return { images: [], complete: false, reason: 'media_not_found' };
-  const tag = await media.evaluate((node: any) => node.tagName.toLowerCase()).catch(() => '');
-  if (tag !== 'video') return { images: [await media.screenshot({ type: 'png' })], complete: true, reason: 'image_captured' };
-  const state = await media.evaluate((node: any) => ({ currentTime: Number(node.currentTime || 0), paused: node.paused, duration: Number(node.duration || 0) })).catch(() => null);
-  if (!state || !Number.isFinite(state.duration) || state.duration < 1) return { images: [], complete: false, reason: 'video_duration_unavailable' };
-  const images: Buffer[] = [];
-  try {
-    await media.evaluate((node: any) => node.pause()).catch(() => {});
-    for (let idx = 0; idx < BOT_REEL_FRAME_COUNT; idx++) {
-      const target = Math.min(state.duration - 0.05, state.duration * ((idx + 0.5) / BOT_REEL_FRAME_COUNT));
-      await media.evaluate((node: any, time: number) => { node.currentTime = time; }, target);
-      let ready = false;
-      for (let attempt = 0; attempt < 20; attempt++) {
-        await page.waitForTimeout(250);
-        ready = await media.evaluate((node: any, time: number) => !node.seeking && Math.abs(node.currentTime - time) < 0.15 && node.readyState >= 2, target).catch(() => false);
-        if (ready) break;
-      }
-      if (!ready) throw new Error(`seek_timeout_at_frame_${idx + 1}`);
-      images.push(await media.screenshot({ type: 'png' }));
-    }
-  } catch (error: any) {
-    return { images, complete: false, reason: `video_frame_capture_failed:${String(error?.message || error).slice(0, 60)}` };
-  } finally {
-    await media.evaluate((node: any, original: any) => { node.currentTime = original.currentTime; if (!original.paused) void node.play().catch(() => {}); }, state).catch(() => {});
-  }
-  return { images, complete: images.length === BOT_REEL_FRAME_COUNT, reason: `video_${images.length}_frames_captured` };
-};
-
-const findCarouselNext = async (root: any): Promise<any | null> => {
-  const selectors = [
-    'button[aria-label="Next"]',
-    'button:has(svg[aria-label="Next"])',
-    'div[role="button"]:has(svg[aria-label="Next"])',
-    'button[aria-label="下一步"]',
-    'button:has(svg[aria-label="下一步"])',
-  ];
-  for (const selector of selectors) {
-    const matches = root.locator(selector);
-    const count = await matches.count();
-    for (let idx = 0; idx < count; idx++) {
-      const candidate = matches.nth(idx);
-      try { if (await candidate.isVisible()) return candidate; } catch {}
-    }
-  }
-  return null;
-};
-
-/** Capture every media item in the currently open single post. */
-const captureAllOpenPostMedia = async (): Promise<CapturedPostMedia> => {
-  if (!page) return { images: [], complete: false, reason: 'no_page' };
-  let root: any = page.locator('div[role="dialog"]').last();
-  if ((await root.count()) === 0) root = page.locator('article').first();
-  if ((await root.count()) === 0) root = page.locator('[role="main"]').first();
-  if ((await root.count()) === 0) root = page.locator('main').first();
-  if ((await root.count()) === 0) root = page.locator('body');
-  if ((await root.count()) === 0) return { images: [], complete: false, reason: 'post_root_not_found' };
-
-  const images: string[] = [];
-  const hashes = new Set<string>();
-  for (let idx = 0; idx < BOT_COMMENT_MAX_CAROUSEL_MEDIA; idx++) {
-    const captured = await capturePrimaryPostFrames(root);
-    if (!captured.complete) return { images: [...images, ...captured.images.map((image) => image.toString('base64'))], complete: false, reason: `slide_${idx + 1}_${captured.reason}` };
-    for (const image of captured.images) {
-      const hash = createHash('sha256').update(image).digest('hex');
-      if (hashes.has(hash)) return { images, complete: false, reason: `slide_${idx + 1}_duplicate_frame` };
-      hashes.add(hash);
-      images.push(image.toString('base64'));
-    }
-
-    const next = await findCarouselNext(root);
-    if (!next) return { images, complete: true, reason: `all_media_captured:${images.length}_review_frames` };
-    try {
-      await next.click({ timeout: 6000 });
-      await page.waitForTimeout(jitter(900, 1600));
-    } catch {
-      return { images, complete: false, reason: `slide_${idx + 1}_next_click_failed` };
-    }
-  }
-  return { images, complete: false, reason: 'carousel_safety_cap_reached' };
-};
-
-const saveCommentReview = (input: {
-  handle: string;
-  postUrl: string;
-  media: CapturedPostMedia;
-  vision: VisionGateResult;
-  queueId?: string;
-  technical?: unknown;
-  safeFacts?: string[];
-  groundingRisks?: string[];
-  proposedComment?: string;
-}) => {
-  if (!BOT_COMMENT_REVIEW_MODE) return;
-  try {
-    if (!fs.existsSync(COMMENT_REVIEW_DIR)) fs.mkdirSync(COMMENT_REVIEW_DIR, { recursive: true });
-    const safeHandle = normalizeHandle(input.handle).replace(/[^a-z0-9_.-]/gi, '_') || 'unknown';
-    const reviewId = `${Date.now()}_${safeHandle}`;
-    const mediaFiles: string[] = [];
-    input.media.images.forEach((base64, idx) => {
-      const filename = `${reviewId}_slide_${String(idx + 1).padStart(2, '0')}.png`;
-      fs.writeFileSync(path.join(COMMENT_REVIEW_DIR, filename), Buffer.from(base64, 'base64'));
-      mediaFiles.push(filename);
-    });
-    fs.writeFileSync(path.join(COMMENT_REVIEW_DIR, `${reviewId}.json`), JSON.stringify({
-      reviewId, createdAt: new Date().toISOString(), handle: input.handle,
-      postUrl: input.postUrl, mediaComplete: input.media.complete,
-      mediaCaptureReason: input.media.reason, mediaFiles,
-      queueId: input.queueId || null,
-      vision: input.vision,
-      technical: input.technical || null,
-      safeFacts: input.safeFacts || [],
-      groundingRisks: input.groundingRisks || [],
-      proposedComment: input.proposedComment || null, posted: false,
-    }, null, 2));
-    console.log(`[bot-real] 📝 Comment review saved: ${reviewId} (${mediaFiles.length} media)`);
-  } catch (error: any) {
-    console.warn(`[bot-real] comment review save failed: ${String(error?.message || error)}`);
-  }
-};
-
 const tryCommentWithStrategy = async (handle: string, facts?: ProfileFacts, likeSummary?: LikeActionSummary): Promise<CommentActionSummary> => {
   if (!page) throw new Error('page_not_initialized');
   const gate = shouldTryComment(handle, likeSummary);
   if (!gate.ok) return { attempted: 0, posted: 0, skipped: true, reason: gate.reason };
+
+  // 评论黑名单：被拉黑账号坚决不写评论（用户 2026-08-14 要求）
+  if (isCommentBlacklisted(handle)) {
+    logBehavior('comment_skip_blacklist', { handle, scope: 'profile' });
+    return { attempted: 0, posted: 0, skipped: true, reason: 'blacklisted_handle' };
+  }
 
   const tiles = page.locator('article a[href*="/p/"], article a[href*="/reel/"], main a[href*="/p/"], main a[href*="/reel/"]');
   const total = await tiles.count();
@@ -2763,240 +2795,200 @@ const tryCommentWithStrategy = async (handle: string, facts?: ProfileFacts, like
       await tiles.nth(idx).click({ timeout: 8000 });
       await page.waitForTimeout(jitter(900, 1800));
       const meta = await readModalMeta(primaryStyle, '', facts?.followers);
+      // 帖子 owner / co-author 在黑名单 → 跳过该帖（不写评论）
+      if (isCommentBlacklisted(meta.ownerHandle, { caption: meta.caption })) {
+        logBehavior('comment_skip_blacklist', { handle, ownerHandle: meta.ownerHandle, scope: 'post' });
+        await closeModal().catch(() => {});
+        continue;
+      }
       const pinnedLikelyBoost = idx < 3 ? 3 : 0;
       const boostedScore = Number(meta.score || 0) + pinnedLikelyBoost;
       ranked.push({ idx, score: boostedScore, meta: { ...meta, pinnedLikelyBoost } });
       await closeModal();
-    } catch (error: any) {
-      logBehavior('like_candidate_open_failed', {
-        handle,
-        idx,
-        reason: String(error?.message || error || 'candidate_open_failed').slice(0, 120),
-      });
+    } catch {
       await closeModal().catch(() => {});
     }
   }
-  ranked.sort((a, b) => b.score - a.score);
-  const chosen = ranked.find((r) =>
-    r.score >= 3
-    && Number.isFinite(Number(r.meta.ageDays))
-    && Number(r.meta.ageDays) <= 60
-    && Number(r.meta.promo || 0) === 0
-  ) || ranked.find((r) => Number(r.meta.promo || 0) === 0);
-  if (!chosen) {
-    console.log(`[bot-real] comment result @${handle}: no_comment_candidate tiles=${total} ranked=${ranked.length}`);
-    return { attempted: 1, posted: 0, skipped: true, reason: 'no_comment_candidate' };
+  // 评论优先评"客人最近发的"帖：在质量达标(score>=3)、非推广、且在近 BOT_SKIP_OLD_POST_DAYS 天内 的候选里，
+  // 选 ageDays 最小（最新）的那条；同新鲜度再比 score。太老的帖互动价值低（用户 2026-08-10 拍板）。
+  const qualifying = ranked.filter(
+    (r) => r.score >= 3 && (r.meta.promo ?? 0) === 0 && (r.meta.ageDays ?? 9999) <= BOT_SKIP_OLD_POST_DAYS
+  );
+  // 评论闸门（2026-08-14 用户硬要求·修正）：只评「文字识别出纹身意图」的帖。
+  // - social（生日/聚会/家人朋友）→ 直接跳过（纹身只是顺带入镜，评了=机器人）。
+  // - generic（文字无纹身意图信号）→ 直接跳过，绝不调 QWEN 去"识别这是什么帖"（傻逼了才用视觉救未知帖）。
+  // - 只有 text intent = tattoo（flash/healed/wip/portrait/memorial…）才进评论流程；
+  //   QWEN 视觉此时只用于「读懂这张纹身图」让评论更具体，不决定评不评。
+  const tattooQualifying = qualifying.filter((r) => intentEngagement(r.meta.postIntent || 'generic') === 'tattoo');
+  if (!tattooQualifying.length) {
+    logBehavior('comment_skip_no_tattoo_intent', { handle, totalQualifying: qualifying.length });
+    return { attempted: 1, posted: 0, skipped: true, reason: 'no_tattoo_intent_candidate' };
   }
-  console.log(`[bot-real] comment candidate @${handle}: score=${chosen.score} ageDays=${String(chosen.meta?.ageDays)} post=${chosen.meta?.url || 'unknown'}`);
+  tattooQualifying.sort((a, b) => (a.meta.ageDays ?? 9999) - (b.meta.ageDays ?? 9999) || b.score - a.score);
+  const chosen = tattooQualifying[0];
 
-  // Browser work stops after capturing this ONE post. A separate persistent queue
-  // performs A/B/C review without holding up the mixed browse/like/follow worker.
-  let captured: CapturedPostMedia = { images: [], complete: false, reason: 'not_captured' };
-  let reviewedPostUrl = '';
+  // ===== 视觉分析（仅对"将要评论"的最优帖触发，控成本/延迟，不影响浏览评分）=====
+  // 文案 + 图片结合：视觉模型"看"图 -> 产出观测 TEXT -> 注入评论生成。
+  // 作者自标风格(caption/hashtag) 优先于视觉；视觉仅在自标缺失且模型确认时把 low/medium 升为 high。
+  let visionDescription = '';
+  let tempStyle = chosen.meta.postStyle || '';
+  let tempConf: string = chosen.meta.styleConfidence || 'low';
+  let tempSource: string = chosen.meta.styleSource || 'none';
+  if (isVisionEnabled() && chosen.meta.postImageSrc) {
+    try {
+      const vis = await analyzePostImage(chosen.meta.postImageSrc);
+      if (vis) {
+        visionDescription = buildVisionDescription(vis);
+        if (vis.styleConfidence === 'high' && vis.style) {
+          // 视觉判定风格 -> 归一化到分类法 canonical key
+          const visNorm = vis.style.toLowerCase().replace(/[^a-z0-9]/g, '');
+          const canon = detectTattooStyle('', '', [visNorm]).primary;
+          // 作者自标(high)优先；否则（无风格 / 仅 alt 弱猜测 medium）视觉确认即升 high
+          if (canon && tempConf !== 'high') {
+            tempStyle = canon;
+            tempConf = 'high';
+            tempSource = 'vision';
+          }
+        }
+      }
+    } catch {}
+  }
+
+  // 视觉辅助技法识别（2026-08-14 补·用户要"视觉辅助"）：从 QWEN 观测描述里提取技法词，
+  // 补进评论生成器的 TECHNIQUE DETAIL。这里"看到"的技法词来自视觉模型文字描述，
+  // 与作者自标的 caption 技法区分来源（prompt 里表述不同，诚实边界不同）。
+  // 去重：作者已在 caption 自标的技法不再重复认领，避免 prompt 里同技法列两次。
+  const visionTechHints: string[] = visionDescription
+    ? extractTechniqueHintsFromVision(visionDescription).filter((k) => !(chosen.meta.techniqueHints || []).includes(k))
+    : [];
+
+  // ===== 主题闸门：穿孔整个不碰（文字先判，判不出借现有 visionDescription 二次判定，不额外调 API）=====
+  let subj: string = (chosen.meta.subject && chosen.meta.subject.subject) || 'unknown';
+  if (subj === 'piercing') {
+    logBehavior('comment_skip_piercing', { handle, ownerHandle: chosen.meta.ownerHandle, source: chosen.meta.subject?.source });
+    return { attempted: 1, posted: 0, skipped: true, reason: 'piercing_skip' };
+  }
+  if (subj === 'unknown' && visionDescription) {
+    const v = detectSubject('', [visionDescription], chosen.meta.ownerHandle || '');
+    subj = v.subject;
+    logBehavior('comment_subject_vision', { handle, subject: subj, source: v.source });
+    if (subj === 'piercing') {
+      logBehavior('comment_skip_piercing_vision', { handle, ownerHandle: chosen.meta.ownerHandle });
+      return { attempted: 1, posted: 0, skipped: true, reason: 'piercing_skip' };
+    }
+    if (subj === 'unknown') {
+      logBehavior('comment_skip_unknown', { handle, ownerHandle: chosen.meta.ownerHandle });
+      return { attempted: 1, posted: 0, skipped: true, reason: 'subject_unknown_skip' };
+    }
+  }
+  if (subj === 'unknown') {
+    logBehavior('comment_skip_unknown', { handle, ownerHandle: chosen.meta.ownerHandle });
+    return { attempted: 1, posted: 0, skipped: true, reason: 'subject_unknown_skip' };
+  }
+
+  // 视觉闭环：QWEN 观测到的悼念信号 → 升 sensitive（仅影响语气，不影响"评不评"；评不评已由文字意图闸门决定）
+  const reconciledIntent = reconcileIntentWithVision(
+    {
+      intent: (chosen.meta.postIntent as any) || 'generic',
+      summary: chosen.meta.postSummary || '',
+      tone: (chosen.meta.postTone as any) || 'casual',
+      sensitive: !!chosen.meta.sensitive,
+      keywords: [],
+    },
+    visionDescription
+  );
+
+  // 注意：social 帖已在候选筛选阶段(intentEngagement==='tattoo' 闸门)剔除，
+  // 这里不再用视觉补判社交——QWEN 只负责读图喂评论，不决定评不评。
+
+  const text = await buildCommentText(facts, {
+    ...chosen.meta,
+    style: tempStyle,
+    styleConfidence: tempConf,
+    styleSource: tempSource,
+    techniqueHints: chosen.meta.techniqueHints || [],
+    visionTechniqueHints: visionTechHints,
+    visionDescription,
+    postSummary: reconciledIntent.summary,
+    postIntent: reconciledIntent.intent,
+    postTone: reconciledIntent.tone,
+    sensitive: reconciledIntent.sensitive,
+  });
+  pruneRecentCommentHashes();
+  const textHash = hashString(normalizeForMatch(text));
+  const dup = (likeState.comments!.recentText || []).some((x) => x.hash === textHash);
+  if (dup) return { attempted: 1, posted: 0, skipped: true, reason: 'comment_dup' };
+
   try {
     await tiles.nth(chosen.idx).scrollIntoViewIfNeeded();
     await page.waitForTimeout(jitter(900, 1800));
     await tiles.nth(chosen.idx).click({ timeout: 10000 });
     await page.waitForTimeout(jitter(1200, 2600));
-    reviewedPostUrl = page.url();
-    captured = await captureAllOpenPostMedia();
-    const visibleComments = await scrapeVisibleComments(20, chosen.meta?.caption || facts?.sampleCaption || '').catch(() => []);
-    await closeModal().catch(() => {});
-  } catch (error: any) {
-    await closeModal().catch(() => {});
-    captured = { ...captured, complete: false, reason: `capture_exception:${String(error?.message || 'unknown').slice(0, 80)}` };
-  }
-
-  if (!captured.complete || !captured.images.length || !extractPostKey(reviewedPostUrl)) {
-    const vision = blockedVisionResult(`media_incomplete:${captured.reason}`, captured.images.length);
-    saveCommentReview({ handle, postUrl: reviewedPostUrl, media: captured, vision });
-    logBehavior('comment_capture_blocked', { handle, reason: vision.reason, mediaCount: captured.images.length });
-    return { attempted: 1, posted: 0, skipped: true, reason: vision.reason };
-  }
-
-  const queued = enqueueCommentCandidate({
-    handle,
-    postUrl: reviewedPostUrl,
-    images: captured.images,
-    meta: {
-      ...chosen.meta,
-      caption: chosen.meta?.caption || facts?.sampleCaption || '',
-      artistTitle: facts?.title || '',
-      publicComments: visibleComments,
-    },
-  });
-  logBehavior(queued.ok ? 'comment_review_queued' : 'comment_queue_skipped', {
-    handle, postUrl: reviewedPostUrl, queueId: queued.id || null, reason: queued.reason || null,
-    mediaCount: captured.images.length,
-  });
-  return {
-    attempted: 1, posted: 0, skipped: true,
-    reason: queued.ok ? 'comment_review_queued' : `comment_queue_${queued.reason || 'failed'}`,
-    postUrl: reviewedPostUrl,
-  };
-};
-
-let commentReviewBusy = false;
-
-const isWeakCommentFact = (fact: string): boolean => {
-  const text = normalizeForMatch(fact);
-  return !text
-    || /\b(?:skin|arm|leg|thigh|back|chest|shoulder|hand|neck|forearm|body area|body part)\b/.test(text)
-    || /\b(?:tattoo|piece|design|image|visible|clearly visible|main subject)\b/.test(text) && text.split(/\s+/).length <= 6;
-};
-
-const isActionableCommentFact = (fact: string): boolean => {
-  const text = normalizeForMatch(fact);
-  return /\b(?:floral|botanical|rose|flower|portrait|animal|skull|lettering|geometric|ornamental|abstract|object|black and grey|full color|mixed line|fine line|bold line|outline|shading|gradient|dotwork|stipple|solid fill|composition|flow|wraps)\b/.test(text);
-};
-
-const selectCommentFactsForWriting = (facts: string[]): string[] => {
-  const filtered = sanitizeVerifiedFacts(facts)
-    .filter((fact) => !isWeakCommentFact(fact))
-    .slice(0, 8);
-  return filtered;
-};
-
-const reviewQueuedComment = async (item: CommentQueueItem) => {
-  const images = item.mediaFiles.map((file) => fs.readFileSync(file).toString('base64'));
-  const media: CapturedPostMedia = { images, complete: images.length > 0, reason: 'loaded_from_comment_queue' };
-  let vision: VisionGateResult = blockedVisionResult('review_not_started', images.length);
-  let technical: Awaited<ReturnType<typeof analyzeTattooTechnique>> | null = null;
-  try {
-    const mediaKind = /instagram\.com\/reels?\//i.test(item.postUrl)
-      ? 'reel'
-      : images.length > 1 ? 'carousel' : 'single';
-    vision = await classifyPostMedia(images, { kind: mediaKind });
-    if (!vision.ok) {
-      finishCommentReview(item.id, { status: 'blocked', vision, reason: `vision:${vision.reason}` });
-      saveCommentReview({ handle: item.handle, postUrl: item.postUrl, media, vision, queueId: item.id });
-      logBehavior('comment_vision_blocked', { queueId: item.id, handle: item.handle, reason: vision.reason });
-      return;
-    }
-
-    const tattooImages = vision.tattooMediaIndexes
-      .map((index) => images[index - 1])
-      .filter((image): image is string => Boolean(image));
-    technical = await analyzeTattooTechnique(tattooImages);
-    const safeFacts = selectCommentFactsForWriting([
-      ...vision.safeFacts,
-      ...(technical.ok ? technical.safeTechnicalFacts : []),
-    ]);
-
-    // 视觉确认纹身 → 把随候选保存的公开评论写入语料库（fail-open，不影响主任务）
-    const corpus = addCorpusEntries({
-      comments: (item.meta as any)?.publicComments || [],
-      imageFacts: [...(vision.safeFacts || []), ...(technical?.ok ? (technical as any).safeTechnicalFacts || [] : [])],
-      postUrl: item.postUrl,
-      handle: item.handle,
-    });
-    if (corpus.added > 0 || corpus.skipped > 0) {
-      console.log(`[bot-real] 📚 corpus +${corpus.added} (skip ${corpus.skipped}) @${item.handle} ${corpus.reason || ''}`);
-    }
-
-    const actionableFacts = safeFacts.filter(isActionableCommentFact);
-    if (safeFacts.length < 2 || actionableFacts.length < 1) {
-      finishCommentReview(item.id, { status: 'blocked', vision, technical, safeFacts, reason: 'weak_visual_facts' });
-      saveCommentReview({ handle: item.handle, postUrl: item.postUrl, media, vision, technical, safeFacts, queueId: item.id });
-      logBehavior('comment_grounding_blocked', {
-        queueId: item.id,
-        handle: item.handle,
-        reason: 'weak_visual_facts',
-        safeFacts,
-      });
-      return;
-    }
-
-    const proposedComment = await buildCommentText(undefined, {
-      ...(item.meta || {}),
-      visionFacts: safeFacts,
-      visionSlides: vision.modelA,
-    });
-    const groundingRisks = validateGroundedComment(proposedComment, safeFacts);
-    const passedMachineReview = groundingRisks.length === 0;
-    const nextStatus = passedMachineReview ? 'human_pending' : 'blocked';
-    const nextItem: CommentQueueItem = {
-      ...item,
-      status: nextStatus,
-      vision,
-      technical,
-      safeFacts,
-      proposedComment,
-      groundingRisks,
-      reason: passedMachineReview ? 'waiting_for_human_approval' : `grounding:${groundingRisks.join(',')}`,
-    };
-    finishCommentReview(item.id, nextItem);
-    if (passedMachineReview) await syncCommentDraftForHumanReview(nextItem);
-    saveCommentReview({
-      handle: item.handle, postUrl: item.postUrl, media, vision, technical,
-      safeFacts, groundingRisks, proposedComment, queueId: item.id,
-    });
-    logBehavior(passedMachineReview ? 'comment_waiting_human_review' : 'comment_grounding_blocked', {
-      queueId: item.id, handle: item.handle, postUrl: item.postUrl,
-      text: proposedComment, groundingRisks,
-    });
-    console.log(`[bot-real] ${passedMachineReview ? '📝' : '🛡️'} Comment review ${passedMachineReview ? 'waiting for human approval' : 'blocked'} @${item.handle}: ${passedMachineReview ? proposedComment : groundingRisks.join(',')}`);
-  } catch (error: any) {
-    const reason = String(error?.message || error || 'comment_review_error').slice(0, 180);
-    finishCommentReview(item.id, { status: 'blocked', vision, technical, reason: `review_exception:${reason}` });
-    saveCommentReview({ handle: item.handle, postUrl: item.postUrl, media, vision, technical, queueId: item.id });
-    console.warn(`[bot-real] comment review failed ${item.id}: ${reason}`);
-  }
-};
-
-const commentReviewLoop = async () => {
-  while (running) {
-    const item = claimPendingComment();
-    if (!item) {
-      await sleep(5000);
-      continue;
-    }
-    if (commentReviewBusy) {
-      await sleep(1000);
-      continue;
-    }
-    commentReviewBusy = true;
-    try { await reviewQueuedComment(item); }
-    finally { commentReviewBusy = false; }
-    await sleep(jitter(1500, 3500));
-  }
-};
-
-/** Browser publishing remains on the main loop so only one routine controls Chrome. */
-const maybePublishApprovedComment = async (): Promise<boolean> => {
-  if (BOT_COMMENT_PUBLISH_HARD_DISABLED) return false;
-  if (!BOT_COMMENT_ENABLED || BOT_COMMENT_REVIEW_MODE || BOT_VISION_TEST_MODE) return false;
-  await syncHumanReviewedComments();
-  const item = nextApprovedComment();
-  if (!item?.proposedComment || !page) return false;
-  const gate = shouldTryComment(item.handle);
-  if (!gate.ok) return false;
-  const expectedPostKey = extractPostKey(item.postUrl);
-  try {
-    await page.goto(item.postUrl, { waitUntil: 'domcontentloaded', timeout: 45_000 });
-    await page.waitForTimeout(jitter(1800, 3500));
-    if (!expectedPostKey || extractPostKey(page.url()) !== expectedPostKey) throw new Error('approved_post_url_mismatch');
-    const ok = await tryPostCommentOnOpenModal(item.proposedComment);
-    if (!ok) throw new Error('comment_box_not_found');
+    const ok = await tryPostCommentOnOpenModal(text);
+    const postUrl = page.url();
+    await closeModal();
+    if (!ok) return { attempted: 1, posted: 0, skipped: true, reason: 'comment_box_not_found' };
 
     const key = todayKey();
-    const textHash = hashString(normalizeForMatch(item.proposedComment));
     likeState.comments!.byDay![key] = Number(likeState.comments!.byDay![key] || 0) + 1;
-    likeState.comments!.byHandle![item.handle] = { lastCommentAt: Date.now() };
+    likeState.comments!.byHandle![handle] = { lastCommentAt: Date.now() };
     likeState.comments!.recentText!.push({ ts: Date.now(), hash: textHash });
     pruneRecentCommentHashes();
     saveLikeState(likeState);
-    markCommentPosted(item.id);
-    await postJson(`/api/drafts/${encodeURIComponent(item.id)}/posted`, {}).catch(() => null);
-    logBehavior('comment_posted', { queueId: item.id, handle: item.handle, postUrl: item.postUrl, text: item.proposedComment });
-    recordInteraction(item.handle, 'comment', { postUrl: item.postUrl, text: item.proposedComment }).catch(() => {});
-    await sleep(jitter(12_000, 28_000));
-    return true;
-  } catch (error: any) {
-    const reason = String(error?.message || error || 'comment_post_failed').slice(0, 160);
-    finishCommentReview(item.id, { status: 'blocked', reason: `publish_failed:${reason}` });
-    logBehavior('comment_post_failed', { queueId: item.id, handle: item.handle, reason });
-    return false;
+    logBehavior('comment_posted', {
+      handle,
+      postUrl,
+      text,
+      score: chosen.score,
+      style: tempStyle || '',
+      styleConfidence: tempConf || 'low',
+      styleSource: tempSource || 'none',
+      vision: !!visionDescription,
+      visionTech: visionTechHints,
+      likeCount: Number(chosen.meta.likeCount || 0),
+      commentCount: Number(chosen.meta.commentCount || 0),
+      cta: Number(chosen.meta.cta || 0),
+      pinnedLikelyBoost: Number(chosen.meta.pinnedLikelyBoost || 0)
+    });
+    recordInteraction(handle, 'comment', {
+      postUrl, text, score: chosen.score,
+      style: tempStyle || '',
+      styleConfidence: tempConf || 'low',
+      styleSource: tempSource || 'none',
+      vision: !!visionDescription,
+    }).catch(() => {});
+    // 🛑 检测 IG 限制信号（评论后常弹 "Action Blocked / Try again later"）
+    try {
+      const bsig = await detectBlockSignal();
+      if (bsig) await triggerAccountRest(bsig.severity, bsig.text);
+    } catch {}
+    return { attempted: 1, posted: 1, skipped: false, text, postUrl };
+  } catch {
+    await closeModal().catch(() => {});
+    return { attempted: 1, posted: 0, skipped: true, reason: 'comment_post_failed' };
+  }
+};
+
+// 抓取弹窗里"最大的帖子图"的 src（scontent 签名 URL）。仅取 URL 字符串，不下载；
+// 视觉分析时直接把 URL 交给视觉模型服务端拉取（避免浏览器 CORS 抓图）。无图/出错返回 ''。
+const getPostImageSrc = async (): Promise<string> => {
+  if (!page) return '';
+  try {
+    return await page.evaluate(() => {
+      const imgs = Array.from(
+        document.querySelectorAll('div[role="dialog"] img[src*="scontent"]')
+      ) as HTMLImageElement[];
+      if (!imgs.length) return '';
+      let best = '';
+      let bestW = 0;
+      for (const im of imgs) {
+        const w = im.naturalWidth || im.clientWidth || 0;
+        if (w > bestW) { bestW = w; best = im.src; }
+      }
+      return best;
+    });
+  } catch {
+    return '';
   }
 };
 
@@ -3026,6 +3018,8 @@ const readModalMeta = async (primaryStyle: string, expectedHandle = '', follower
     .then(async (els) => Promise.all(els.slice(0, 4).map(async (el) => ((await el.getAttribute('alt')) || '').slice(0, 200))))
     .catch(() => [] as string[]))
     .join(' ');
+  // 帖子图 URL（供视觉分析使用，仅当 BOT_VISION_ENABLED 时后续才会用到）
+  const postImageSrc = await getPostImageSrc();
   const dt = await page.locator('time').first().getAttribute('datetime').catch(() => null);
   const dialogText = normalizeForMatch(
     (await page.locator('div[role="dialog"]').first().innerText().catch(() => '')) || ''
@@ -3040,15 +3034,14 @@ const readModalMeta = async (primaryStyle: string, expectedHandle = '', follower
   const promo = keywordHits(blob, PROMO_KEYWORDS).length;
   const cta = keywordHits(blob, BUSINESS_CTA_KEYWORDS).length;
 
-  // Style detection from THIS post (not profile): alt text is IG's own AI description.
-  // alt-confirmed = caption + alt BOTH mention the style → high confidence.
-  const captionStyles = keywordHits(normalizeForMatch(caption), STYLE_KEYWORDS);
-  const altStyles = keywordHits(normalizeForMatch(altHints), STYLE_KEYWORDS);
-  const altConfirmedStyles = captionStyles.filter((s) => altStyles.includes(s));
-  const postStyle = altConfirmedStyles[0] || captionStyles[0] || altStyles[0] || '';
-  const styleConfidence = altConfirmedStyles.length > 0 ? 'high' :
-    (captionStyles.length > 0 && altStyles.length > 0) ? 'medium' : 'low';
-
+  // 风格检测（核心改进）：用分类法从 caption/hashtag(作者自标) + IG alt 文本识别具体风格。
+  // 作者自标(正文或 #tag) → high 置信 → 评论可深入该风格工艺（VISION 安全，因风格来自文本）；
+  // 仅 alt 猜测 → medium，谨慎引用；无信号 → low，安全通用评论。
+  const det = detectTattooStyle(caption, altHints);
+  const postStyle = det.primary;
+  const styleConfidence = det.confidence;
+  const styleSource = det.source;
+  const techniqueHints = det.techniqueHints;
   const styleBoost = postStyle ? (styleConfidence === 'high' ? 3 : styleConfidence === 'medium' ? 2 : 1) : 0;
   const isReel = /\/reel\//i.test(url);
   let score = 0;
@@ -3078,12 +3071,14 @@ const readModalMeta = async (primaryStyle: string, expectedHandle = '', follower
   if (isReel) score -= 2;
   // Post-type scoring: prefer content posts, deprioritize ads/booking
   const postType = detectPostType(caption, altHints ? [altHints] : []);
+  const subject = detectSubject(caption, altHints ? [altHints] : [], ownerHandle);
+  const intent = detectPostIntent(caption, altHints ? [altHints] : []);
   if (postType === 'healed') score += 2;
   else if (postType === 'before_after') score += 2;
   else if (postType === 'wip') score += 1;
   else if (postType === 'booking') score -= 3;
   else if (postType === 'flash') score -= 4;
-  return { url, postKey, ownerHandle, isOwnerPost, dt, ageDays, score, positive, promo, cta, styleBoost, isReel, likeCount, commentCount, postType, postStyle, styleConfidence, caption, altHints };
+  return { url, postKey, ownerHandle, isOwnerPost, dt, ageDays, score, positive, promo, cta, styleBoost, isReel, likeCount, commentCount, postType, postStyle, styleConfidence, styleSource, techniqueHints, postImageSrc, subject, caption, imageAlt: altHints, postIntent: intent.intent, postSummary: intent.summary, postTone: intent.tone, sensitive: intent.sensitive };
 };
 
 const closeModal = async () => {
@@ -3229,27 +3224,16 @@ const tryLikeWithStrategy = async (handle: string, facts?: ProfileFacts, command
     accountAgeDays: Number(command?.accountAgeDays || 0) || null,
     accountStage: String(command?.accountStage || '') || null
   });
-  if (maxLikes <= 0) {
-    logBehavior('like_skip_no_quota_or_candidates', {
-      handle,
-      totalMedia: total,
-      candidates: candidates.length,
-      desiredLikes,
-      remainingDayQuota,
-      singleHandleCap,
-      dayCount,
-      dayCap,
-    });
-  }
 
   for (const c of candidates) {
     if (liked >= maxLikes) break;
-    if (c.score < 1) {
-      logBehavior('like_skip_low_score', { handle, idx: c.idx, score: c.score, url: c.meta?.url || '' });
+    if (c.score < 1) continue;
+    // 穿孔帖不点赞（整个不碰）
+    if (c.meta.subject?.subject === 'piercing') {
+      logBehavior('like_skip_piercing', { handle, idx: c.idx, ownerHandle: c.meta.ownerHandle || '' });
       continue;
     }
     try {
-      const beforeLiked = liked;
       await tiles.nth(c.idx).scrollIntoViewIfNeeded();
       await page.waitForTimeout(jitter(900, 2000));
       await tiles.nth(c.idx).click({ timeout: 10000 });
@@ -3289,16 +3273,12 @@ const tryLikeWithStrategy = async (handle: string, facts?: ProfileFacts, command
           });
         }
       }
-      if (liked === beforeLiked) {
-        logBehavior('like_button_not_found_or_already_liked', {
-          handle,
-          idx: c.idx,
-          score: c.score,
-          url: page.url(),
-          ageDays: Math.floor(c.meta.ageDays || 0),
-        });
-      }
       if (liked > 0) recordInteraction(handle, 'like', { idx: c.idx, url: page.url() }).catch(() => {});
+      // 🛑 检测 IG 限制信号（点赞后常弹 "Action Blocked"），命中立即停手并启动账号休息
+      try {
+        const bsig = await detectBlockSignal();
+        if (bsig) { await triggerAccountRest(bsig.severity, bsig.text); break; }
+      } catch {}
       await page.waitForTimeout(jitter(1200, 2600));
       await closeModal();
       if (liked < maxLikes) {
@@ -3306,14 +3286,7 @@ const tryLikeWithStrategy = async (handle: string, facts?: ProfileFacts, command
         logBehavior('like_gap_wait', { handle, gapSec });
         await sleep(gapSec * 1000);
       }
-    } catch (error: any) {
-      logBehavior('like_post_failed', {
-        handle,
-        idx: c.idx,
-        score: c.score,
-        url: page?.url?.() || '',
-        reason: String(error?.message || error || 'like_post_failed').slice(0, 160),
-      });
+    } catch {
       await closeModal().catch(() => {});
     }
   }
@@ -3341,13 +3314,14 @@ const tryLikeWithStrategy = async (handle: string, facts?: ProfileFacts, command
 // =====================================================================
 
 const executeDmTask = async (task: any): Promise<boolean> => {
-  if (!BOT_CAN_SEND_DM) {
-    logBehavior('dm_hard_blocked', { reason: BOT_VISION_TEST_MODE ? 'vision_test_mode' : 'dm_not_live_confirmed' });
-    console.log('[bot-real] 🛡️ DM blocked: DM live mode is not explicitly enabled and confirmed.');
-    return false;
-  }
   if (!page) throw new Error('page_not_initialized');
   const targetHandle = String(task.target_handle || '').replace(/^@/, '').trim();
+  // 🛑 self-DM 双保险：target 是 bot 自己则直接放弃
+  const selfIds = new Set([BOT_ID, ...(ACCOUNT_IDS || [])].map((x) => String(x).toLowerCase()));
+  if (selfIds.has(targetHandle.toLowerCase())) {
+    logBehavior('dm_self_skip', { targetHandle });
+    return false;
+  }
   let scriptContent = '';
   try {
     const parsed = typeof task.script_content === 'string' ? JSON.parse(task.script_content) : task.script_content;
@@ -3414,6 +3388,11 @@ const executeDmTask = async (task: any): Promise<boolean> => {
     logBehavior('dm_sent', { targetHandle, taskId: task.id });
     recordInteraction(targetHandle, 'dm', { scriptContent, taskId: task.id }).catch(() => {});
     reportDmChat(targetHandle, 'agent', scriptContent, 'contacted').catch(() => {});
+    // 🛑 检测 IG 限制信号（DM 后常弹 "Action Blocked / Try again later"）
+    try {
+      const bsig = await detectBlockSignal();
+      if (bsig) await triggerAccountRest(bsig.severity, bsig.text);
+    } catch {}
     // 记录出站 DM 文本哈希，防止随后扫描把 bot 自己的消息误当客户新消息（防自回复死循环）
     if (targetHandle && likeState.dmSeen) {
       likeState.dmSeen[targetHandle] = hashString(scriptContent || '');
@@ -3433,6 +3412,13 @@ const tryExecuteDmTask = async (): Promise<boolean> => {
     const tasks: any[] = Array.isArray(data?.tasks) ? data.tasks : [];
     if (!tasks.length) return false;
     const task = tasks[0];
+    const tgt = String(task.target_handle || '').replace(/^@/, '').toLowerCase();
+    const selfIds = new Set([BOT_ID, ...(ACCOUNT_IDS || [])].map((x) => String(x).toLowerCase()));
+    if (selfIds.has(tgt)) { // 🛑 self-DM 守卫（poll 路径）
+      logBehavior('dm_self_skip', { targetHandle: task.target_handle });
+      await postJson('/api/marketing/tasks/report', { taskId: task.id, status: 'failed', botId: BOT_ID, note: 'self_target' }).catch(() => {});
+      return false;
+    }
     logBehavior('dm_task_acquired', { taskId: task.id, targetHandle: task.target_handle });
     const success = await executeDmTask(task);
     await postJson('/api/marketing/tasks/report', {
@@ -3481,14 +3467,14 @@ const pickAutoReply = async (targetHandle: string, intent: string, category: str
     if (content) return content;
     // Fallback: use category-appropriate template
     const fallbacks: Record<string, string> = {
-      product_intro: `Thanks @${targetHandle}! Check our website for more details on our tattoo supplies.`,
-      collaboration: `Thanks @${targetHandle}! We'd love to explore collaboration opportunities.`,
-      industry_talk: `Thanks @${targetHandle}! Always great to connect with fellow industry pros.`,
-      after_sales: `Thanks @${targetHandle}! We're glad you're happy with our products.`,
+      product_intro: `Hey @${targetHandle} — so glad you reached out! Happy to help you get sorted. What are you mainly running low on right now — ink, carts, or aftercare? I'll pull together options that actually fit how you work 🙌`,
+      collaboration: `Love that you're thinking bigger @${targetHandle} — collabs are the fun part. Tell me a bit about your style and what you'd want to build, and let's see if we're a fit to work together ✌️`,
+      industry_talk: `Always good to trade notes with another person in the chair @${targetHandle} 😄 What's been keeping you busy in the studio lately?`,
+      after_sales: `Appreciate you checking in @${targetHandle}! Everything land the way you expected? If anything's off or you want to tweak your next order, I'm right here 👍`,
     };
-    return fallbacks[category] || `Thanks @${targetHandle}! We'd love to help. Feel free to ask any questions.`;
+    return fallbacks[category] || `Hey @${targetHandle} — so glad you messaged! What can I help you with? I'm right here 🙌`;
   } catch {
-    return `Thanks @${targetHandle}! We'd love to help. Feel free to ask any questions.`;
+    return `Hey @${targetHandle} — so glad you messaged! What can I help you with? I'm right here 🙌`;
   }
 };
 
@@ -3515,7 +3501,6 @@ const extractThreadHandle = async (): Promise<string> => {
 };
 
 const checkDmReplies = async (): Promise<number> => {
-  if (!BOT_CAN_SEND_DM) return 0;
   if (!page) return 0;
   let handled = 0;
   try {
@@ -3631,20 +3616,17 @@ const executeCommand = async (command: CommandPayload) => {
   const pLikes = Number((command as any).likesPerSession ?? NaN);
   const pComments = Number((command as any).commentsPerSession ?? NaN);
   const pFollows = Number((command as any).followsPerSession ?? NaN);
-  const hasLikesRule = Number.isFinite(pLikes);
-  const hasCommentsRule = Number.isFinite(pComments);
-  const hasFollowsRule = Number.isFinite(pFollows);
   const actionOverrides = {
-    likesEnabled: hasLikesRule ? pLikes > 0 : true,
-    commentsEnabled: !BOT_COMMENT_DRAFT_HARD_DISABLED && (hasCommentsRule ? pComments > 0 : BOT_COMMENT_ENABLED),
-    followsEnabled: hasFollowsRule ? pFollows > 0 : BOT_FOLLOW_ENABLED,
-    likesMin: hasLikesRule && pLikes > 0 ? Math.max(1, Math.min(5, Math.round(pLikes))) : 0,
+    likesEnabled: Number.isFinite(pLikes) && pLikes > 0,
+    commentsEnabled: Number.isFinite(pComments) && pComments > 0,
+    followsEnabled: Number.isFinite(pFollows) && pFollows > 0,
+    likesMin: Number.isFinite(pLikes) ? Math.max(1, Math.min(5, Math.round(pLikes))) : 0,
   };
-  console.log(`[bot-real] action rules: likes=${hasLikesRule ? pLikes : 'default'} comments=${hasCommentsRule ? pComments : 'default'} follows=${hasFollowsRule ? pFollows : 'default'}`);
+  if (actionOverrides.likesEnabled || actionOverrides.commentsEnabled || actionOverrides.followsEnabled) {
+    console.log(`[bot-real] action prefs from task: likes=${pLikes} comments=${pComments} follows=${pFollows}`);
+  }
   const taskModeRaw = String(command?.suggestedExecMode || '').trim().toLowerCase();
-  const execMode = BOT_VISION_TEST_MODE
-    ? 'browse_like'
-    : ((taskModeRaw === 'browse_only' || taskModeRaw === 'browse_like') ? taskModeRaw : BOT_EXEC_MODE);
+  const execMode = (taskModeRaw === 'browse_only' || taskModeRaw === 'browse_like') ? taskModeRaw : BOT_EXEC_MODE;
   const stage = String(command?.accountStage || '').trim().toLowerCase() || 'stable';
   const age = Number(command?.accountAgeDays) ?? -1;
   console.log(`[bot-real] execute ${commandId} -> @${handle} [stage=${stage}, age=${age}d, mode=${execMode}]`);
@@ -3729,25 +3711,21 @@ const executeCommand = async (command: CommandPayload) => {
         },
       } : {}),
     } as CommandPayload;
-    if (!BOT_VISION_TEST_MODE && actionOverrides.likesEnabled) {
-      likeSummary = await tryLikeWithStrategy(handle, profileFacts, cmdWithPrefs);
-    }
-    // task 明确提供的动作规则优先；只有旧 task 缺字段时才回退全局默认。
-    const commentsOn = BOT_COMMENT_ENABLED && actionOverrides.commentsEnabled;
-    const followsOn = BOT_FOLLOW_ENABLED && actionOverrides.followsEnabled;
+    likeSummary = await tryLikeWithStrategy(handle, profileFacts, cmdWithPrefs);
+    // 评论/关注总开关按 payload 偏好动态开关（不污染全局 env）
+    const commentsOn = actionOverrides.commentsEnabled ? true : (BOT_COMMENT_ENABLED && (actionOverrides.likesEnabled || BOT_COMMENT_ENABLED));
+    const followsOn = actionOverrides.followsEnabled ? true : BOT_FOLLOW_ENABLED;
     dbg(`[dbg] liked=${likeSummary.liked} followsOn=${followsOn} commentsOn=${commentsOn} handle=${handle}`);
-    // Comment rules are independent from like rules. Every enabled comment still
-    // passes the full per-post A/B/C vision and grounded-language queue.
-    if (commentsOn) {
+    // 评论：仍要求本次有点赞（无互动直接评论显得可疑）。
+    if (likeSummary.liked > 0 && commentsOn) {
       await sleep(jitter(1400, 2600));
       commentSummary = await tryCommentWithStrategy(handle, profileFacts, likeSummary);
     } else {
-      commentSummary = { attempted: 0, posted: 0, skipped: true, reason: 'comment_off_by_rule' };
+      commentSummary = { attempted: 0, posted: 0, skipped: true, reason: likeSummary.liked > 0 ? 'comment_off' : 'no_like_this_visit' };
     }
-    console.log(`[bot-real] comment result @${handle}: ${JSON.stringify(commentSummary)}`);
     // 关注：回关→DM 链路的关键动作，解耦于点赞。只要 followsOn 就尝试关注，
     // 即使本次未点赞（无可点帖/元数据抓不到），也要能关注，否则永远没有回关来源。
-    if (followsOn && !BOT_VISION_TEST_MODE) {
+    if (followsOn) {
       await sleep(jitter(1200, 2400));
       followSummary = await tryFollowOnProfile(handle, likeSummary, command);
     } else {
@@ -3776,42 +3754,76 @@ const executeCommand = async (command: CommandPayload) => {
 };
 
 let dmReplyTick = 0;
-let taskInFlight = false;
 const pollLoop = async () => {
   while (running) {
     try {
+      // A warm pause keeps the browser/session and heartbeat alive but does not
+      // poll or lease new tasks. The host control listener owns this flag.
+      if (fs.existsSync(CONTROL_PAUSE_FILE)) {
+        if (!controlPauseLogged) console.log(`[bot-real] control pause active: ${CONTROL_PAUSE_FILE}`);
+        controlPauseLogged = true;
+        await sleep(POLL_INTERVAL_MS);
+        continue;
+      }
+      if (controlPauseLogged) console.log('[bot-real] control pause cleared; resuming task polling');
+      controlPauseLogged = false;
       // ── 登录闸门：未登录则暂停一切任务派发，原地等登录，不抢任务、不标 failed ──
       const loggedIn = await waitUntilLoggedIn();
       if (!loggedIn) {
         await sleep(POLL_INTERVAL_MS);
         continue;
       }
-      // Vision test mode is read/review-only. It must not run any follow-back,
-      // rapport, DM, or inbox automation in the background.
-      if (!BOT_VISION_TEST_MODE) {
-        try { await maybeCheckFollowBacks(); } catch {}
-        try { await checkIncomingFollowBacks(); } catch {}
-        try { await checkWhoLikedUs(); } catch {}
-        if (BOT_CAN_SEND_DM) {
-          try { await syncFollowBackRapport(); } catch {}
-          try { await syncFollowBackDmQueue(); } catch {}
-          try {
-            dmReplyTick = (dmReplyTick + 1) % 3;
-            if (dmReplyTick === 0) await checkDmReplies();
-          } catch {}
-        }
-      }
-      // Publishing is serialized with all other browser activity. The AI reviewer
-      // never owns Chrome, so a slow model cannot move the browser to the wrong post.
-      try { await maybePublishApprovedComment(); } catch {}
-      await sleep(jitter(1500, 3500));
-
-      const executedToday = Number(likeState.touchesByDay?.[getDayKey()] || 0);
-      if (executedToday >= BOT_DAILY_TASK_LIMIT) {
-        console.log(`[bot-real] daily task limit reached (${executedToday}/${BOT_DAILY_TASK_LIMIT}); tasks remain pending for the next day`);
-        await sleep(Math.max(POLL_INTERVAL_MS, 60_000));
+      // ── 账号休息（被动，数据驱动）：IG 限制信号触发后，暂停一切动作直到冷却结束 ──
+      //    前台/数据可见（recordInteraction account_rest）；心跳 + 登录校验仍存活，冷却完自动续跑。
+      if (isAccountResting()) {
+        const leftMin = Math.max(0, Math.round((likeState.rest!.until - Date.now()) / 60000));
+        console.log(`[bot-real] 🛑 account resting (${likeState.rest!.severity}): ~${leftMin}min left — skipping all actions, heartbeat alive.`);
+        await sleep(Math.min(POLL_INTERVAL_MS, 60_000));
         continue;
       }
+      // 每轮顺带复检一次页面是否出现新的限制信号（覆盖挑战/弹窗类，无需动作也查）
+      try {
+        const bsig = await detectBlockSignal();
+        if (bsig) await triggerAccountRest(bsig.severity, bsig.text);
+      } catch {}
+      if (isAccountResting()) {
+        await sleep(Math.min(POLL_INTERVAL_MS, 60_000));
+        continue;
+      }
+      // ── 回关主动复检：每 5 轮回访一个"已关注未检测回关"的号，让回关能被发现 ──
+      try {
+        await maybeCheckFollowBacks();
+      } catch {}
+      // ── 捕获主动关注我们的回流粉（如 tattooshops.be）：每 20 轮查一次 Followers 列表 ──
+      try {
+        await checkIncomingFollowBacks();
+      } catch {}
+      // ── 检测「对方赞过我们」：每 20 轮查一次最新帖子点赞者列表，互赞则提前预热窗口 ──
+      try {
+        await checkWhoLikedUs();
+      } catch {}
+      // ── 暖受众反关注：每 20 轮扫我们自己帖子下的点赞/评论者，主动关注新暖线索（可选发DM）──
+      try {
+        await checkAudienceReciprocate();
+      } catch {}
+      // ── 评论互动回流：每 20 轮扫通知页，tattoo 相关互动者次日回关 ──
+      try {
+        await checkCommentEngagers();
+      } catch {}
+      // ── 回关 rapport 阶梯：先点赞→(隔天)评论 建立熟悉感，再发 DM（内部已判断进度）──
+      try {
+        await syncFollowBackRapport();
+      } catch {}
+      // ── 回关号直接发 DM：每轮扫描，受"熟悉度门槛 + 预热窗口 + 日上限"节流（内部已判断）──
+      try {
+        await syncFollowBackDmQueue();
+      } catch {}
+      // ── inbox 回复扫描：每 3 轮限流一次，与 DM 发送解耦 ──
+      try {
+        dmReplyTick = (dmReplyTick + 1) % 3;
+        if (dmReplyTick === 0) await checkDmReplies();
+      } catch {}
+      await sleep(jitter(1500, 3500));
 
       const data = await getJson(`/api/automation/poll?botId=${encodeURIComponent(BOT_ID)}&limit=${POLL_LIMIT}`);
       const commands: CommandPayload[] = Array.isArray(data?.commands) ? data.commands : [];
@@ -3822,10 +3834,6 @@ const pollLoop = async () => {
       }
       for (const cmd of commands) {
         if (!running) break;
-        if (taskInFlight) {
-          console.warn(`[bot-real] single-flight guard skipped overlapping task ${cmd?.id || 'unknown'}`);
-          break;
-        }
         await humanBreak(); // wait if currently in a break period
         // ── 执行前再确认登录态：登录页/挑战页出现则跳过本任务，不抢、不标 failed，下一轮重判 ──
         if (!page || await isOnLoginPage()) {
@@ -3833,12 +3841,14 @@ const pollLoop = async () => {
           await sleep(POLL_INTERVAL_MS);
           continue;
         }
-        // Do not race executeCommand against a timer: Promise.race cannot cancel the
-        // losing browser task and previously allowed it to keep clicking under the
-        // next command. Per-navigation/locator/API timeouts provide bounded stages.
-        taskInFlight = true;
+        // 任务级看门狗：单任务执行上限（默认 8 分钟），超时视为 failed 继续下一个，
+        // 防止 IG 页面慢/选择器卡死导致 bot 挂死不再消费队列（2026-08-06 修复）
+        const TASK_TIMEOUT_MS = Math.max(60_000, Number(process.env.BOT_TASK_TIMEOUT_MS || 5 * 60_000));
         try {
-          await executeCommand(cmd);
+          await Promise.race([
+            executeCommand(cmd),
+            new Promise((_, reject) => setTimeout(() => reject(new Error(`task_timeout_${Math.round(TASK_TIMEOUT_MS / 1000)}s`)), TASK_TIMEOUT_MS)),
+          ]);
           await reportCommand(cmd.id, 'done');
           console.log(`[bot-real] done ${cmd.id}`);
           tasksSinceLastLearn++;
@@ -3860,12 +3870,10 @@ const pollLoop = async () => {
           if (cmd?.id) {
             try { await reportCommand(cmd.id, 'failed', reason); } catch {}
           }
-          // 超时/异常后重建浏览器上下文，避免脏状态传染下一个任务。
-          // 无论旧 context 是否还活着都先把引用置空，确保下次 ensureBrowser 起全新窗口。
-          try { if (context) { await (context as any).close?.().catch?.(() => {}); } } catch {}
-          context = null as any; page = null as any;
-        } finally {
-          taskInFlight = false;
+          // 超时/异常后重建浏览器上下文，避免脏状态传染下一个任务
+          try {
+            if (page) { await page.context().close().catch(() => {}); page = null as any; }
+          } catch {}
         }
       }
     } catch (err: any) {
@@ -3923,11 +3931,13 @@ const shutdown = async (signal: string) => {
   process.exit(0);
 };
 
+process.on('SIGINT', () => { void shutdown('SIGINT'); });
+process.on('SIGTERM', () => { void shutdown('SIGTERM'); });
+
 const main = async () => {
   console.log('[bot-real] starting with config:', {
     API_BASE, BOT_ID, BOT_HOST, BOT_VERSION, ACCOUNT_IDS, POLL_INTERVAL_MS, HEARTBEAT_INTERVAL_MS, PROFILE_DIR, HEADLESS,
     pollLimit: POLL_LIMIT,
-    dailyTaskLimit: BOT_DAILY_TASK_LIMIT,
     minVisibleTiles: BOT_MIN_VISIBLE_TILES,
     cdpMode: Boolean(BOT_CDP_URL),
     cdpUrl: BOT_CDP_URL || null,
@@ -3939,20 +3949,26 @@ const main = async () => {
     proxyServer: BOT_PROXY_SERVER || null,
     commentEnabled: BOT_COMMENT_ENABLED,
   });
+  // 视觉/AI 评论就绪状态自检（用户 2026-08-10 问"flash 可以分析了？"——重启后看这行即可确认）
+  console.log('[bot-real] [vision-check]', JSON.stringify({
+    visionEnabledFlag: (process.env.BOT_VISION_ENABLED || '0') === '1',
+    deepseekKeySet: !!process.env.DEEPSEEK_API_KEY,
+    visionKeySet: !!process.env.BOT_VISION_API_KEY,
+    isVisionEnabled: isVisionEnabled(),
+    visionModel: (process.env.BOT_VISION_MODEL || 'deepseek-v4-flash'),
+  }));
+  // 预热评论池
+  if (BOT_COMMENT_ENABLED) {
+    refillPool().then(() => console.log('[bot-real] comment pool warmed up'));
+  }
   await fetchNoiseSites(); // load noise sites from cloud
   await registerBot();
   await ensureBrowser();
-  await Promise.all([heartbeatLoop(), pollLoop(), commentReviewLoop()]);
+  await Promise.all([heartbeatLoop(), pollLoop()]);
 };
 
-const isDirectRun = Boolean(process.argv[1])
-  && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href;
+main().catch((err) => {
+  console.error('[bot-real] fatal:', err);
+  process.exit(1);
+});
 
-if (isDirectRun) {
-  process.on('SIGINT', () => { void shutdown('SIGINT'); });
-  process.on('SIGTERM', () => { void shutdown('SIGTERM'); });
-  main().catch((err) => {
-    console.error('[bot-real] fatal:', err);
-    process.exit(1);
-  });
-}

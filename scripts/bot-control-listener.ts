@@ -1,36 +1,23 @@
-/**
- * bot-control-listener.ts
- * ─────────────────────────────────────────────────────────────────────────
- * VPS 控制平面 listener：把 cloud-api 的 bot 指令队列翻译成 pm2 启停。
- *
- * 链路：前端「Run/Stop」→ cloud-api POST /api/bot/worker/start|stop
- *       → 写 D1 bot_commands(pending) → 本 listener 轮询 GET /api/bot/commands
- *       → 执行 pm2 start/stop <进程> → POST /api/bot/commands/report 回写结果。
- *
- * 这样前台无需直连 VPS，只需 cloud-api 一个出口即可远程操控 pm2 守护的 bot。
- *
- * 环境变量：
- *   CLOUD_API_BASE  默认 https://harvests-cloud-api.inkflowapp.workers.dev
- *   BOT_API_TOKEN   必须与 cloud-api 的 BOT_API_TOKEN 一致（默认 vps-bot-secret-2024）
- *   LISTENER_INTERVAL_MS  轮询间隔，默认 10000
- *
- * 启动：npx tsx scripts/bot-control-listener.ts   （或加入 ecosystem.config.cjs）
- */
+/** Host-aware PM2 control listener. */
 import { exec } from 'node:child_process';
 import { promisify } from 'node:util';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const execAsync = promisify(exec);
-
-const CLOUD_API_BASE = (process.env.CLOUD_API_BASE || 'https://harvests-cloud-api.inkflowapp.workers.dev').replace(/\/+$/, '');
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const CLOUD_API_BASE = (process.env.CLOUD_API_BASE || 'https://harvests-cloud-api.pages.dev').replace(/\/+$/, '');
 const BOT_API_TOKEN = process.env.BOT_API_TOKEN || 'vps-bot-secret-2024';
-const INTERVAL_MS = Number(process.env.LISTENER_INTERVAL_MS || '10000');
-const HOST_ID = (process.env.BOT_CONTROL_HOST_ID || 'vps-windows').trim();
+const INTERVAL_MS = Math.max(3000, Number(process.env.LISTENER_INTERVAL_MS || '10000'));
+const CONTROL_HOST_ID = process.env.CONTROL_HOST_ID || 'vps-windows';
+const CONTROL_HOST_LABEL = process.env.CONTROL_HOST_LABEL || CONTROL_HOST_ID;
 
-// functionId → pm2 进程名（与 ecosystem.config.cjs 的 name 对齐）
 const FUNCTION_TO_PM2: Record<string, string> = {
   ig_outreach: 'bot-worker',
+  ig_scheduler: 'ig-scheduler',
+  maps_scraper: 'maps-scrape-scheduler',
+  maps_bridge: 'maps-d1-bridge',
   competitor_ig: 'competitor-ig-monitor',
   supply_analysis: 'backlink-worker',
   reddit_intel: 'backlink-worker',
@@ -38,90 +25,133 @@ const FUNCTION_TO_PM2: Record<string, string> = {
   general_intel: 'general-intel',
 };
 
-// 前端配置落盘路径（与 bot-general-intel.ts 约定一致）：listener 在 start 时把
-// 前端卡片的 env 写入该文件，worker 启动时读取并合并（前端配置优先于 ecosystem.env）。
-const CONFIG_DIR = path.resolve(__dirname, '..', 'data');
-const GENERAL_INTEL_CONFIG = path.join(CONFIG_DIR, 'general-intel.config.json');
+const DATA_DIR = path.resolve(__dirname, '..', 'data');
+const PAUSE_DIR = path.join(DATA_DIR, 'control-pause');
+const GENERAL_INTEL_CONFIG = path.join(DATA_DIR, 'general-intel.config.json');
 
-interface Cmd { id: string; functionId: string; action: 'start' | 'stop' | 'pause' | 'resume' | 'restart'; pm2: string | null; env?: Record<string, string>; }
+type ControlAction = 'start' | 'stop' | 'pause' | 'resume' | 'restart';
+interface Cmd {
+  id: string;
+  functionId: string;
+  action: ControlAction;
+  pm2: string | null;
+  env?: Record<string, unknown>;
+}
+
+async function api(pathname: string, init?: RequestInit) {
+  return fetch(`${CLOUD_API_BASE}${pathname}`, init);
+}
 
 async function fetchCommands(): Promise<Cmd[]> {
-  const url = `${CLOUD_API_BASE}/api/bot/commands?token=${encodeURIComponent(BOT_API_TOKEN)}&hostId=${encodeURIComponent(HOST_ID)}`;
-  const res = await fetch(url);
+  const query = new URLSearchParams({ token: BOT_API_TOKEN, hostId: CONTROL_HOST_ID });
+  const res = await api(`/api/bot/commands?${query}`);
   if (!res.ok) {
-    console.warn(`[listener] GET /api/bot/commands FAILED ${res.status}`);
+    console.warn(`[listener] command poll failed: ${res.status}`);
     return [];
   }
-  const data = await res.json().catch(() => ({ ok: false, commands: [] }));
-  if (!data.ok) return [];
-  return (data.commands || []) as Cmd[];
+  const data: any = await res.json().catch(() => ({}));
+  return data.ok && Array.isArray(data.commands) ? data.commands : [];
 }
 
-async function runPm2(pm2Name: string, action: Cmd['action']): Promise<{ ok: boolean; error?: string }> {
+async function pm2Snapshot(): Promise<Record<string, any>> {
   try {
-    if (action === 'start' || action === 'resume' || action === 'restart') {
-      // 若已运行则 restart，否则 start；统一用 restart 最稳
-      await execAsync(`pm2 restart ${pm2Name} || pm2 start ${pm2Name}`);
-    } else {
+    const { stdout } = await execAsync('pm2 jlist', { maxBuffer: 4 * 1024 * 1024 });
+    const rows = JSON.parse(stdout || '[]');
+    const snapshot: Record<string, any> = {};
+    for (const row of rows) {
+      const name = String(row?.name || '');
+      if (!name) continue;
+      snapshot[name] = {
+        status: String(row?.pm2_env?.status || 'unknown'),
+        pid: Number(row?.pid || 0),
+        restarts: Number(row?.pm2_env?.restart_time || 0),
+        uptime: Number(row?.pm2_env?.pm_uptime || 0),
+      };
+    }
+    return snapshot;
+  } catch (error: any) {
+    return { _error: String(error?.message || error).slice(0, 240) };
+  }
+}
+
+async function heartbeat() {
+  const query = new URLSearchParams({ token: BOT_API_TOKEN });
+  const res = await api(`/api/bot/control/heartbeat?${query}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      hostId: CONTROL_HOST_ID,
+      label: CONTROL_HOST_LABEL,
+      processes: await pm2Snapshot(),
+      meta: { platform: process.platform, pid: process.pid },
+    }),
+  });
+  if (!res.ok) console.warn(`[listener] heartbeat failed: ${res.status}`);
+}
+
+function pauseFile(pm2Name: string) {
+  return path.join(PAUSE_DIR, `${pm2Name}.pause`);
+}
+
+async function runCommand(cmd: Cmd): Promise<{ ok: boolean; error?: string }> {
+  const pm2Name = cmd.pm2 || FUNCTION_TO_PM2[cmd.functionId];
+  if (!pm2Name) return { ok: false, error: `no pm2 mapping for ${cmd.functionId}` };
+  try {
+    if (cmd.action === 'pause') {
+      fs.mkdirSync(PAUSE_DIR, { recursive: true });
+      fs.writeFileSync(pauseFile(pm2Name), new Date().toISOString(), 'utf8');
+      return { ok: true };
+    }
+    if (cmd.action === 'resume') {
+      fs.rmSync(pauseFile(pm2Name), { force: true });
+      return { ok: true };
+    }
+    if ((cmd.action === 'start' || cmd.action === 'restart') && cmd.functionId === 'general_intel' && cmd.env) {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+      fs.writeFileSync(GENERAL_INTEL_CONFIG, JSON.stringify(cmd.env, null, 2), 'utf8');
+    }
+    if (cmd.action === 'stop') {
       await execAsync(`pm2 stop ${pm2Name}`);
+    } else if (cmd.action === 'restart') {
+      await execAsync(`pm2 restart ${pm2Name} --update-env`);
+    } else {
+      await execAsync(`pm2 restart ${pm2Name} --update-env || pm2 start ecosystem.config.cjs --only ${pm2Name}`);
     }
     return { ok: true };
-  } catch (e: any) {
-    return { ok: false, error: String(e?.message || e).slice(0, 300) };
+  } catch (error: any) {
+    return { ok: false, error: String(error?.message || error).slice(0, 500) };
   }
 }
 
-async function report(id: string, ok: boolean, error?: string) {
-  try {
-    await fetch(`${CLOUD_API_BASE}/api/bot/commands/report?token=${encodeURIComponent(BOT_API_TOKEN)}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id, ok, error }),
-    });
-  } catch (e: any) {
-    console.warn(`[listener] report failed for ${id}: ${e.message}`);
-  }
+async function report(id: string, result: { ok: boolean; error?: string }) {
+  const query = new URLSearchParams({ token: BOT_API_TOKEN });
+  await api(`/api/bot/commands/report?${query}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id, ok: result.ok, error: result.error }),
+  });
 }
 
 async function tick() {
-  const cmds = await fetchCommands();
-  if (cmds.length === 0) return;
-  console.log(`[listener] ${cmds.length} 条指令`);
-  for (const cmd of cmds) {
-    if (!cmd.pm2) {
-      console.warn(`[listener] ${cmd.functionId} 无对应 pm2 进程，跳过`);
-      await report(cmd.id, false, `no pm2 mapping for ${cmd.functionId}`);
-      continue;
-    }
-    // 通用情报机器人：start 时把前端配置(env)落盘，供 worker 启动读取
-    if (cmd.action === 'start' && cmd.functionId === 'general_intel' && cmd.env && Object.keys(cmd.env).length > 0) {
-      try {
-        fs.mkdirSync(CONFIG_DIR, { recursive: true });
-        fs.writeFileSync(GENERAL_INTEL_CONFIG, JSON.stringify(cmd.env, null, 2), 'utf8');
-        console.log(`[listener] 写入通用情报配置 → ${GENERAL_INTEL_CONFIG}`);
-      } catch (e: any) {
-        console.warn(`[listener] 写通用情报配置失败: ${e.message}`);
-      }
-    }
-    const r = await runPm2(cmd.pm2, cmd.action);
-    console.log(`[listener] ${cmd.action} ${cmd.pm2} → ${r.ok ? 'OK' : 'ERR ' + r.error}`);
-    await report(cmd.id, r.ok, r.error);
+  await heartbeat();
+  const commands = await fetchCommands();
+  for (const cmd of commands) {
+    const result = await runCommand(cmd);
+    console.log(`[listener:${CONTROL_HOST_ID}] ${cmd.action} ${cmd.pm2 || cmd.functionId}: ${result.ok ? 'ok' : result.error}`);
+    await report(cmd.id, result);
   }
+  if (commands.length) await heartbeat();
 }
 
 async function main() {
-  console.log(`=== Bot Control Listener ===`);
-  console.log(`cloud-api: ${CLOUD_API_BASE}`);
-  console.log(`hostId: ${HOST_ID}`);
-  console.log(`interval: ${INTERVAL_MS}ms`);
-  // 立即跑一轮，再进入循环
+  console.log(`[listener] host=${CONTROL_HOST_ID} api=${CLOUD_API_BASE} interval=${INTERVAL_MS}ms`);
   while (true) {
-    try { await tick(); } catch (e: any) { console.warn(`[listener] tick error: ${e.message}`); }
-    await new Promise((r) => setTimeout(r, INTERVAL_MS));
+    try { await tick(); }
+    catch (error: any) { console.warn(`[listener] tick failed: ${error?.message || error}`); }
+    await new Promise((resolve) => setTimeout(resolve, INTERVAL_MS));
   }
 }
 
-const invoked = process.argv[1]?.replace(/\\/g, '/').endsWith('bot-control-listener.ts');
-if (invoked) {
-  main().catch((e) => { console.error('Fatal:', e?.message || e); process.exit(1); });
+if (process.argv[1]?.replace(/\\/g, '/').endsWith('bot-control-listener.ts')) {
+  main().catch((error) => { console.error('[listener] fatal:', error); process.exit(1); });
 }
