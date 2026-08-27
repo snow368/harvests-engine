@@ -2771,6 +2771,94 @@ const tryPostCommentOnOpenModal = async (text: string) => {
   return true;
 };
 
+const queueCommentDraftForReview = async (
+  handle: string,
+  postUrl: string,
+  text: string,
+  meta: any,
+  extra: Record<string, any> = {}
+) => {
+  const draftId = `${Date.now()}_${hashString(`${handle}|${postUrl}|${text}`).slice(0, 10)}`;
+  await postJson('/api/drafts/ingest', {
+    botId: BOT_ID,
+    drafts: [{
+      id: draftId,
+      botId: BOT_ID,
+      handle,
+      postUrl,
+      postKey: extractPostKey(postUrl),
+      proposedComment: text,
+      groundingRisks: [],
+      safeFacts: [
+        ...(meta?.postStyle ? [`style:${meta.postStyle}`] : []),
+        ...(meta?.postIntent ? [`intent:${meta.postIntent}`] : []),
+        ...(extra.visionDescription ? [String(extra.visionDescription).slice(0, 220)] : []),
+      ],
+      lang: 'en',
+    }],
+  });
+  logBehavior('comment_review_queued', {
+    handle,
+    postUrl,
+    draftId,
+    text,
+    score: Number(meta?.score || 0),
+    style: extra.style || meta?.postStyle || '',
+    styleConfidence: extra.styleConfidence || meta?.styleConfidence || 'low',
+    vision: !!extra.visionDescription,
+  });
+  return draftId;
+};
+
+let approvedCommentBusy = false;
+const tryPublishApprovedComment = async (): Promise<boolean> => {
+  if (!BOT_COMMENT_ENABLED || approvedCommentBusy || !page) return false;
+  approvedCommentBusy = true;
+  let claimedDraftId = '';
+  let didPostToInstagram = false;
+  try {
+    const data = await postJson('/api/drafts/claim-approved', { botId: BOT_ID });
+    const item = data?.item;
+    if (!item?.post_url || !item?.proposed_comment) return false;
+    claimedDraftId = String(item.draft_id || item.id);
+
+    const handle = String(item.handle || '').replace(/^@/, '').trim();
+    const text = String(item.proposed_comment || '').trim();
+    logBehavior('comment_approved_publish_start', { draftId: claimedDraftId, handle, postUrl: item.post_url });
+
+    await page.goto(String(item.post_url), { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await page.waitForTimeout(jitter(1800, 3200));
+    const ok = await tryPostCommentOnOpenModal(text);
+    if (!ok) {
+      logBehavior('comment_approved_publish_failed', { draftId: claimedDraftId, handle, reason: 'comment_box_not_found' });
+      await postJson(`/api/drafts/${encodeURIComponent(claimedDraftId)}/release`, {}).catch(() => null);
+      return false;
+    }
+    didPostToInstagram = true;
+
+    const key = todayKey();
+    const textHash = hashString(normalizeForMatch(text));
+    likeState.comments!.byDay![key] = Number(likeState.comments!.byDay![key] || 0) + 1;
+    if (handle) likeState.comments!.byHandle![handle] = { lastCommentAt: Date.now() };
+    likeState.comments!.recentText!.push({ ts: Date.now(), hash: textHash });
+    pruneRecentCommentHashes();
+    saveLikeState(likeState);
+
+    await postJson(`/api/drafts/${encodeURIComponent(claimedDraftId)}/posted`, {});
+    logBehavior('comment_posted', { draftId: claimedDraftId, handle, postUrl: item.post_url, text, reviewed: true });
+    if (handle) recordInteraction(handle, 'comment', { postUrl: item.post_url, text, reviewed: true }).catch(() => {});
+    return true;
+  } catch (error: any) {
+    if (claimedDraftId && !didPostToInstagram) {
+      await postJson(`/api/drafts/${encodeURIComponent(claimedDraftId)}/release`, {}).catch(() => null);
+    }
+    logBehavior('comment_approved_publish_error', { reason: String(error?.message || error).slice(0, 180) });
+    return false;
+  } finally {
+    approvedCommentBusy = false;
+  }
+};
+
 const tryCommentWithStrategy = async (handle: string, facts?: ProfileFacts, likeSummary?: LikeActionSummary): Promise<CommentActionSummary> => {
   if (!page) throw new Error('page_not_initialized');
   const gate = shouldTryComment(handle, likeSummary);
@@ -2920,52 +3008,26 @@ const tryCommentWithStrategy = async (handle: string, facts?: ProfileFacts, like
   if (dup) return { attempted: 1, posted: 0, skipped: true, reason: 'comment_dup' };
 
   try {
-    await tiles.nth(chosen.idx).scrollIntoViewIfNeeded();
-    await page.waitForTimeout(jitter(900, 1800));
-    await tiles.nth(chosen.idx).click({ timeout: 10000 });
-    await page.waitForTimeout(jitter(1200, 2600));
-    const ok = await tryPostCommentOnOpenModal(text);
-    const postUrl = page.url();
-    await closeModal();
-    if (!ok) return { attempted: 1, posted: 0, skipped: true, reason: 'comment_box_not_found' };
-
+    const postUrl = chosen.meta?.url || '';
+    if (!postUrl || !extractPostKey(postUrl)) {
+      return { attempted: 1, posted: 0, skipped: true, reason: 'comment_post_url_missing' };
+    }
+    const draftId = await queueCommentDraftForReview(handle, postUrl, text, chosen.meta, {
+      style: tempStyle,
+      styleConfidence: tempConf,
+      visionDescription,
+    });
     const key = todayKey();
     likeState.comments!.byDay![key] = Number(likeState.comments!.byDay![key] || 0) + 1;
     likeState.comments!.byHandle![handle] = { lastCommentAt: Date.now() };
     likeState.comments!.recentText!.push({ ts: Date.now(), hash: textHash });
     pruneRecentCommentHashes();
     saveLikeState(likeState);
-    logBehavior('comment_posted', {
-      handle,
-      postUrl,
-      text,
-      score: chosen.score,
-      style: tempStyle || '',
-      styleConfidence: tempConf || 'low',
-      styleSource: tempSource || 'none',
-      vision: !!visionDescription,
-      visionTech: visionTechHints,
-      likeCount: Number(chosen.meta.likeCount || 0),
-      commentCount: Number(chosen.meta.commentCount || 0),
-      cta: Number(chosen.meta.cta || 0),
-      pinnedLikelyBoost: Number(chosen.meta.pinnedLikelyBoost || 0)
-    });
-    recordInteraction(handle, 'comment', {
-      postUrl, text, score: chosen.score,
-      style: tempStyle || '',
-      styleConfidence: tempConf || 'low',
-      styleSource: tempSource || 'none',
-      vision: !!visionDescription,
-    }).catch(() => {});
-    // 🛑 检测 IG 限制信号（评论后常弹 "Action Blocked / Try again later"）
-    try {
-      const bsig = await detectBlockSignal();
-      if (bsig) await triggerAccountRest(bsig.severity, bsig.text);
-    } catch {}
-    return { attempted: 1, posted: 1, skipped: false, text, postUrl };
-  } catch {
+    return { attempted: 1, posted: 0, skipped: false, reason: 'comment_review_pending', text, postUrl };
+  } catch (error: any) {
     await closeModal().catch(() => {});
-    return { attempted: 1, posted: 0, skipped: true, reason: 'comment_post_failed' };
+    logBehavior('comment_review_queue_failed', { handle, reason: String(error?.message || error).slice(0, 180) });
+    return { attempted: 1, posted: 0, skipped: true, reason: 'comment_review_queue_failed' };
   }
 };
 
@@ -3790,6 +3852,15 @@ const pollLoop = async () => {
         await sleep(Math.min(POLL_INTERVAL_MS, 60_000));
         continue;
       }
+      // Human-reviewed comments: only drafts explicitly approved in the front-end
+      // are allowed to reach Instagram.
+      try {
+        const publishedApproved = await tryPublishApprovedComment();
+        if (publishedApproved) {
+          await sleep(jitter(3500, 9000));
+          continue;
+        }
+      } catch {}
       // ── 回关主动复检：每 5 轮回访一个"已关注未检测回关"的号，让回关能被发现 ──
       try {
         await maybeCheckFollowBacks();
