@@ -28,7 +28,10 @@ const VISION_API_KEY = ((): string => {
 })();
 
 export type VisionResult = {
+  imageType: string;        // tattoo_on_skin | flash_art | studio | portrait | other
+  tattooVisible: boolean;
   subject: string;          // 图里纹身描绘的题材
+  subjectConfidence: 'high' | 'medium' | 'low';
   style: string;            // 视觉模型判定的风格（原始字符串）
   styleConfidence: 'high' | 'medium' | 'low';
   craftNotes: string[];     // 2-4 条"同行能注意到的可见工艺事实"（linework/shading/composition/color/negative space）
@@ -50,9 +53,14 @@ const safeJsonParse = (text: string, fallback: any): any => {
   }
 };
 
-const VISION_PROMPT = `You are analyzing a tattoo PHOTO. Return ONLY valid JSON, no prose, no markdown:
-{"subject":"what the tattoo depicts, in a few words","style":"best-fit tattoo style — use one of: blackwork, fine line, traditional, neo traditional, new school, japanese, realism, black and grey, color, microrealism, watercolor, dotwork, geometric, tribal, trash polka, illustrative, ornamental, lettering, portrait, surrealism, cover up, linework, minimalist, chicano, anime, or OTHER","styleConfidence":"high if you are confident about the style, medium if uncertain, low if unclear","craftNotes":["2 to 4 specific OBSERVABLE craft facts a fellow tattoo artist would notice, e.g. linework crispness, shading smoothness, composition balance, color saturation, negative space","..."],"palette":"short color description"}
-Be factual about what is visible in THIS image. Do not guess beyond what you see.`;
+const VISION_PROMPT = `Analyze ONLY the currently displayed Instagram carousel frame. Return ONLY valid JSON, no prose, no markdown:
+{"imageType":"tattoo_on_skin|flash_art|studio|portrait|other","tattooVisible":true,"subject":"what the tattoo itself depicts, or empty when uncertain","subjectConfidence":"high|medium|low","style":"best-fit tattoo style or OTHER","styleConfidence":"high|medium|low","craftNotes":["0 to 3 specific, directly observable tattoo craft facts"],"palette":"short tattoo palette description, or empty"}
+Strict evidence rules:
+- Describe the TATTOO or flash artwork, not clothing, room decor, plants, jewelry, skin marks, or background props.
+- If no tattoo/flash is clearly visible, set tattooVisible=false and leave subject/style/craftNotes/palette empty.
+- Do not infer a leaf, flower, animal, face, lettering, or ornament from a vague shape. Use subjectConfidence=low and an empty subject when uncertain.
+- Use craft words such as crisp, clean, smooth shading, fine linework, saturation, spacing, or negative space ONLY when that exact property is clearly visible at this resolution.
+- Omit uncertain craft notes instead of guessing. Never praise quality; report neutral visual facts.`;
 
 /**
  * 调用视觉模型分析帖子图片。
@@ -188,7 +196,12 @@ const parseVisionContent = (content: string): VisionResult | null => {
     confRaw === 'high' ? 'high' : confRaw === 'medium' ? 'medium' : 'low';
 
   return {
+    imageType: String(parsed.imageType || 'other').slice(0, 40),
+    tattooVisible: parsed.tattooVisible === true,
     subject: String(parsed.subject || '').slice(0, 120),
+    subjectConfidence: String(parsed.subjectConfidence || 'low').toLowerCase() === 'high'
+      ? 'high'
+      : String(parsed.subjectConfidence || 'low').toLowerCase() === 'medium' ? 'medium' : 'low',
     style: String(parsed.style || '').slice(0, 60),
     styleConfidence,
     craftNotes: Array.isArray(parsed.craftNotes)
@@ -203,8 +216,10 @@ const parseVisionContent = (content: string): VisionResult | null => {
  * 把视觉结果压成一段可注入 prompt 的"观测描述"文字。
  */
 export const buildVisionDescription = (v: VisionResult): string => {
+  if (!v.tattooVisible) return '';
   const parts: string[] = [];
-  if (v.subject) parts.push(`subject: ${v.subject}`);
+  if (v.subject && v.subjectConfidence !== 'low') parts.push(`subject: ${v.subject} (${v.subjectConfidence})`);
+  if (v.imageType) parts.push(`image type: ${v.imageType}`);
   if (v.craftNotes.length) parts.push(`observed craft: ${v.craftNotes.join('; ')}`);
   if (v.palette) parts.push(`palette: ${v.palette}`);
   if (v.style && v.styleConfidence !== 'low') parts.push(`likely style: ${v.style} (${v.styleConfidence})`);

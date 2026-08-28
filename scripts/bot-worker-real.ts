@@ -948,7 +948,7 @@ const rapportLikePosts = async (handle: string, n: number): Promise<number> => {
 };
 
 // 回关培养评论也必须进入统一人工审核队列。这里绝不触碰评论输入框。
-const queueRapportCommentForReview = async (handle: string, text: string): Promise<string | null> => {
+const queueRapportCommentForReview = async (handle: string, fallbackText: string): Promise<string | null> => {
   if (!page) return null;
   try {
     await openProfile(handle);
@@ -959,8 +959,75 @@ const queueRapportCommentForReview = async (handle: string, text: string): Promi
     await page.waitForTimeout(jitter(1500, 3000));
     const postUrl = page.url();
     const postKey = extractPostKey(postUrl);
-    await page.keyboard.press('Escape').catch(() => {});
     if (!postKey) return null;
+
+    const meta: any = await readModalMeta('', handle);
+    let visionDescription = '';
+    let visionTechniqueHints: string[] = [];
+    let style = meta.postStyle || '';
+    let styleConfidence = meta.styleConfidence || 'low';
+    if (isVisionEnabled() && meta.postImageSrc) {
+      const vision = await analyzePostImage(meta.postImageSrc);
+      if (vision?.tattooVisible) {
+        visionDescription = buildVisionDescription(vision);
+        visionTechniqueHints = extractTechniqueHintsFromVision(visionDescription);
+        if (vision.styleConfidence === 'high' && vision.style) {
+          const normalized = vision.style.toLowerCase().replace(/[^a-z0-9]/g, '');
+          const detected = detectTattooStyle('', '', [normalized]).primary;
+          if (detected && styleConfidence !== 'high') {
+            style = detected;
+            styleConfidence = 'high';
+          }
+        }
+      }
+      logBehavior('comment_vision_result', {
+        handle,
+        postUrl,
+        tattooVisible: !!vision?.tattooVisible,
+        imageType: vision?.imageType || '',
+        subject: vision?.subject || '',
+        subjectConfidence: vision?.subjectConfidence || 'low',
+        craftNotes: vision?.craftNotes || [],
+      });
+    }
+
+    const caption = String(meta.caption || '').trim();
+    if (!caption && !visionDescription) {
+      await page.keyboard.press('Escape').catch(() => {});
+      logBehavior('comment_skip_no_grounding', { handle, postUrl, source: 'follow_back_ladder' });
+      return null;
+    }
+    const reconciledIntent = reconcileIntentWithVision({
+      intent: meta.postIntent || 'generic',
+      summary: meta.postSummary || '',
+      tone: meta.postTone || 'casual',
+      sensitive: !!meta.sensitive,
+      keywords: [],
+    }, visionDescription);
+    const generated = await Promise.race([
+      generateComment({
+        caption: caption.slice(0, 600),
+        imageAlt: meta.imageAlt || '',
+        style,
+        styleConfidence,
+        techniqueHints: meta.techniqueHints || [],
+        visionTechniqueHints,
+        visionDescription,
+        likeCount: meta.likeCount,
+        commentCount: meta.commentCount,
+        isReel: meta.isReel,
+        postIntent: reconciledIntent.intent,
+        postSummary: reconciledIntent.summary,
+        postTone: reconciledIntent.tone,
+        sensitive: reconciledIntent.sensitive,
+      }),
+      new Promise<{ text: string; style: string }>((_, reject) =>
+        setTimeout(() => reject(new Error('rapport_comment_gen_timeout')), 20000)
+      ),
+    ]);
+    const text = String(generated?.text || fallbackText).trim();
+    await page.keyboard.press('Escape').catch(() => {});
+    if (!text) return null;
 
     const draftHash = hashString(`${handle}|${postUrl}|${text}`).toString(36);
     const draftId = `rapport_${Date.now()}_${draftHash.slice(0, 10)}`;
@@ -973,12 +1040,29 @@ const queueRapportCommentForReview = async (handle: string, text: string): Promi
         postUrl,
         postKey,
         proposedComment: text,
-        groundingRisks: ['follow_back_ladder'],
-        safeFacts: ['source:follow_back_ladder'],
+        groundingRisks: [
+          'follow_back_ladder',
+          ...(!visionDescription ? ['vision_unavailable'] : []),
+          ...(!caption ? ['caption_missing'] : []),
+        ],
+        safeFacts: [
+          'source:follow_back_ladder',
+          ...(caption ? [`caption:${caption.slice(0, 260)}`] : []),
+          ...(visionDescription ? [`vision:${visionDescription.slice(0, 300)}`] : []),
+        ],
         lang: 'en',
       }],
     });
-    logBehavior('comment_review_queued', { handle, postUrl, draftId, text, source: 'follow_back_ladder' });
+    logBehavior('comment_review_queued', {
+      handle,
+      postUrl,
+      draftId,
+      text,
+      source: 'follow_back_ladder',
+      caption: caption.slice(0, 260),
+      visionDescription: visionDescription.slice(0, 300),
+      generationStyle: generated?.style || '',
+    });
     return draftId;
   } catch (error: any) {
     await page.keyboard.press('Escape').catch(() => {});
@@ -2722,7 +2806,7 @@ const buildCommentText = async (facts?: ProfileFacts, postMeta?: any): Promise<s
       sensitive: postMeta?.sensitive,
     }),
       new Promise<{ text: string }>((_, reject) =>
-        setTimeout(() => reject(new Error('comment_gen_timeout')), 8000)
+        setTimeout(() => reject(new Error('comment_gen_timeout')), 20000)
       ),
     ]);
     // 异步补充池子
@@ -2816,8 +2900,12 @@ const queueCommentDraftForReview = async (
       postUrl,
       postKey: extractPostKey(postUrl),
       proposedComment: text,
-      groundingRisks: [],
+      groundingRisks: [
+        ...(!extra.visionDescription ? ['vision_unavailable'] : []),
+        ...(!meta?.caption ? ['caption_missing'] : []),
+      ],
       safeFacts: [
+        ...(meta?.caption ? [`caption:${String(meta.caption).slice(0, 260)}`] : []),
         ...(meta?.postStyle ? [`style:${meta.postStyle}`] : []),
         ...(meta?.postIntent ? [`intent:${meta.postIntent}`] : []),
         ...(extra.visionDescription ? [String(extra.visionDescription).slice(0, 220)] : []),
@@ -3097,24 +3185,31 @@ const tryCommentWithStrategy = async (handle: string, facts?: ProfileFacts, like
 
 // 抓取弹窗里"最大的帖子图"的 src（scontent 签名 URL）。仅取 URL 字符串，不下载；
 // 视觉分析时直接把 URL 交给视觉模型服务端拉取（避免浏览器 CORS 抓图）。无图/出错返回 ''。
-const getPostImageSrc = async (): Promise<string> => {
-  if (!page) return '';
+const getVisiblePostImage = async (): Promise<{ src: string; alt: string }> => {
+  if (!page) return { src: '', alt: '' };
   try {
     return await page.evaluate(() => {
       const imgs = Array.from(
         document.querySelectorAll('div[role="dialog"] img[src*="scontent"]')
       ) as HTMLImageElement[];
-      if (!imgs.length) return '';
-      let best = '';
-      let bestW = 0;
+      let best: HTMLImageElement | null = null;
+      let bestScore = 0;
       for (const im of imgs) {
-        const w = im.naturalWidth || im.clientWidth || 0;
-        if (w > bestW) { bestW = w; best = im.src; }
+        const rect = im.getBoundingClientRect();
+        const style = getComputedStyle(im);
+        const visibleWidth = Math.min(rect.right, innerWidth) - Math.max(rect.left, 0);
+        const visibleHeight = Math.min(rect.bottom, innerHeight) - Math.max(rect.top, 0);
+        if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity || 1) <= 0) continue;
+        if (visibleWidth < 220 || visibleHeight < 220) continue;
+        // Current carousel frame occupies the largest visible area. Preloaded
+        // off-screen slides and avatars are excluded by the intersection test.
+        const score = visibleWidth * visibleHeight;
+        if (score > bestScore) { bestScore = score; best = im; }
       }
-      return best;
+      return { src: best?.src || '', alt: best?.alt || '' };
     });
   } catch {
-    return '';
+    return { src: '', alt: '' };
   }
 };
 
@@ -3137,15 +3232,24 @@ const readModalMeta = async (primaryStyle: string, expectedHandle = '', follower
   } catch {}
   const expected = normalizeHandle(expectedHandle);
   const isOwnerPost = expected ? ownerHandle === expected : true;
-  const caption = (await page.locator('article ul li span, div[role="dialog"] ul li span').allInnerTexts().catch(() => [] as string[]))
-    .join(' ')
-    .slice(0, 1200);
-  const altHints = (await page.locator('div[role="dialog"] img[alt], article img[alt]').all()
-    .then(async (els) => Promise.all(els.slice(0, 4).map(async (el) => ((await el.getAttribute('alt')) || '').slice(0, 200))))
-    .catch(() => [] as string[]))
-    .join(' ');
-  // 帖子图 URL（供视觉分析使用，仅当 BOT_VISION_ENABLED 时后续才会用到）
-  const postImageSrc = await getPostImageSrc();
+  // Caption is the first post row. Reading every <li> also pulled user comments
+  // into the prompt and made the model respond to somebody else's words.
+  let caption = '';
+  try {
+    const row = page.locator('div[role="dialog"] ul li, article ul li').first();
+    caption = String(await row.innerText({ timeout: 4000 }) || '');
+    if (ownerHandle) caption = caption.replace(new RegExp(`^\\s*${ownerHandle.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\$&')}\\s*`, 'i'), '');
+    caption = caption
+      .replace(/\b(Reply|See translation|Edited)\b/gi, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 1200);
+  } catch {}
+  // Use only the currently visible carousel frame. Combining alt text from
+  // hidden slides, avatars and suggested posts polluted both intent and vision.
+  const visiblePostImage = await getVisiblePostImage();
+  const altHints = visiblePostImage.alt.slice(0, 300);
+  const postImageSrc = visiblePostImage.src;
   const dt = await page.locator('time').first().getAttribute('datetime').catch(() => null);
   const dialogText = normalizeForMatch(
     (await page.locator('div[role="dialog"]').first().innerText().catch(() => '')) || ''
