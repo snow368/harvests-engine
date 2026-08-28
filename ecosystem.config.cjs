@@ -60,7 +60,7 @@ const apps = [
       // pages.dev 同源代理（→ cloud-api Worker），VPS 国内/海外都能通；workers.dev 子域国内被 GFW 屏蔽
       CLOUD_API_BASE: 'https://harvests.pages.dev',
       SCHEDULER_BOT_ID: 'bot_ig_01',
-      SCHEDULER_DAILY_LIMIT: '50',
+      SCHEDULER_DAILY_LIMIT: '80',
       SCHEDULER_STATE: 'ALL',
     },
     error_file: path.join(LOGS_DIR, 'scheduler-error.log'),
@@ -188,10 +188,12 @@ const apps = [
       BOT_DAILY_LIKE_OVERRIDE: '0',
       BOT_LIKE_COOLDOWN_MIN_HOURS: '24',
       BOT_LIKE_COOLDOWN_MAX_HOURS: '72',
-      // 评论：概率 0.4，每日上限 15 条（成熟号放量；按账号年龄连续爬坡，新号自动降低）
+      // 评论：80 条数据中生成 15-25 条待审草稿；人工审核后每天最多发布 12 条。
       BOT_COMMENT_ENABLED: 'true',
       BOT_COMMENT_CHANCE: '0.4',
-      BOT_COMMENT_DAILY_MAX: '15',
+      BOT_COMMENT_DRAFT_DAILY_MIN: '15',
+      BOT_COMMENT_DRAFT_DAILY_MAX: '25',
+      BOT_COMMENT_PUBLISH_DAILY_MAX: '12',
       // 关注：每日 15-40 个（成熟号满档；按账号年龄连续爬坡，ig_01 绑定 51 天→立即满档；
       //       触碰门槛降到 1：每个店任务只访问 1 次，旧值 ≥2 永远够不到 → 从不关注）
       BOT_FOLLOW_ENABLED: 'true',

@@ -120,7 +120,12 @@ const BOT_COMMENT_ENABLED = String(process.env.BOT_COMMENT_ENABLED || 'false').t
 const BOT_DEBUG = String(process.env.BOT_DEBUG || 'false').toLowerCase() === 'true';
 const dbg = (...args: any[]) => { if (BOT_DEBUG) console.error(...args); };
 const BOT_COMMENT_CHANCE = Math.max(0, Math.min(1, Number(process.env.BOT_COMMENT_CHANCE || 0.2)));
-const BOT_COMMENT_DAILY_MAX = Math.max(0, Math.min(20, Number(process.env.BOT_COMMENT_DAILY_MAX || 2)));
+const BOT_COMMENT_DRAFT_DAILY_MIN = Math.max(0, Math.min(50, Number(process.env.BOT_COMMENT_DRAFT_DAILY_MIN || 15)));
+const BOT_COMMENT_DRAFT_DAILY_MAX = Math.max(
+  BOT_COMMENT_DRAFT_DAILY_MIN,
+  Math.min(50, Number(process.env.BOT_COMMENT_DRAFT_DAILY_MAX || process.env.BOT_COMMENT_DAILY_MAX || 25)),
+);
+const BOT_COMMENT_PUBLISH_DAILY_MAX = Math.max(0, Math.min(50, Number(process.env.BOT_COMMENT_PUBLISH_DAILY_MAX || 12)));
 const BOT_COMMENT_HANDLE_COOLDOWN_HOURS = Math.max(24, Number(process.env.BOT_COMMENT_HANDLE_COOLDOWN_HOURS || 72));
 const BOT_FOLLOW_ENABLED = String(process.env.BOT_FOLLOW_ENABLED || 'false').toLowerCase() === 'true';
 const BOT_FOLLOW_DAILY_MIN = Math.max(0, Math.min(30, Number(process.env.BOT_FOLLOW_DAILY_MIN || 2)));
@@ -813,7 +818,12 @@ type LikeState = {
     dayCap?: { key: string; cap: number };
   };
   comments?: {
+    // byDay is retained for migration from older workers, where queued drafts
+    // and published comments were incorrectly mixed in the same counter.
     byDay?: Record<string, number>;
+    draftsByDay?: Record<string, number>;
+    postedByDay?: Record<string, number>;
+    draftDayTarget?: { key: string; target: number };
     byHandle?: Record<string, { lastCommentAt?: number }>;
     recentText?: Array<{ ts: number; hash: number }>;
   };
@@ -847,6 +857,8 @@ if (!likeState.follows.byDay) likeState.follows.byDay = {};
 if (!likeState.follows.byHandle) likeState.follows.byHandle = {};
 if (!likeState.comments) likeState.comments = { byDay: {}, byHandle: {}, recentText: [] };
 if (!likeState.comments.byDay) likeState.comments.byDay = {};
+if (!likeState.comments.draftsByDay) likeState.comments.draftsByDay = { ...likeState.comments.byDay };
+if (!likeState.comments.postedByDay) likeState.comments.postedByDay = {};
 if (!likeState.comments.byHandle) likeState.comments.byHandle = {};
 if (!likeState.comments.recentText) likeState.comments.recentText = [];
 if (!likeState.dm) likeState.dm = { byDay: {} };
@@ -856,6 +868,31 @@ if (!likeState.dmSeen) likeState.dmSeen = {};
 
 const getTodayKey = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 const isSameDay = (a?: number, b?: number) => { if (!a || !b) return false; return getTodayKey(new Date(a)) === getTodayKey(new Date(b)); };
+const getCommentDraftDayTarget = () => {
+  const key = getTodayKey();
+  if (!likeState.comments!.draftDayTarget || likeState.comments!.draftDayTarget.key !== key) {
+    const span = BOT_COMMENT_DRAFT_DAILY_MAX - BOT_COMMENT_DRAFT_DAILY_MIN + 1;
+    const target = BOT_COMMENT_DRAFT_DAILY_MIN + Math.floor(Math.random() * Math.max(1, span));
+    likeState.comments!.draftDayTarget = { key, target };
+    saveLikeState(likeState);
+  }
+  return likeState.comments!.draftDayTarget.target;
+};
+const commentDraftsToday = () => Number(likeState.comments!.draftsByDay?.[getTodayKey()] || 0);
+const commentsPostedToday = () => Number(likeState.comments!.postedByDay?.[getTodayKey()] || 0);
+const canQueueCommentDraft = () => commentDraftsToday() < getCommentDraftDayTarget();
+const recordCommentDraftQueued = () => {
+  const key = getTodayKey();
+  likeState.comments!.draftsByDay![key] = commentDraftsToday() + 1;
+  // Keep the legacy field aligned with draft count for older telemetry readers.
+  likeState.comments!.byDay![key] = likeState.comments!.draftsByDay![key];
+  saveLikeState(likeState);
+};
+const recordCommentPublished = () => {
+  const key = getTodayKey();
+  likeState.comments!.postedByDay![key] = commentsPostedToday() + 1;
+  saveLikeState(likeState);
+};
 const dmSentToday = () => Number(likeState.dm?.byDay?.[getTodayKey()] || 0);
 const recordDmSent = () => {
   const k = getTodayKey();
@@ -950,6 +987,15 @@ const rapportLikePosts = async (handle: string, n: number): Promise<number> => {
 // 回关培养评论也必须进入统一人工审核队列。这里绝不触碰评论输入框。
 const queueRapportCommentForReview = async (handle: string, fallbackText: string): Promise<string | null> => {
   if (!page) return null;
+  if (!canQueueCommentDraft()) {
+    logBehavior('comment_skip_draft_daily_target', {
+      handle,
+      source: 'follow_back_ladder',
+      dayCount: commentDraftsToday(),
+      dayTarget: getCommentDraftDayTarget(),
+    });
+    return null;
+  }
   try {
     await openProfile(handle);
     await page.waitForTimeout(jitter(1500, 3000));
@@ -1053,6 +1099,7 @@ const queueRapportCommentForReview = async (handle: string, fallbackText: string
         lang: 'en',
       }],
     });
+    recordCommentDraftQueued();
     logBehavior('comment_review_queued', {
       handle,
       postUrl,
@@ -1062,6 +1109,8 @@ const queueRapportCommentForReview = async (handle: string, fallbackText: string
       caption: caption.slice(0, 260),
       visionDescription: visionDescription.slice(0, 300),
       generationStyle: generated?.style || '',
+      dayCount: commentDraftsToday(),
+      dayTarget: getCommentDraftDayTarget(),
     });
     return draftId;
   } catch (error: any) {
@@ -2617,14 +2666,12 @@ const pruneRecentCommentHashes = () => {
 const shouldTryComment = (handle: string, likeSummary?: LikeActionSummary) => {
   if (!BOT_COMMENT_ENABLED) return { ok: false, reason: 'comment_disabled' };
 
+  if (!canQueueCommentDraft()) return { ok: false, reason: 'comment_draft_daily_target' };
+
   // No more "like first" or "first touch window" — comment when a good post is found.
   // Chance roll keeps volume human-scale.
   if (Math.random() > BOT_COMMENT_CHANCE) return { ok: false, reason: 'comment_chance_skip' };
 
-  const key = todayKey();
-  const byDay = likeState.comments!.byDay || {};
-  const dayCount = Number(byDay[key] || 0);
-  if (dayCount >= BOT_COMMENT_DAILY_MAX) return { ok: false, reason: 'comment_daily_limit' };
   const h = likeState.comments!.byHandle?.[handle];
   if (h?.lastCommentAt) {
     const nextAt = h.lastCommentAt + BOT_COMMENT_HANDLE_COOLDOWN_HOURS * 60 * 60 * 1000;
@@ -2929,6 +2976,7 @@ const queueCommentDraftForReview = async (
 let approvedCommentBusy = false;
 const tryPublishApprovedComment = async (): Promise<boolean> => {
   if (!BOT_COMMENT_ENABLED || approvedCommentBusy || !page) return false;
+  if (commentsPostedToday() >= BOT_COMMENT_PUBLISH_DAILY_MAX) return false;
   approvedCommentBusy = true;
   let claimedDraftId = '';
   let didPostToInstagram = false;
@@ -2959,9 +3007,8 @@ const tryPublishApprovedComment = async (): Promise<boolean> => {
     }
     didPostToInstagram = true;
 
-    const key = todayKey();
     const textHash = hashString(normalizeForMatch(text));
-    likeState.comments!.byDay![key] = Number(likeState.comments!.byDay![key] || 0) + 1;
+    recordCommentPublished();
     if (handle) likeState.comments!.byHandle![handle] = { lastCommentAt: Date.now() };
     likeState.comments!.recentText!.push({ ts: Date.now(), hash: textHash });
     pruneRecentCommentHashes();
@@ -2990,6 +3037,8 @@ const tryPublishApprovedComment = async (): Promise<boolean> => {
       approvedAt,
       approvedBy,
       source: isRapportComment ? 'follow_back_ladder' : 'task_review',
+      publishDayCount: commentsPostedToday(),
+      publishDayMax: BOT_COMMENT_PUBLISH_DAILY_MAX,
     });
     if (handle) recordInteraction(handle, 'comment', {
       postUrl: item.post_url,
@@ -3169,8 +3218,7 @@ const tryCommentWithStrategy = async (handle: string, facts?: ProfileFacts, like
       styleConfidence: tempConf,
       visionDescription,
     });
-    const key = todayKey();
-    likeState.comments!.byDay![key] = Number(likeState.comments!.byDay![key] || 0) + 1;
+    recordCommentDraftQueued();
     likeState.comments!.byHandle![handle] = { lastCommentAt: Date.now() };
     likeState.comments!.recentText!.push({ ts: Date.now(), hash: textHash });
     pruneRecentCommentHashes();
@@ -3946,12 +3994,13 @@ const executeCommand = async (command: CommandPayload) => {
     const commentsOn = actionOverrides.commentsEnabled ? true : (BOT_COMMENT_ENABLED && (actionOverrides.likesEnabled || BOT_COMMENT_ENABLED));
     const followsOn = actionOverrides.followsEnabled ? true : BOT_FOLLOW_ENABLED;
     dbg(`[dbg] liked=${likeSummary.liked} followsOn=${followsOn} commentsOn=${commentsOn} handle=${handle}`);
-    // 评论：仍要求本次有点赞（无互动直接评论显得可疑）。
-    if (likeSummary.liked > 0 && commentsOn) {
+    // 草稿生成不依赖本次点赞成功：这里只做视觉/文案分析并进入人工审核，
+    // 不会直接触碰 IG 评论框。实际发布仍必须经过审核且受独立日上限控制。
+    if (commentsOn) {
       await sleep(jitter(1400, 2600));
       commentSummary = await tryCommentWithStrategy(handle, profileFacts, likeSummary);
     } else {
-      commentSummary = { attempted: 0, posted: 0, skipped: true, reason: likeSummary.liked > 0 ? 'comment_off' : 'no_like_this_visit' };
+      commentSummary = { attempted: 0, posted: 0, skipped: true, reason: 'comment_off' };
     }
     // 关注：回关→DM 链路的关键动作，解耦于点赞。只要 followsOn 就尝试关注，
     // 即使本次未点赞（无可点帖/元数据抓不到），也要能关注，否则永远没有回关来源。
@@ -4187,6 +4236,12 @@ const main = async () => {
     proxyEnabled: Boolean(BOT_PROXY_SERVER),
     proxyServer: BOT_PROXY_SERVER || null,
     commentEnabled: BOT_COMMENT_ENABLED,
+    commentDraftDailyMin: BOT_COMMENT_DRAFT_DAILY_MIN,
+    commentDraftDailyMax: BOT_COMMENT_DRAFT_DAILY_MAX,
+    commentDraftToday: commentDraftsToday(),
+    commentDraftTargetToday: getCommentDraftDayTarget(),
+    commentPublishDailyMax: BOT_COMMENT_PUBLISH_DAILY_MAX,
+    commentsPostedToday: commentsPostedToday(),
   });
   // 视觉/AI 评论就绪状态自检（用户 2026-08-10 问"flash 可以分析了？"——重启后看这行即可确认）
   console.log('[bot-real] [vision-check]', JSON.stringify({

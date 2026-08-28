@@ -7,7 +7,7 @@
  * ENV:
  *   CLOUD_API_BASE        — Cloud API Worker 地址（默认 https://harvests-cloud-api.inkflowapp.workers.dev）
  *   BOT_API_TOKEN         — VPS bot 密钥（须与 cloud-api 的 BOT_API_TOKEN 一致）
- *   SCHEDULER_DAILY_LIMIT — 日配额（默认 50）
+ *   SCHEDULER_DAILY_LIMIT — 日配额（默认 80）
  *   SCHEDULER_BOT_ID      — 目标 bot（默认 bot_ig_01）
  *   SCHEDULER_STATE       — 目标州代码（默认 ALL=不限；设 'OR' 等则只排该州 artists）
  *   SCHEDULER_BATCH_SIZE  — 每批抓取数（默认 10）
@@ -18,7 +18,7 @@ import path from 'node:path';
 
 // ============ Config ============
 const BOT_ID = process.env.SCHEDULER_BOT_ID || 'bot_ig_01';
-const DAILY_LIMIT = Number(process.env.SCHEDULER_DAILY_LIMIT) || 50;
+const DAILY_LIMIT = Number(process.env.SCHEDULER_DAILY_LIMIT) || 80;
 const BATCH_SIZE = Math.min(20, Math.max(1, Number(process.env.SCHEDULER_BATCH_SIZE) || 10));
 const TARGET_STATE = (process.env.SCHEDULER_STATE || 'ALL').trim().toUpperCase();
 // 多州定向（西语浓度高州测试用）：SCHEDULER_STATES='TX,CA,FL' 优先于单州 SCHEDULER_STATE

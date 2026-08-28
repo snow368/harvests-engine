@@ -2028,75 +2028,6 @@ const buildCommentText = async (facts?: ProfileFacts, postMeta?: any): Promise<s
   }
 };
 
-const tryPostCommentOnOpenModal = async (text: string) => {
-  if (!page) return false;
-  const textarea = page.locator('textarea[aria-label*="comment" i], textarea[placeholder*="comment" i], textarea').first();
-  if ((await textarea.count()) === 0) return false;
-  await textarea.click({ timeout: 4000 });
-  await page.waitForTimeout(jitter(400, 1000));
-
-  const tp = BOT_PROFILE.typing;
-  const chars = text.split('');
-  const useDistractedTyping = Math.random() < 0.3;
-
-  if (!useDistractedTyping) {
-    // Mode A (70%): steady typing at per-bot speed
-    for (let i = 0; i < chars.length; i++) {
-      // Random mid-type pause (thinking/distracted)
-      if (Math.random() < tp.pauseChance) {
-        await page.waitForTimeout(jitter(tp.pauseMs, 500));
-      }
-      // Random typo + backspace
-      if (Math.random() < tp.mistakeChance) {
-        const nearbyKeys = 'asdfghjklqwertyuiopzxcvbnm,.';
-        const wrongChar = nearbyKeys[Math.floor(Math.random() * nearbyKeys.length)];
-        await textarea.press(wrongChar);
-        await page.waitForTimeout(jitter(tp.backspaceMs, 50));
-        await textarea.press('Backspace');
-        await page.waitForTimeout(jitter(tp.backspaceMs, 50));
-      }
-      await textarea.press(chars[i]);
-      await page.waitForTimeout(jitter(tp.baseSpeedMs, tp.varianceMs));
-      if (i > 0 && i % 12 === 0) await page.waitForTimeout(jitter(300, 900));
-    }
-  } else {
-    // Mode B (30%): chunked typing with per-bot speed
-    let i = 0;
-    while (i < chars.length) {
-      const chunkSize = randInt(3, 8);
-      const end = Math.min(i + chunkSize, chars.length);
-      for (let j = i; j < end; j++) {
-        if (Math.random() < tp.pauseChance) {
-          await page.waitForTimeout(jitter(tp.pauseMs, 300));
-        }
-        await textarea.press(chars[j]);
-        await page.waitForTimeout(jitter(tp.baseSpeedMs, tp.varianceMs));
-      }
-      i = end;
-      if (i >= chars.length) break;
-
-      // Distraction: scroll, pause, or typo-correction
-      const distraction = Math.random();
-      if (distraction < 0.4) {
-        await page.mouse.wheel(0, randInt(-80, 80));
-        await page.waitForTimeout(jitter(600, 1500));
-      } else if (distraction < 0.7) {
-        await page.waitForTimeout(jitter(800, 2500));
-      } else {
-        for (let k = 0; k < randInt(1, 3); k++) {
-          await textarea.press('Backspace');
-          await page.waitForTimeout(jitter(tp.backspaceMs, 100));
-        }
-      }
-    }
-  }
-
-  await page.waitForTimeout(jitter(500, 1500));
-  await textarea.press('Enter');
-  await page.waitForTimeout(jitter(1500, 3000));
-  return true;
-};
-
 const tryCommentWithStrategy = async (handle: string, facts?: ProfileFacts, likeSummary?: LikeActionSummary): Promise<CommentActionSummary> => {
   if (!page) throw new Error('page_not_initialized');
   const gate = shouldTryComment(handle, likeSummary);
@@ -2180,37 +2111,9 @@ const tryCommentWithStrategy = async (handle: string, facts?: ProfileFacts, like
     }
   }
 
-  try {
-    await tiles.nth(chosen.idx).scrollIntoViewIfNeeded();
-    await page.waitForTimeout(jitter(900, 1800));
-    await tiles.nth(chosen.idx).click({ timeout: 10000 });
-    await page.waitForTimeout(jitter(1200, 2600));
-    const ok = await tryPostCommentOnOpenModal(text);
-    const postUrl = page.url();
-    await closeModal();
-    if (!ok) return { attempted: 1, posted: 0, skipped: true, reason: 'comment_box_not_found' };
-
-    const key = todayKey();
-    likeState.comments!.byDay![key] = Number(likeState.comments!.byDay![key] || 0) + 1;
-    likeState.comments!.byHandle![handle] = { lastCommentAt: Date.now() };
-    likeState.comments!.recentText!.push({ ts: Date.now(), hash: textHash });
-    pruneRecentCommentHashes();
-    saveLikeState(likeState);
-    logBehavior('comment_posted', {
-      handle,
-      postUrl,
-      text,
-      score: chosen.score,
-      likeCount: Number(chosen.meta.likeCount || 0),
-      commentCount: Number(chosen.meta.commentCount || 0),
-      cta: Number(chosen.meta.cta || 0),
-      pinnedLikelyBoost: Number(chosen.meta.pinnedLikelyBoost || 0)
-    });
-    return { attempted: 1, posted: 1, skipped: false, text, postUrl };
-  } catch {
-    await closeModal().catch(() => {});
-    return { attempted: 1, posted: 0, skipped: true, reason: 'comment_post_failed' };
-  }
+  // Legacy cloak workers are never allowed to publish comments. Only the real
+  // worker's cloud review queue can claim an explicitly human-approved draft.
+  return { attempted: 1, posted: 0, skipped: true, reason: 'human_review_required' };
 };
 
 const readModalMeta = async (primaryStyle: string, expectedHandle = '', followerCount = 0) => {
@@ -3860,31 +3763,7 @@ const checkOwnPostComments = async (): Promise<number> => {
                 }
               } catch {}
 
-              // Generate reply: compliment-match + simple engagement
-              const replyPool = [
-                'Thanks so much! 🔥',
-                'Appreciate it! 🙏',
-                'Glad you like it!',
-                'Thank you! More coming soon.',
-                'Thanks for the support!',
-              ];
-              const reply = replyPool[Math.floor(Math.random() * replyPool.length)];
-              if (!reply) continue;
-
-              // Type and post reply
-              const replyInput = page.locator('textarea[placeholder*="comment"], div[role="textbox"]').first();
-              if (await replyInput.isVisible().catch(() => false)) {
-                await replyInput.click();
-                await page.waitForTimeout(jitter(400, 1000));
-                for (const char of reply) {
-                  await page.keyboard.type(char, { delay: jitter(40, 100) });
-                }
-                await page.waitForTimeout(jitter(600, 1400));
-                await page.keyboard.press('Enter');
-                await page.waitForTimeout(jitter(1000, 2000));
-                replied++;
-                logBehavior('comment_reply_sent', { reply });
-              }
+              logBehavior('comment_reply_skipped_human_review_required', { postUrl: page.url() });
               break; // Only reply to the first valid comment
             } catch {}
           }
