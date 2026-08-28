@@ -163,10 +163,10 @@ const apps = [
       // BOT_API_BASE 用 pages.dev（同源 /api/* 代理到 Worker），VPS/本机/国内都能通；
       // workers.dev 子域在国内被 GFW 屏蔽，VPS 海外虽可直连但 pages.dev 更稳。
       BOT_API_BASE: 'https://harvests.pages.dev',
-      BOT_ACCOUNT_IDS: 'raiha8833',
+      BOT_ACCOUNT_IDS: 'peachtattoosupplyraiha',
       BOT_ID: 'bot_ig_01',
       BOT_CDP_URL: 'http://localhost:9222', // CDP 模式：连 start-bots.bat 已起好的系统 Chrome（9222 调试口）
-      BOT_PROFILE_DIR: 'C:\\harvests\\profiles\\bot_ig_01', // 含 raiha8833 IG 登录态的 profile 目录
+      BOT_PROFILE_DIR: 'C:\\harvests\\profiles\\bot_ig_01', // 含 peachtattoosupplyraiha IG 登录态的 profile 目录
       HUMAN_MIMICRY_ENABLED: 'true',
       BOT_LAUNCH_MODE: 'cdp', // 连外部长命 Chrome，bot 不自起浏览器（无 SingletonLock 之战）
       BOT_EXEC_MODE: 'browse_like',
@@ -225,7 +225,7 @@ const apps = [
       // 只互动近 60 天内的新帖（引流价值高 + 显得活跃）
       BOT_SKIP_OLD_POST_DAYS: '60',
       BOT_PREFER_RECENT_DAYS: '30',
-      // 账号绑定日（raiha8833 接入系统日）；bot 据此按真实天数连续爬坡，避免写死上限
+      // 账号绑定日（peachtattoosupplyraiha，原 raiha8833）；改名不重置账号年龄。
       BOT_ACCOUNT_BOUND_AT: '2026-06-19T00:00:00Z',
     },
     error_file: path.join(LOGS_DIR, 'bot-worker-error.log'),

@@ -1,6 +1,6 @@
 # VPS 部署 bot-worker（Windows VPS + 已有 IG profile）
 
-> 目标：让 bot 在 VPS 常驻，用已登录 raiha8833 IG 的 profile 去点赞/评论/关注，
+> 目标：让 bot 在 VPS 常驻，用已登录 peachtattoosupplyraiha IG 的 profile 去点赞/评论/关注，
 > 消费 automation_tasks 队列里的 ig_browse 任务，慢慢引流。
 > 本文件基于 2026-08-06 本机实测通过的配置整理。
 
@@ -66,7 +66,7 @@ pm2 logs bot-worker          # 看日志
 | 帖子选择 | `BOT_SKIP_OLD_POST_DAYS=60` | 只互动近 60 天新帖，引流价值高 |
 | 防封 | `HUMAN_MIMICRY_ENABLED=true` | 每 4 个任务休息 5-15 分钟 |
 
-> **安全版（2026-08-06 定稿）**：这是保守档，专门为 raiha8833 真实账号设计——
+> **安全版（2026-08-06 定稿）**：这是保守档，专门为 peachtattoosupplyraiha 真实账号设计——
 > 行为突变（真人号突然高频互动）是 IG 最大封号红旗，第一周务必用保守档跑。
 > 确认无 action block（如 "You can't perform this action right now"）后，
 > 再逐步加量：评论 3→5/天、点赞间隔 120→90s。**点赞间隔别低于 45s，评论别超 5/天。**

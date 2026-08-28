@@ -23,7 +23,7 @@ const sql = neon(DB_URL);
 const ACCOUNTS = [
   {
     accountId: 'acc_ig_01',
-    igHandle: 'raiha8833',           // 你的 IG 用户名
+    igHandle: 'peachtattoosupplyraiha', // 你的 IG 用户名
     botId: 'bot_ig_01',
     firstUsedAt: '2026-06-19',       // 第一次用这个号跑 bot 的日期
     notes: '主号 - IG outreach',

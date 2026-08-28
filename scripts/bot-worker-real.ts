@@ -143,7 +143,7 @@ const BOT_DM_DAILY_MAX = Math.max(0, Number(process.env.BOT_DM_DAILY_MAX || 12))
 // 回关后到首次 DM 的自然预热窗口（小时），避免秒回关秒 DM 显得机械。0 = 直接发。
 const BOT_DM_WARMUP_HOURS = Math.max(0, Number(process.env.BOT_DM_WARMUP_HOURS || 4));
 // 账号绑定/自动化起始日（ISO）。用于按真实账号成熟天数连续爬坡关注/评论/点赞上限。
-// 填 IG 号接入系统的日期（raiha8833 = 2026-06-19，距今>50天 → 立即满档）。
+// 填 IG 号接入系统的日期（peachtattoosupplyraiha，原 raiha8833；改名不重置年龄）。
 // 不填则 bot 用本地首次运行日做基准（未来新号从 0 自动暖机）。
 const BOT_ACCOUNT_BOUND_AT = String(process.env.BOT_ACCOUNT_BOUND_AT || '').trim();
 // DM 文案池（回关后软性 B2B 开场白）。直接随 create-marketing-task 的 scriptContent 带上，
@@ -913,7 +913,7 @@ const syncFollowBackDmQueue = async (): Promise<boolean> => {
     const selfIds = new Set([BOT_ID, ...(ACCOUNT_IDS || [])].map((x) => String(x).toLowerCase()));
     for (const [handle, raw] of Object.entries(byHandle)) {
       const st = raw as any;
-      // 🛑 self-DM 守卫：绝不给 bot 自己的账号发 DM（之前误把 raiha8833 当客户发了 2 条 self-DM）
+      // 🛑 self-DM 守卫：绝不给 bot 自己的账号发 DM。
       if (selfIds.has(String(handle).toLowerCase())) continue;
       if (!st?.followBackDetected || st.followBackRevoked || st.dmSent) continue;
       // 熟悉度门槛：评论开启时需 ≥2 赞 + 1 条真实评论；评论关闭时需 ≥3 赞。先建立关系，不硬推广。

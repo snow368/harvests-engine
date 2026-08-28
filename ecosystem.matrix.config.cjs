@@ -2,7 +2,7 @@
  * PM2 Ecosystem — Bot Workers 矩阵版（1 SUPPLY 号 + N 触达号）
  *
  * 架构（2026-08-07 用户拍板）：
- *   1 个 SUPPLY 号（bot_ig_01 / raiha8833）= 信任背书 + 承接询价（发内容、bio 正规）
+ *   1 个 SUPPLY 号（bot_ig_01 / peachtattoosupplyraiha）= 信任背书 + 承接询价（发内容、bio 正规）
  *   N 个触达小号（bot_ig_02~05）          = 跑 bot 主动联系纹身师（关注/点赞/评论）
  *   触达号 bio 挂 SUPPLY 号、评论 @SUPPLY 号 → 流量导向主号
  *
@@ -206,7 +206,7 @@ const apps = [
     env: {
       ...COMMON_ENV,
       BOT_API_BASE: 'https://harvests.pages.dev',
-      BOT_ACCOUNT_IDS: 'raiha8833',
+      BOT_ACCOUNT_IDS: 'peachtattoosupplyraiha',
       BOT_ID: 'bot_ig_01',
       BOT_CDP_URL: 'http://localhost:9222',
       BOT_PROFILE_DIR: 'C:\\harvests\\profiles\\bot_ig_01',
