@@ -2778,7 +2778,8 @@ const queueCommentDraftForReview = async (
   meta: any,
   extra: Record<string, any> = {}
 ) => {
-  const draftId = `${Date.now()}_${hashString(`${handle}|${postUrl}|${text}`).slice(0, 10)}`;
+  const draftHash = hashString(`${handle}|${postUrl}|${text}`).toString(36);
+  const draftId = `${Date.now()}_${draftHash.slice(0, 10)}`;
   await postJson('/api/drafts/ingest', {
     botId: BOT_ID,
     drafts: [{
