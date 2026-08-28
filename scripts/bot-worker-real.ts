@@ -947,29 +947,48 @@ const rapportLikePosts = async (handle: string, n: number): Promise<number> => {
   } catch { return 0; }
 };
 
-// 给某号最新一篇帖子留一条真诚评论（同行赞美，不带任何推广）。
-const rapportCommentPost = async (handle: string, text: string): Promise<boolean> => {
-  if (!page) return false;
+// 回关培养评论也必须进入统一人工审核队列。这里绝不触碰评论输入框。
+const queueRapportCommentForReview = async (handle: string, text: string): Promise<string | null> => {
+  if (!page) return null;
   try {
     await openProfile(handle);
     await page.waitForTimeout(jitter(1500, 3000));
     const firstPost = page.locator('a[href*="/p/"]').first();
-    if ((await firstPost.count()) === 0) return false;
+    if ((await firstPost.count()) === 0) return null;
     await firstPost.click({ timeout: 8000 });
     await page.waitForTimeout(jitter(1500, 3000));
-    const ta = page.locator('textarea[aria-label*="comment" i], textarea[placeholder*="comment" i], textarea').first();
-    if ((await ta.count()) === 0) { await page.keyboard.press('Escape').catch(() => {}); return false; }
-    await ta.click({ timeout: 4000 });
-    await page.waitForTimeout(jitter(400, 1000));
-    for (const ch of text) { await ta.press(ch); await page.waitForTimeout(jitter(50, 200)); }
-    await page.waitForTimeout(jitter(500, 1200));
-    await ta.press('Enter');
-    await page.waitForTimeout(jitter(1500, 3000));
+    const postUrl = page.url();
+    const postKey = extractPostKey(postUrl);
     await page.keyboard.press('Escape').catch(() => {});
-    recordRapport();
-    recordInteraction(handle, 'comment', { rapport: true, text, reason: 'follow_back_ladder' }).catch(() => {});
-    return true;
-  } catch { return false; }
+    if (!postKey) return null;
+
+    const draftHash = hashString(`${handle}|${postUrl}|${text}`).toString(36);
+    const draftId = `rapport_${Date.now()}_${draftHash.slice(0, 10)}`;
+    await postJson('/api/drafts/ingest', {
+      botId: BOT_ID,
+      drafts: [{
+        id: draftId,
+        botId: BOT_ID,
+        handle,
+        postUrl,
+        postKey,
+        proposedComment: text,
+        groundingRisks: ['follow_back_ladder'],
+        safeFacts: ['source:follow_back_ladder'],
+        lang: 'en',
+      }],
+    });
+    logBehavior('comment_review_queued', { handle, postUrl, draftId, text, source: 'follow_back_ladder' });
+    return draftId;
+  } catch (error: any) {
+    await page.keyboard.press('Escape').catch(() => {});
+    logBehavior('comment_review_queue_failed', {
+      handle,
+      source: 'follow_back_ladder',
+      reason: String(error?.message || error).slice(0, 180),
+    });
+    return null;
+  }
 };
 
 // 给对方评论点个赞（比赞帖子更私密的熟悉信号：说明你连 TA 说了什么都看了）。
@@ -1024,7 +1043,7 @@ const syncFollowBackRapport = async (): Promise<void> => {
       if (BOT_RAPPORT_DAILY_MAX > 0 && getRapportToday() >= BOT_RAPPORT_DAILY_MAX) break;
       const st = raw as any;
       if (!st?.followBackDetected || st.dmSent) continue; // DM 发完即停止 ladder
-      if (!st.rapport) st.rapport = { likedPosts: 0, lastLikeAt: 0, firstLikeAt: 0, commentedAt: 0, commentLikedAt: 0 };
+      if (!st.rapport) st.rapport = { likedPosts: 0, lastLikeAt: 0, firstLikeAt: 0, commentQueuedAt: 0, commentedAt: 0, commentLikedAt: 0 };
       const rp = st.rapport;
       // 阶段1：点赞帖子。目标 RAPPORT_LIKE_TARGET(默认3) 篇；仅按时间间隔(RAPPORT_LIKE_GAP_HOURS)节流，
       // 不再强制"每天 1 篇"——放宽后回关号可在 ~1 天内攒够 ≥2 赞，更快跨过 DM-able 门槛。
@@ -1040,12 +1059,13 @@ const syncFollowBackRapport = async (): Promise<void> => {
         continue;
       }
       // 阶段2：已点赞 ≥2 篇且隔 ≥18h，留 1 条真诚评论（用对方语言）
-      if (rp.likedPosts >= 2 && !rp.commentedAt && now - (rp.firstLikeAt || now) > RAPPORT_COMMENT_AFTER_HOURS * 3600_000) {
+      if (rp.likedPosts >= 2 && !rp.commentQueuedAt && !rp.commentedAt && now - (rp.firstLikeAt || now) > RAPPORT_COMMENT_AFTER_HOURS * 3600_000) {
         const cc = countryCache[handle] || {};
         const lang = langFor(handle, cc.country || st.country, cc.city || st.city, st.detectedLang);
-        const ok = await rapportCommentPost(handle, pickRapportComment(handle, lang));
-        if (ok) {
-          rp.commentedAt = now;
+        const draftId = await queueRapportCommentForReview(handle, pickRapportComment(handle, lang));
+        if (draftId) {
+          rp.commentQueuedAt = now;
+          rp.commentDraftId = draftId;
           saveLikeState(likeState);
           await sleep(jitter(4000, 9000));
         }
@@ -2716,8 +2736,15 @@ const buildCommentText = async (facts?: ProfileFacts, postMeta?: any): Promise<s
   }
 };
 
-const tryPostCommentOnOpenModal = async (text: string) => {
+const tryPostCommentOnOpenModal = async (
+  text: string,
+  approval: { draftId: string; approvedAt: string; approvedBy: string }
+) => {
   if (!page) return false;
+  if (!approval?.draftId || !approval?.approvedAt || !approval?.approvedBy) {
+    logBehavior('comment_publish_blocked_missing_approval', { draftId: approval?.draftId || '' });
+    return false;
+  }
   const textarea = page.locator('textarea[aria-label*="comment" i], textarea[placeholder*="comment" i], textarea').first();
   if ((await textarea.count()) === 0) return false;
   await textarea.click({ timeout: 4000 });
@@ -2829,7 +2856,14 @@ const tryPublishApprovedComment = async (): Promise<boolean> => {
 
     await page.goto(String(item.post_url), { waitUntil: 'domcontentloaded', timeout: 30000 });
     await page.waitForTimeout(jitter(1800, 3200));
-    const ok = await tryPostCommentOnOpenModal(text);
+    const approvedAt = String(item.approved_at || '').trim();
+    const approvedBy = String(item.approved_by || '').trim();
+    if (!approvedAt || !approvedBy) {
+      logBehavior('comment_publish_blocked_missing_approval', { draftId: claimedDraftId, handle });
+      await postJson(`/api/drafts/${encodeURIComponent(claimedDraftId)}/release`, {}).catch(() => null);
+      return false;
+    }
+    const ok = await tryPostCommentOnOpenModal(text, { draftId: claimedDraftId, approvedAt, approvedBy });
     if (!ok) {
       logBehavior('comment_approved_publish_failed', { draftId: claimedDraftId, handle, reason: 'comment_box_not_found' });
       await postJson(`/api/drafts/${encodeURIComponent(claimedDraftId)}/release`, {}).catch(() => null);
@@ -2846,8 +2880,37 @@ const tryPublishApprovedComment = async (): Promise<boolean> => {
     saveLikeState(likeState);
 
     await postJson(`/api/drafts/${encodeURIComponent(claimedDraftId)}/posted`, {});
-    logBehavior('comment_posted', { draftId: claimedDraftId, handle, postUrl: item.post_url, text, reviewed: true });
-    if (handle) recordInteraction(handle, 'comment', { postUrl: item.post_url, text, reviewed: true }).catch(() => {});
+    const safeFacts = (() => { try { return JSON.parse(item.safe_facts || '[]'); } catch { return []; } })();
+    const isRapportComment = Array.isArray(safeFacts) && safeFacts.includes('source:follow_back_ladder');
+    if (isRapportComment && handle) {
+      const followState = likeState.follows?.byHandle?.[handle] as any;
+      if (followState) {
+        if (!followState.rapport) followState.rapport = {};
+        followState.rapport.commentedAt = Date.now();
+        followState.rapport.commentQueuedAt = 0;
+        followState.rapport.commentDraftId = '';
+        recordRapport();
+        saveLikeState(likeState);
+      }
+    }
+    logBehavior('comment_posted', {
+      draftId: claimedDraftId,
+      handle,
+      postUrl: item.post_url,
+      text,
+      reviewed: true,
+      approvedAt,
+      approvedBy,
+      source: isRapportComment ? 'follow_back_ladder' : 'task_review',
+    });
+    if (handle) recordInteraction(handle, 'comment', {
+      postUrl: item.post_url,
+      text,
+      reviewed: true,
+      approvedAt,
+      approvedBy,
+      reason: isRapportComment ? 'follow_back_ladder' : 'task_review',
+    }).catch(() => {});
     return true;
   } catch (error: any) {
     if (claimedDraftId && !didPostToInstagram) {

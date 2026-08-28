@@ -126,7 +126,9 @@ const BOT_COMMENT_ENABLED = String(process.env.BOT_COMMENT_ENABLED || 'false').t
 const BOT_COMMENT_CHANCE = Math.max(0, Math.min(1, Number(process.env.BOT_COMMENT_CHANCE || 0.2)));
 const BOT_COMMENT_DAILY_MAX = Math.max(0, Math.min(20, Number(process.env.BOT_COMMENT_DAILY_MAX || 2)));
 const BOT_COMMENT_HANDLE_COOLDOWN_HOURS = Math.max(24, Number(process.env.BOT_COMMENT_HANDLE_COOLDOWN_HOURS || 72));
-const BOT_COMMENT_REVIEW_MODE = String(process.env.BOT_COMMENT_REVIEW_MODE || 'true').toLowerCase() === 'true'; // save comment for review, don't post
+// Safety invariant: legacy cloak workers may never publish comments directly.
+// All comment publishing belongs to the reviewed-draft flow in bot-worker-real.
+const BOT_COMMENT_REVIEW_MODE = true;
 const COMMENT_REVIEW_DIR = path.resolve(process.cwd(), 'data', 'comment_review');
 if (BOT_COMMENT_REVIEW_MODE && !fs.existsSync(COMMENT_REVIEW_DIR)) fs.mkdirSync(COMMENT_REVIEW_DIR, { recursive: true });
 const BOT_FOLLOW_ENABLED = String(process.env.BOT_FOLLOW_ENABLED || 'false').toLowerCase() === 'true';
