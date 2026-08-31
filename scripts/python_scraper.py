@@ -14,6 +14,7 @@ import json
 import csv
 import hashlib
 import argparse
+import sys
 from datetime import datetime
 from pathlib import Path
 import asyncpg
@@ -81,6 +82,11 @@ CITY_DELAY_MAX = int(os.environ.get('SCRAPE_CITY_DELAY_MAX_MS', '40000'))   # �
 COOLDOWN_EVERY = int(os.environ.get('SCRAPE_COOLDOWN_EVERY', '10'))         # 每 N 城长冷却一次
 COOLDOWN_MS    = int(os.environ.get('SCRAPE_COOLDOWN_MS', '240000'))        # 长冷却时长（默认 4 分钟）
 CAPTCHA_BACKOFF_MS = int(os.environ.get('SCRAPE_CAPTCHA_BACKOFF_MS', '600000'))  # 命中验证码退避（默认 10 分钟）
+WEBSITE_PROBE_ENABLED = os.environ.get('SCRAPE_WEBSITE_PROBE_ENABLED', 'false').lower() in ('1', 'true', 'yes')
+SOCIAL_SEARCH_DELAY_MIN = int(os.environ.get('SCRAPE_SOCIAL_DELAY_MIN_MS', '20000'))
+SOCIAL_SEARCH_DELAY_MAX = int(os.environ.get('SCRAPE_SOCIAL_DELAY_MAX_MS', '40000'))
+SOCIAL_SEARCH_COOLDOWN_EVERY = int(os.environ.get('SCRAPE_SOCIAL_COOLDOWN_EVERY', '5'))
+SOCIAL_SEARCH_COOLDOWN_MS = int(os.environ.get('SCRAPE_SOCIAL_COOLDOWN_MS', '180000'))
 
 def city_delay_seconds() -> float:
     return random.uniform(CITY_DELAY_MIN, CITY_DELAY_MAX) / 1000.0
@@ -94,14 +100,16 @@ def captcha_backoff_seconds() -> float:
 _CAPTCHA_SIGNALS = [
     'unusual traffic', 'prove you are human', 'our systems have detected',
     'automated queries', 'browser check', 'verify you are human',
-    'please complete the security check', 'recaptcha', 'captcha',
+    'please complete the security check', "i'm not a robot", 'not a robot',
     'temporarily blocked', 'too many requests',
 ]
 
 async def detect_captcha(page) -> bool:
     """检测 Google 限流 / 验证码页。返回 True 表示需要退避。"""
     try:
-        txt = (await page.content()).lower()
+        if '/sorry/' in page.url.lower():
+            return True
+        txt = (await page.locator('body').inner_text(timeout=5000)).lower()
         return any(s in txt for s in _CAPTCHA_SIGNALS)
     except Exception:
         return False
@@ -320,12 +328,19 @@ def normalize_social_url(url: str) -> str:
     """Validate and normalize Instagram/Facebook/TikTok URLs"""
     if not url:
         return "N/A"
-    u = url.strip()
-    if "/url?q=" in u:
-        try:
-            u = urllib.parse.unquote(u.split("/url?q=")[1].split("&")[0])
-        except:
-            pass
+    u = str(url).strip().replace("&amp;", "&")
+    # Google no longer consistently uses /url?q=. Current result links often
+    # use /url?...&url=<target>, so parse both forms before social detection.
+    try:
+        parsed = urllib.parse.urlparse(u)
+        host = parsed.netloc.lower()
+        if "google." in host and parsed.path.rstrip("/") == "/url":
+            params = urllib.parse.parse_qs(parsed.query)
+            target = (params.get("url") or params.get("q") or [""])[0]
+            if target:
+                u = urllib.parse.unquote(target)
+    except Exception:
+        pass
     if "instagram.com/" in u:
         m = re.search(r"https?://(?:www\.)?instagram\.com/[a-zA-Z0-9._-]+", u)
         return m.group(0).rstrip("/") if m else "N/A"
@@ -356,7 +371,7 @@ def is_valid_facebook_url(url: str) -> bool:
     u = str(url or "").strip().lower()
     if not u or ("facebook.com/" not in u and "fb.com/" not in u):
         return False
-    bad_tokens = ["/login", "/profile.php", "/sharer", "/plugins", "/help", "/privacy", "/policies"]
+    bad_tokens = ["/login", "/profile.php", "/share", "/sharer", "/plugins", "/help", "/privacy", "/policies", "/p/", "/pages/"]
     if any(t in u for t in bad_tokens):
         return False
     m = re.search(r"(?:facebook\.com|fb\.com)/([^/?#]+)", u)
@@ -656,6 +671,12 @@ async def extract_socials(page):
 async def deep_website_probe(context, url):
     if not url or "N/A" in url or "google.com" in url:
         return "N/A", "N/A", "N/A", "N/A"
+    # A Maps "website" is often only a Facebook/Instagram/TikTok profile.
+    # Opening those pages wastes the visible browser session and does not help
+    # discover a separate Instagram account. Social links are already captured
+    # from Maps and are handled by the Instagram-only Google fallback below.
+    if re.search(r"(?:facebook\.com|fb\.com|instagram\.com|tiktok\.com)/", url, re.I):
+        return "N/A", "N/A", "N/A", "N/A"
     page = await context.new_page()
     out = {"emails": set(), "ig": "N/A", "fb": "N/A", "tk": "N/A"}
     try:
@@ -683,56 +704,55 @@ async def deep_website_probe(context, url):
     return "; ".join(sorted(out["emails"])) if out["emails"] else "N/A", out["ig"], out["fb"], out["tk"]
 
 # ==================== Google 搜索兜底（移植自 Universal） ====================
-async def google_search_social(context, shop_name: str, state: str, country: str):
-    """Fallback: Google search when Maps doesn't expose social links"""
-    out_ig, out_fb, out_tk = "N/A", "N/A", "N/A"
+_social_search_count = 0
+_social_search_blocked = False
+
+async def google_search_instagram(context, shop_name: str, city: str, state: str, country: str):
+    """Find one Instagram profile slowly, and stop searching after a challenge."""
+    global _social_search_count, _social_search_blocked
+    out_ig = "N/A"
+    if _social_search_blocked:
+        return out_ig
+
+    delay = random.uniform(SOCIAL_SEARCH_DELAY_MIN, SOCIAL_SEARCH_DELAY_MAX) / 1000.0
+    print(json.dumps({"type": "log", "message": f"Instagram search pacing: sleep {delay:.0f}s"}))
+    await asyncio.sleep(delay)
+
+    if _social_search_count and _social_search_count % max(1, SOCIAL_SEARCH_COOLDOWN_EVERY) == 0:
+        cooldown = SOCIAL_SEARCH_COOLDOWN_MS / 1000.0
+        print(json.dumps({"type": "log", "message": f"Instagram search cooldown: sleep {cooldown:.0f}s"}))
+        await asyncio.sleep(cooldown)
+
     page = await context.new_page()
     try:
-        async def run_query(q: str):
-            encoded = urllib.parse.quote(q)
-            url = f"https://www.google.com/search?q={encoded}&hl=en"
-            await page.goto(url, wait_until="domcontentloaded", timeout=25000)
-            await asyncio.sleep(2.2)
-            links = await page.locator("a[href]").all()
-            found_ig, found_fb, found_tk = "N/A", "N/A", "N/A"
-            for a in links:
-                href = await a.get_attribute("href")
-                if not href:
-                    continue
-                su = normalize_social_url(href)
-                if su == "N/A":
-                    continue
-                low = su.lower()
-                if found_ig == "N/A" and "instagram.com/" in low and not any(x in low for x in ["/p/", "/reel", "/explore"]):
-                    if is_valid_instagram_url(su):
-                        found_ig = su
-                if found_fb == "N/A" and ("facebook.com/" in low or "fb.com/" in low) and not any(x in low for x in ["/sharer", "/plugins"]):
-                    if is_valid_facebook_url(su):
-                        found_fb = su
-                if found_tk == "N/A" and "tiktok.com/" in low:
-                    if is_valid_tiktok_url(su):
-                        found_tk = su
-                if found_ig != "N/A" and found_fb != "N/A" and found_tk != "N/A":
+        query = f'site:instagram.com "{shop_name}" "{city}" {state} tattoo'
+        encoded = urllib.parse.quote(query)
+        url = f"https://www.google.com/search?q={encoded}&hl=en"
+        await page.goto(url, wait_until="domcontentloaded", timeout=25000)
+        _social_search_count += 1
+        await asyncio.sleep(random.uniform(5.0, 9.0))
+
+        if await detect_captcha(page):
+            _social_search_blocked = True
+            print(json.dumps({"type": "warn", "message": "Google verification detected; disabling Instagram fallback for this run"}))
+            return out_ig
+
+        links = await page.locator("a[href]").all()
+        for a in links:
+            href = await a.get_attribute("href")
+            if not href:
+                continue
+            su = normalize_social_url(href)
+            low = su.lower()
+            if su != "N/A" and "instagram.com/" in low and not any(x in low for x in ["/p/", "/reel", "/explore"]):
+                if is_valid_instagram_url(su):
+                    out_ig = su
                     break
-            return found_ig, found_fb, found_tk
-
-        q1 = f"{shop_name} {state} {country} instagram facebook tiktok"
-        ig1, fb1, tk1 = await run_query(q1)
-        if ig1 != "N/A": out_ig = ig1
-        if fb1 != "N/A": out_fb = fb1
-        if tk1 != "N/A": out_tk = tk1
-
-        if out_tk == "N/A":
-            q2 = f"{shop_name} tattoo {state} tiktok"
-            ig2, fb2, tk2 = await run_query(q2)
-            if out_ig == "N/A" and ig2 != "N/A": out_ig = ig2
-            if out_fb == "N/A" and fb2 != "N/A": out_fb = fb2
-            if tk2 != "N/A": out_tk = tk2
-    except:
-        pass
+    except Exception as exc:
+        print(json.dumps({"type": "warn", "message": f"Instagram search skipped: {type(exc).__name__}"}))
     finally:
         await page.close()
-    return out_ig, out_fb, out_tk
+    return out_ig
 
 # ==================== 页面滚动 ====================
 async def ultra_slow_scroll(page):
@@ -882,8 +902,9 @@ async def scrape_city(page, context, city, done_shops, conn):
                     if data["tiktok"] == "N/A" and socials2["tk"] != "N/A":
                         data["tiktok"] = socials2["tk"]
 
-            # 网站探测
-            if data["website"] != "N/A":
+            # Website probing is disabled by default. Maps retains the URL, while
+            # social discovery uses a slow Google search to avoid opening every site.
+            if WEBSITE_PROBE_ENABLED and data["website"] != "N/A":
                 print(json.dumps({"type": "log", "message": f"Website probe: {name}"}))
                 try:
                     em, ig, fb, tk = await asyncio.wait_for(deep_website_probe(context, data["website"]), timeout=25)
@@ -898,22 +919,19 @@ async def scrape_city(page, context, city, done_shops, conn):
                 if data["tiktok"] == "N/A" and tk != "N/A":
                     data["tiktok"] = tk
 
-            # Google 搜索兜底（关键改进！加 TikTok）
-            if data["instagram"] == "N/A" or data["facebook"] == "N/A" or data["tiktok"] == "N/A":
+            # Google fallback is reserved for the Instagram outreach pipeline.
+            # Missing Facebook/TikTok alone must not trigger another browser search.
+            if data["instagram"] == "N/A":
                 print(json.dumps({"type": "log", "message": f"Google fallback: {name}"}))
                 try:
-                    f_ig, f_fb, f_tk = await asyncio.wait_for(
-                        google_search_social(context, name, STATE, COUNTRY), timeout=30
+                    f_ig = await asyncio.wait_for(
+                        google_search_instagram(context, name, city, STATE, COUNTRY), timeout=300
                     )
                 except asyncio.TimeoutError:
-                    f_ig, f_fb, f_tk = "N/A", "N/A", "N/A"
+                    f_ig = "N/A"
                 if data["instagram"] == "N/A" and f_ig != "N/A":
                     data["instagram"] = f_ig
-                if data["facebook"] == "N/A" and f_fb != "N/A":
-                    data["facebook"] = f_fb
-                if data["tiktok"] == "N/A" and f_tk != "N/A":
-                    data["tiktok"] = f_tk
-                print(json.dumps({"type": "log", "message": f"Fallback done: {name} | IG={data['instagram']} | FB={data['facebook']} | TK={data['tiktok']}"}))
+                print(json.dumps({"type": "log", "message": f"Instagram fallback done: {name} | IG={data['instagram']}"}))
 
             # 最终 URL 质量验证
             if data["instagram"] != "N/A" and not is_valid_instagram_url(data["instagram"]):
