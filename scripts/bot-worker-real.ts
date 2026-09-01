@@ -984,6 +984,18 @@ const rapportLikePosts = async (handle: string, n: number): Promise<number> => {
   } catch { return 0; }
 };
 
+const hasClearCaptionTheme = (meta: any): boolean => {
+  const caption = String(meta?.caption || '')
+    .replace(/https?:\/\/\S+/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (caption.length < 20) return false;
+  const intent = String(meta?.postIntent || 'generic');
+  const subject = String(meta?.subject?.subject || 'unknown');
+  const styleConfirmed = String(meta?.styleConfidence || 'low') === 'high' && !!meta?.postStyle;
+  return intent !== 'generic' || subject !== 'unknown' || styleConfirmed;
+};
+
 // 回关培养评论也必须进入统一人工审核队列。这里绝不触碰评论输入框。
 const queueRapportCommentForReview = async (handle: string, _fallbackText: string): Promise<string | null> => {
   if (!page) return null;
@@ -1012,7 +1024,11 @@ const queueRapportCommentForReview = async (handle: string, _fallbackText: strin
     let visionTechniqueHints: string[] = [];
     let style = meta.postStyle || '';
     let styleConfidence = meta.styleConfidence || 'low';
-    if (isVisionEnabled() && meta.postImageSrc) {
+    const captionThemeClear = hasClearCaptionTheme(meta);
+    if (captionThemeClear) {
+      logBehavior('comment_vision_skipped_caption_clear', { handle, postUrl, source: 'follow_back_ladder', intent: meta.postIntent || 'generic' });
+    }
+    if (!captionThemeClear && isVisionEnabled() && meta.postImageSrc) {
       const vision = await analyzePostImage(meta.postImageSrc);
       if (vision?.tattooVisible && vision.subjectConfidence === 'high') {
         visionDescription = buildVisionDescription(vision);
@@ -3135,7 +3151,16 @@ const tryCommentWithStrategy = async (handle: string, facts?: ProfileFacts, like
   let tempStyle = chosen.meta.postStyle || '';
   let tempConf: string = chosen.meta.styleConfidence || 'low';
   let tempSource: string = chosen.meta.styleSource || 'none';
-  if (isVisionEnabled() && chosen.meta.postImageSrc) {
+  const captionThemeClear = hasClearCaptionTheme(chosen.meta);
+  if (captionThemeClear) {
+    logBehavior('comment_vision_skipped_caption_clear', {
+      handle,
+      postUrl: chosen.meta?.url || '',
+      source: 'task_review',
+      intent: chosen.meta.postIntent || 'generic',
+    });
+  }
+  if (!captionThemeClear && isVisionEnabled() && chosen.meta.postImageSrc) {
     try {
       const vis = await analyzePostImage(chosen.meta.postImageSrc);
       if (vis?.tattooVisible && vis.subjectConfidence === 'high') {
