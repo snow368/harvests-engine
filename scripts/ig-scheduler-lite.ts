@@ -151,6 +151,7 @@ async function main() {
       id: taskId, taskType: 'ig_outreach', botId: BOT_ID,
       targetBotId: BOT_ID,
       artistHandle: handle, shopName: String(artist.shop_name || ''),
+      category: String(artist.category || ''),
       city: String(artist.city || ''),
       rating: artist.rating ? Number(artist.rating) : null,
       reviews: artist.reviews ? Number(artist.reviews) : null,
