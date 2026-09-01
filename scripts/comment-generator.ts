@@ -548,6 +548,8 @@ const buildPrompt = (input: CommentInput, style: string): string => {
 
   const conf = input.styleConfidence || 'low';
   const hasVision = !!(input.visionDescription && input.visionDescription.trim());
+  const captionText = String(input.caption || '').trim().slice(0, 700);
+  const hasCaptionAnchor = captionText.replace(/https?:\/\/\S+|#[\w.]+|@[\w.]+/g, ' ').replace(/\s+/g, ' ').trim().length >= 12;
   // 🔴 评论铁律（2026-08-09 修订·用户拍板，2026-08-10 扩展视觉）：
   // 无视觉模型时：bot 只能读文字，绝不断言看不见的视觉工艺。
   // 有视觉模型时：视觉模型"替 bot 看了图"并产出 TEXT 观测（visionDescription），bot 可以把这些
@@ -559,10 +561,10 @@ const buildPrompt = (input: CommentInput, style: string): string => {
   const tattooContext = buildTattooArtistContext(postType, styleForContext);
 
   const postContext = [
-    input.caption ? `Post caption: "${input.caption.slice(0, 300)}"` : null,
+    captionText ? `AUTHOR CAPTION (primary source): "${captionText}"` : null,
     // ⚠️ imageAlt 是 IG 自动生成、可能不准；仅作弱提示，subject 以 caption 为准，绝不可仅凭 alt 判定题材
     input.imageAlt ? `Image auto-description (may be inaccurate — weak hint only, prefer the caption for subject): "${input.imageAlt.slice(0, 200)}"` : null,
-    hasVision ? `IMAGE ANALYSIS (observed facts from a vision model — you MAY reference these as if described to you, but NEVER claim visual qualities beyond this list): ${input.visionDescription!.slice(0, 400)}` : null,
+    hasVision ? `IMAGE ANALYSIS (secondary, may be inaccurate; discard anything that conflicts with the caption): ${input.visionDescription!.slice(0, 400)}` : null,
     input.isReel ? '(Video/Reel)' : '(Static post)',
     `Stats: ${input.likeCount || '?'} likes, ${input.commentCount || '?'} comments`,
   ].filter(Boolean).join(' | ');
@@ -575,10 +577,15 @@ const buildPrompt = (input: CommentInput, style: string): string => {
     ? `POST UNDERSTANDING (read this FIRST - your comment must be about THIS, not generic praise):\n${input.postSummary}\n${getIntentGuidance({ intent: input.postIntent || 'generic', summary: input.postSummary, tone: (input.postTone as any) || 'casual', sensitive: !!input.sensitive, keywords: [] })}${isGenericNoVision ? '\nSAFE MODE: no image analysis available and the caption is thin — you cannot tell the exact subject, so open with a genuine reaction based on whatever the caption or IMAGE ANALYSIS does tell you. Do NOT claim to understand the exact subject or technique.' : ''}`
     : '';
 
-  // 视觉规则：最高优先级。当无图观测时维持"只能读文字"；当有图观测时允许引用观测到的细节。
+  const captionPriorityRule = `EVIDENCE ORDER (strict):
+1. AUTHOR CAPTION is the primary source. First identify its main point: named subject, meaning/story, client milestone, stage (fresh/healed/WIP/cover-up), placement, style/technique, or announcement.
+2. Your comment MUST anchor to one meaningful caption fact when the caption provides one. Do not replace it with a visual detail.
+3. IMAGE ANALYSIS is secondary and may be wrong. Use at most one visual detail, only when it supports rather than conflicts with the caption. If they conflict, ignore IMAGE ANALYSIS.
+4. Image auto-description is only a weak last resort.`;
+
   const NEUTRAL_RULE = hasVision
-    ? `VISION RULE (highest priority): You have an IMAGE ANALYSIS describing what was observed (see IMAGE ANALYSIS in Post context). You MAY reference those observed details — the subject, craft (linework/shading/composition/color/negative space), and palette — because they were reported by analysis, not imagined. Do NOT claim any visual quality NOT listed in the IMAGE ANALYSIS. You may ALSO reference the tattoo's subject/style if the caption states it. Never invent. Stay natural, like a fellow artist reacting to the post. No spam, no marketing.`
-    : `VISION RULE (highest priority): You CANNOT see the image — you only read text. Therefore:
+    ? `${captionPriorityRule}\nYou may reference one detail from IMAGE ANALYSIS only after grounding the comment in the caption. Never claim a visual quality beyond that analysis. Never invent.`
+    : `${captionPriorityRule}\nYou CANNOT see the image — you only read text. Therefore:
 - NEVER claim visual qualities you did not observe: do NOT assert shading, linework quality, composition, contrast, color, or execution as if you saw them. (Only exception: the caption itself describes that quality — then you may echo it.)
 - You MAY reference the tattoo's subject or style, but ONLY if the post caption explicitly states it. The caption is text you can read, and the image depicts that same thing, so this is safe and relevant. Do NOT invent a subject the caption does not mention.
 - Stay natural, like a fellow artist/enthusiast reacting to what the post describes. No spam, no marketing.`;
@@ -601,7 +608,9 @@ const buildPrompt = (input: CommentInput, style: string): string => {
   //  - 视觉 hint：视觉模型观测描述里看到的技法（dotwork/hand-poked…），这些是"别人替你看图
   //    后告诉你的文字"，可在 prompt 里当作观测细节引用（不同于文字 hint 的"别谎称看图"约束）。
   const techHints = (input.techniqueHints || []).filter((k) => TECHNIQUE_ANGLES[k]);
-  const visionTechHints = (input.visionTechniqueHints || []).filter((k) => TECHNIQUE_ANGLES[k]);
+  const visionTechHints = techHints.length
+    ? []
+    : (input.visionTechniqueHints || []).filter((k) => TECHNIQUE_ANGLES[k]);
   const techniqueBlock = (techHints.length || visionTechHints.length)
     ? `\nTECHNIQUE DETAIL — acknowledge ONE specific technique as a statement of recognition (no question), so the poster feels truly seen:\n${
         techHints.map((k) => `- ${k} (author's caption mentions it — do NOT claim you observed it visually): ${TECHNIQUE_ANGLES[k][0]}`).join('\n')
@@ -646,13 +655,15 @@ ${langGuide}
 
 ${styleConfNote}${deepNote}${techniqueBlock}
 
+${hasCaptionAnchor ? 'CAPTION ANCHOR REQUIRED: Base the comment on the author caption\'s most distinctive concrete point. The visual analysis may only add support.' : 'The caption is thin; use only high-confidence supplied evidence and stay conservative.'}
+
 Style instruction: ${styleInstruction}
 
 Rules — write like a REAL HUMAN reacting on their phone, NOT a brand, NOT a critic:
 - NEVER sound like spam, bot, marketing, or a customer. BANNED phrases (instant fail): "great work as always", "this is really well done", "such a clean piece", "love this great work", "awesome tattoo", "really nice post". Those read as bot.
 ${input.sensitive ? '- SENSITIVE / RESPECTFUL POST: this is personal or commemorative (e.g. a pet or human memorial). You MUST be warm and respectful. FORBIDDEN: slang (slaps, af, tho, bruh, hits different), jokes, hype, fragments, emoji spam. A simple heartfelt line acknowledging the subject is perfect. Never be flippant or casual-cool. No questions.' : `- INTERACTION IS THE GOAL (this is how you earn the follow), but WITHOUT questions. PROVE you saw THIS post: OPEN with ONE specific observation drawn from the caption or IMAGE ANALYSIS. A genuine specific reaction earns more than praise. Reference the material above; never invent.`}
 - NEVER mention buying, supplies, DM, bio, links, or promo.
-- ${hasVision ? 'You have an IMAGE ANALYSIS. You MAY reference its observed subject/craft/palette, but NEVER claim visual qualities beyond what it lists.' : 'You CANNOT see the image. Do NOT claim visual technique you did not observe.'}
+- ${hasVision ? 'IMAGE ANALYSIS is secondary. Use it only when it agrees with the caption, and never let it replace a concrete caption point.' : 'You CANNOT see the image. Do NOT claim visual technique you did not observe.'}
 - ${input.sensitive ? 'Keep it short and warm. 1-20 words is fine.' : 'VARY YOUR LENGTH WILDLY: sometimes one word ("fire", "clean", "sick"), sometimes a fragment ("ok but the linework tho"), sometimes a full sentence. Do NOT aim for a fixed length. 1-35 words is fine.'}
 - ${input.sensitive ? '' : 'Use REAL casual register: slang (slaps, hits different, lowkey, ngl, af, tho, bruh, legit, mad), dropped punctuation, lowercase starts, run-on fragments, the occasional typo. Real comments are messy.'}
 - VARY YOUR OPENING — do NOT start most comments with "Love", "Great", "This", "Such", or "Awesome". React or fragment instead.
@@ -677,7 +688,7 @@ const callDeepSeek = async (prompt: string): Promise<string> => {
     body: JSON.stringify({
       model: 'deepseek-chat',
       messages: [
-        { role: 'system', content: 'You write Instagram comments that sound exactly like a real human on their phone — messy, slangy, varied length, never corporate. Your GOAL is to make the artist reply and want to follow: every comment opens with a specific observation that proves you actually saw their post (from the image analysis and caption) — NO questions, just a real reaction specific to their piece. Respond only with valid JSON.' },
+        { role: 'system', content: 'Write natural Instagram comments. Read the author caption first and anchor the comment to its most distinctive concrete point. Image analysis is secondary and may be inaccurate: ignore it whenever it conflicts with or distracts from the caption. Never invent. No questions. Respond only with valid JSON.' },
         { role: 'user', content: prompt },
       ],
       temperature: 1.0,  // max variety, avoid repetitive phrasing
@@ -733,10 +744,7 @@ export const generateComment = async (input: CommentInput): Promise<GeneratedCom
   for (let attempt = 0; attempt < 3; attempt++) {
     // 重试时降级上下文防重复，但高风格时继续走 detail_focused 保持细节化，不退回泛泛赞美
     const retryStyle = (attempt > 0 && style === 'short_praise') ? 'casual' : style;
-    const prompt = buildPrompt(
-      attempt > 0 ? { ...input, caption: '' } : input, // 重试时降级上下文
-      retryStyle
-    );
+    const prompt = buildPrompt(input, retryStyle);
     const raw = await callDeepSeek(prompt);
     const parsed = safeJsonParse(raw, { text: raw.slice(0, 100), style });
 

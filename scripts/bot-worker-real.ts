@@ -5,7 +5,7 @@ import { execSync } from 'node:child_process';
 import path from 'node:path';
 import os from 'node:os';
 import { createWorker } from 'tesseract.js';
-import { generateComment, getFromPool, refillPool, clearRecentHistory, detectTattooStyle, getInteractionFallback, extractTechniqueHintsFromVision } from './comment-generator';
+import { generateComment, clearRecentHistory, detectTattooStyle, extractTechniqueHintsFromVision } from './comment-generator';
 import { analyzePostImage, isVisionEnabled, buildVisionDescription } from './vision-analyze';
 import { detectPostType, detectSubject, isPiercingHandle, detectPostIntent, reconcileIntentWithVision, intentEngagement } from './tattoo-voice';
 import { isCommentBlacklisted } from './comment-blacklist';
@@ -985,7 +985,7 @@ const rapportLikePosts = async (handle: string, n: number): Promise<number> => {
 };
 
 // 回关培养评论也必须进入统一人工审核队列。这里绝不触碰评论输入框。
-const queueRapportCommentForReview = async (handle: string, fallbackText: string): Promise<string | null> => {
+const queueRapportCommentForReview = async (handle: string, _fallbackText: string): Promise<string | null> => {
   if (!page) return null;
   if (!canQueueCommentDraft()) {
     logBehavior('comment_skip_draft_daily_target', {
@@ -1013,8 +1013,8 @@ const queueRapportCommentForReview = async (handle: string, fallbackText: string
     let style = meta.postStyle || '';
     let styleConfidence = meta.styleConfidence || 'low';
     if (isVisionEnabled() && meta.postImageSrc) {
-      const vision = await analyzePostImage(meta.postImageSrc, meta.caption);
-      if (vision?.tattooVisible) {
+      const vision = await analyzePostImage(meta.postImageSrc);
+      if (vision?.tattooVisible && vision.subjectConfidence === 'high') {
         visionDescription = buildVisionDescription(vision);
         visionTechniqueHints = extractTechniqueHintsFromVision(visionDescription);
         if (vision.styleConfidence === 'high' && vision.style) {
@@ -1052,7 +1052,7 @@ const queueRapportCommentForReview = async (handle: string, fallbackText: string
     }, visionDescription);
     const generated = await Promise.race([
       generateComment({
-        caption: caption.slice(0, 600),
+        caption: caption.slice(0, 700),
         imageAlt: meta.imageAlt || '',
         style,
         styleConfidence,
@@ -1071,7 +1071,7 @@ const queueRapportCommentForReview = async (handle: string, fallbackText: string
         setTimeout(() => reject(new Error('rapport_comment_gen_timeout')), 20000)
       ),
     ]);
-    const text = String(generated?.text || fallbackText).trim();
+    const text = String(generated?.text || '').trim();
     await page.keyboard.press('Escape').catch(() => {});
     if (!text) return null;
 
@@ -2826,7 +2826,7 @@ const tryFollowOnProfile = async (handle: string, likeSummary: LikeActionSummary
 
 const buildCommentText = async (facts?: ProfileFacts, postMeta?: any): Promise<string> => {
   // ⚠️ 不再优先取预热池：池里是启动时脱离具体帖生成的泛评，回在真实帖上最像 bot。
-  // 改为实时按帖生成；仅在 DeepSeek 失败（超时/无 key）才退化为池或口语模板。
+  // 改为实时按帖生成；失败时不排入草稿，避免脱离真实 caption 的泛评。
   // DeepSeek 实时生成
   const commentStyle = postMeta?.postStyle
     || getPrimaryStyle(facts)
@@ -2836,7 +2836,7 @@ const buildCommentText = async (facts?: ProfileFacts, postMeta?: any): Promise<s
   try {
     const result = await Promise.race([
       generateComment({
-        caption: postMeta?.caption?.slice(0, 300) || facts?.sampleCaption?.slice(0, 300),
+        caption: postMeta?.caption?.slice(0, 700) || facts?.sampleCaption?.slice(0, 700),
         imageAlt: postMeta?.imageAlt || facts?.imageAltHints?.join(' ').slice(0, 200),
         artistHandle: facts?.title?.replace(/[\(\)@]/g, '').trim(),
         style: commentStyle,
@@ -2856,14 +2856,9 @@ const buildCommentText = async (facts?: ProfileFacts, postMeta?: any): Promise<s
         setTimeout(() => reject(new Error('comment_gen_timeout')), 20000)
       ),
     ]);
-    // 异步补充池子
-    refillPool().catch(() => {});
     return result.text;
   } catch {
-    // Fallback 链：预热池(仍有上下文时比固定模板自然) → 锚定本帖的互动钩子（绝不用泛泛 "fire"，否则无互动无涨粉）
-    const pooled = getFromPool();
-    if (pooled) return pooled;
-    return getInteractionFallback(postMeta?.postIntent, postMeta?.sensitive);
+    return '';
   }
 };
 
@@ -3142,8 +3137,8 @@ const tryCommentWithStrategy = async (handle: string, facts?: ProfileFacts, like
   let tempSource: string = chosen.meta.styleSource || 'none';
   if (isVisionEnabled() && chosen.meta.postImageSrc) {
     try {
-      const vis = await analyzePostImage(chosen.meta.postImageSrc, chosen.meta.caption);
-      if (vis) {
+      const vis = await analyzePostImage(chosen.meta.postImageSrc);
+      if (vis?.tattooVisible && vis.subjectConfidence === 'high') {
         visionDescription = buildVisionDescription(vis);
         if (vis.styleConfidence === 'high' && vis.style) {
           // 视觉判定风格 -> 归一化到分类法 canonical key
@@ -3220,6 +3215,10 @@ const tryCommentWithStrategy = async (handle: string, facts?: ProfileFacts, like
     postTone: reconciledIntent.tone,
     sensitive: reconciledIntent.sensitive,
   });
+  if (!text.trim()) {
+    logBehavior('comment_skip_generation_failed', { handle, postUrl: chosen.meta?.url || '', source: 'task_review' });
+    return { attempted: 1, posted: 0, skipped: true, reason: 'comment_generation_failed' };
+  }
   pruneRecentCommentHashes();
   const textHash = hashString(normalizeForMatch(text));
   const dup = (likeState.comments!.recentText || []).some((x) => x.hash === textHash);
@@ -4274,10 +4273,6 @@ const main = async () => {
     isVisionEnabled: isVisionEnabled(),
     visionModel: (process.env.BOT_VISION_MODEL || 'deepseek-v4-flash'),
   }));
-  // 预热评论池
-  if (BOT_COMMENT_ENABLED) {
-    refillPool().then(() => console.log('[bot-real] comment pool warmed up'));
-  }
   await fetchNoiseSites(); // load noise sites from cloud
   await registerBot();
   await ensureBrowser();

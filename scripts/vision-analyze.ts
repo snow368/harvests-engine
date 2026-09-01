@@ -73,14 +73,14 @@ Strict evidence rules:
  * @param imageUrl Instagram 图片 URL（scontent 签名 URL，即时使用不过期）。
  * @returns 结构化观测，或 null（关闭/出错/超时）。
  */
-export const analyzePostImage = async (imageUrl: string, caption?: string): Promise<VisionResult | null> => {
+export const analyzePostImage = async (imageUrl: string): Promise<VisionResult | null> => {
   if (!isVisionEnabled() || !imageUrl) return null;
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), VISION_TIMEOUT_MS);
   try {
     // 分发到具体后端
-    if (isGemini()) return await analyzeWithGemini(imageUrl, controller.signal, caption);
+    if (isGemini()) return await analyzeWithGemini(imageUrl, controller.signal);
 
     // 2026-08-31 主 → 备：任一成功即返回；都失败才降级纯文案路径
     const attempts: Array<{ base: string; model: string; key: string } | undefined> = [undefined];
@@ -89,7 +89,7 @@ export const analyzePostImage = async (imageUrl: string, caption?: string): Prom
     }
     for (const cfg of attempts) {
       try {
-        const result = await analyzeWithOpenAI(imageUrl, controller.signal, cfg, caption);
+        const result = await analyzeWithOpenAI(imageUrl, controller.signal, cfg);
         if (result) return result;
       } catch {
         // 这个模型失败，换下一个继续
@@ -130,18 +130,12 @@ const analyzeWithOpenAI = async (
   imageUrl: string,
   signal: AbortSignal,
   override?: { base: string; model: string; key: string },
-  caption?: string,
 ): Promise<VisionResult | null> => {
   const base = override?.base || VISION_BASE;
   const model = override?.model || VISION_MODEL;
   const key = override?.key || VISION_API_KEY;
   const dataUri = await downloadImageAsDataUri(imageUrl);
   const imgRef = dataUri || imageUrl; // base64 优先，失败退回远程 URL
-  // 2026-08-31：把帖子文案带上当上下文（纹身师常在 caption 写明风格/主题/部位），
-  // 但明确要求「只报告肉眼可见的」，别把文案里的说法当成视觉事实（grounding 原则）。
-  const promptText = caption
-    ? `${VISION_PROMPT}\n\nPost caption (author's own words — use ONLY as context. Report what is actually VISIBLE in the image; do not treat caption claims as observed facts):\n"""${caption.slice(0, 500)}"""`
-    : VISION_PROMPT;
   const resp = await fetch(`${base}/chat/completions`, {
     method: 'POST',
     headers: {
@@ -154,7 +148,7 @@ const analyzeWithOpenAI = async (
         {
           role: 'user',
           content: [
-            { type: 'text', text: promptText },
+            { type: 'text', text: VISION_PROMPT },
             { type: 'image_url', image_url: { url: imgRef } },
           ],
         },
@@ -176,10 +170,7 @@ const analyzeWithOpenAI = async (
 };
 
 // Gemini 原生后端：inline_data 接受 base64，不支持远程 URL，故先本地下载图转 base64
-const analyzeWithGemini = async (imageUrl: string, signal: AbortSignal, caption?: string): Promise<VisionResult | null> => {
-  const promptText = caption
-    ? `${VISION_PROMPT}\n\nPost caption (author's own words — use ONLY as context. Report what is actually VISIBLE in the image):\n"""${caption.slice(0, 500)}"""`
-    : VISION_PROMPT;
+const analyzeWithGemini = async (imageUrl: string, signal: AbortSignal): Promise<VisionResult | null> => {
   // 1) 下载图片 → base64（可能因 IG 签名过期/403 失败，catch 后降级）
   const imgResp = await fetch(imageUrl, { signal });
   if (!imgResp.ok) throw new Error(`img download ${imgResp.status}`);
@@ -197,7 +188,7 @@ const analyzeWithGemini = async (imageUrl: string, signal: AbortSignal, caption?
         {
           role: 'user',
           parts: [
-            { text: promptText },
+            { text: VISION_PROMPT },
             { inline_data: { mime_type: mime, data: b64 } },
           ],
         },
