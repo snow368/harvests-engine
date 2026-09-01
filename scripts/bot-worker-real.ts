@@ -1680,8 +1680,36 @@ const registerBot = async () => {
     accountIds: ACCOUNT_IDS,
     host: BOT_HOST,
     version: BOT_VERSION,
-    meta: { mode: 'playwright-real', profileDir: PROFILE_DIR }
+    meta: buildWorkerDailyMeta(),
   });
+};
+
+const buildWorkerDailyMeta = () => {
+  const dayKey = getTodayKey();
+  return {
+    mode: 'playwright-real',
+    profileDir: PROFILE_DIR,
+    accountIds: ACCOUNT_IDS,
+    dailyPlan: {
+      commentDraftMin: BOT_COMMENT_DRAFT_DAILY_MIN,
+      commentDraftMax: BOT_COMMENT_DRAFT_DAILY_MAX,
+      commentDraftTarget: getCommentDraftDayTarget(),
+      commentPublishMax: BOT_COMMENT_PUBLISH_DAILY_MAX,
+      commentPublishIntervalMinSec: BOT_COMMENT_PUBLISH_INTERVAL_MIN_SEC,
+      commentPublishIntervalMaxSec: BOT_COMMENT_PUBLISH_INTERVAL_MAX_SEC,
+      likeTarget: getDailyLikeCap(),
+      followTarget: getFollowDayCap(),
+    },
+    dailyProgress: {
+      day: dayKey,
+      profilesVisited: Number(likeState.touchesByDay?.[dayKey] || 0),
+      likes: Number(likeState.likes?.byDay?.[dayKey] || 0),
+      follows: Number(likeState.follows?.byDay?.[dayKey] || 0),
+      commentDrafts: commentDraftsToday(),
+      commentsPosted: commentsPostedToday(),
+      nextCommentPublishAt: Number(likeState.comments?.nextPublishAt || 0),
+    },
+  };
 };
 
 const heartbeatBot = async () => {
@@ -1689,7 +1717,8 @@ const heartbeatBot = async () => {
     botId: BOT_ID,
     accountIds: ACCOUNT_IDS,
     host: BOT_HOST,
-    version: BOT_VERSION
+    version: BOT_VERSION,
+    meta: buildWorkerDailyMeta(),
   });
   // Flush behavior log buffer to cloud
   if (behaviorBuffer.length >= FLUSH_AT) {

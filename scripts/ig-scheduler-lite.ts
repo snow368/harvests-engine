@@ -149,6 +149,7 @@ async function main() {
     const execMode = hasInteraction ? 'browse_like' : 'browse_only';
     const payload = {
       id: taskId, taskType: 'ig_outreach', botId: BOT_ID,
+      targetBotId: BOT_ID,
       artistHandle: handle, shopName: String(artist.shop_name || ''),
       city: String(artist.city || ''),
       rating: artist.rating ? Number(artist.rating) : null,
