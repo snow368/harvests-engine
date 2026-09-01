@@ -169,6 +169,7 @@ const TATTOO_STYLE_TAXONOMY: { key: string; aliases: string[]; hashtags: string[
   { key: 'neo traditional', aliases: ['neo traditional','neo-traditional','neo trad'], hashtags: ['neotraditional','neotrad','neotraditionaltattoo'] },
   { key: 'new school', aliases: ['new school','newschool'], hashtags: ['newschool','newschooltattoo','newskool'] },
   { key: 'japanese', aliases: ['japanese','irezumi','japanesetattoo','horimono'], hashtags: ['japanese','irezumi','japanesetattoo','japanesetattoos','horimono','japantattoo'] },
+  { key: 'illustrative realism', aliases: ['illustrative realism','illustrative-realism'], hashtags: ['illustrativerealism','illustrativerealismtattoo'] },
   { key: 'realism', aliases: ['realism','realistic','photo realistic','photoreal'], hashtags: ['realism','realistic','realismtattoo','realistictattoo','photorealism','photoreal'] },
   { key: 'black and grey', aliases: ['black and grey','black & grey','black and gray','black & gray','bng','grey wash','gray wash'], hashtags: ['blackandgrey','blackandgray','blackandgreytattoo','bang','bngtattoo','greywash','graywash'] },
   { key: 'color', aliases: ['color tattoo','colour tattoo','color realism','colour realism'], hashtags: ['colortattoo','colour tattoo','colorrealism','colourrealism','colortattoos'] },
@@ -208,7 +209,7 @@ const aliasHit = (haystack: string, alias: string): boolean => {
   if (/\s/.test(alias)) return haystack.includes(alias); // 多词别名直接包含
   // 单词别名用边界匹配：仅 空格/#/开头/结尾 算边界，避免 non-traditional 误命中 traditional
   const esc = alias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return new RegExp(`(^|[\s#])${esc}([\s#]|$)`, 'i').test(haystack);
+  return new RegExp(`(^|[\\s#])${esc}([\\s#]|$)`, 'i').test(haystack);
 };
 
 // ========== 技法级细分提示（2026-08-14 扩细·用户要求"风格识别扩细"）==========
@@ -517,7 +518,14 @@ export const getInteractionFallback = (intent = 'generic', sensitive = false, ca
     ];
     return s[Math.floor(Math.random() * s.length)];
   }
-  // 尽量从 caption 里抓一个具体名词做观察锚点；抓不到就退回极简陈述
+  const properNames = String(caption || '').match(/\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3}\b/g) || [];
+  const subject = properNames.find((name) => !/^(So Happy|Thank You|This Is|I Am|I Ve|We Re)$/i.test(name));
+  if (subject) {
+    if (/\bsleeve\b/i.test(caption)) return `the ${subject} direction for this sleeve is such a good call`;
+    return `${subject} was such a good subject choice`;
+  }
+
+  // 尽量从 caption 里抓一个具体名词做观察锚点；抓不到就退回帖型陈述
   const map: Record<string, string[]> = {
     flash_available: ['this sheet is so clean', 'these are fire, the layout on the sheet'],
     pet_portrait: ['what a gorgeous tribute — the likeness is unreal', 'this is such a beautiful tribute'],
