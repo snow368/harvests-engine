@@ -194,6 +194,9 @@ const apps = [
       BOT_COMMENT_DRAFT_DAILY_MIN: '15',
       BOT_COMMENT_DRAFT_DAILY_MAX: '25',
       BOT_COMMENT_PUBLISH_DAILY_MAX: '12',
+      // 人工审核通过后逐条发布，间隔随机 8-20 分钟；冷却时间写入状态文件，重启不会绕过。
+      BOT_COMMENT_PUBLISH_INTERVAL_MIN_SEC: '480',
+      BOT_COMMENT_PUBLISH_INTERVAL_MAX_SEC: '1200',
       // 关注：每日 15-40 个（成熟号满档；按账号年龄连续爬坡，ig_01 绑定 51 天→立即满档；
       //       触碰门槛降到 1：每个店任务只访问 1 次，旧值 ≥2 永远够不到 → 从不关注）
       BOT_FOLLOW_ENABLED: 'true',

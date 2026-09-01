@@ -126,6 +126,11 @@ const BOT_COMMENT_DRAFT_DAILY_MAX = Math.max(
   Math.min(50, Number(process.env.BOT_COMMENT_DRAFT_DAILY_MAX || process.env.BOT_COMMENT_DAILY_MAX || 25)),
 );
 const BOT_COMMENT_PUBLISH_DAILY_MAX = Math.max(0, Math.min(50, Number(process.env.BOT_COMMENT_PUBLISH_DAILY_MAX || 12)));
+const BOT_COMMENT_PUBLISH_INTERVAL_MIN_SEC = Math.max(60, Number(process.env.BOT_COMMENT_PUBLISH_INTERVAL_MIN_SEC || 8 * 60));
+const BOT_COMMENT_PUBLISH_INTERVAL_MAX_SEC = Math.max(
+  BOT_COMMENT_PUBLISH_INTERVAL_MIN_SEC,
+  Number(process.env.BOT_COMMENT_PUBLISH_INTERVAL_MAX_SEC || 20 * 60),
+);
 const BOT_COMMENT_HANDLE_COOLDOWN_HOURS = Math.max(24, Number(process.env.BOT_COMMENT_HANDLE_COOLDOWN_HOURS || 72));
 const BOT_FOLLOW_ENABLED = String(process.env.BOT_FOLLOW_ENABLED || 'false').toLowerCase() === 'true';
 const BOT_FOLLOW_DAILY_MIN = Math.max(0, Math.min(30, Number(process.env.BOT_FOLLOW_DAILY_MIN || 2)));
@@ -826,6 +831,7 @@ type LikeState = {
     draftDayTarget?: { key: string; target: number };
     byHandle?: Record<string, { lastCommentAt?: number }>;
     recentText?: Array<{ ts: number; hash: number }>;
+    nextPublishAt?: number;
   };
   // DM 去重：记录每个 handle 上次已回复的文案哈希，防止把 bot 自己的出站/上轮回复误当客户新消息反复自回复。
   dmSeen?: Record<string, number>;
@@ -891,8 +897,13 @@ const recordCommentDraftQueued = () => {
 const recordCommentPublished = () => {
   const key = getTodayKey();
   likeState.comments!.postedByDay![key] = commentsPostedToday() + 1;
+  likeState.comments!.nextPublishAt = Date.now() + randInt(
+    BOT_COMMENT_PUBLISH_INTERVAL_MIN_SEC,
+    BOT_COMMENT_PUBLISH_INTERVAL_MAX_SEC,
+  ) * 1000;
   saveLikeState(likeState);
 };
+const canPublishApprovedCommentNow = () => Date.now() >= Number(likeState.comments?.nextPublishAt || 0);
 const dmSentToday = () => Number(likeState.dm?.byDay?.[getTodayKey()] || 0);
 const recordDmSent = () => {
   const k = getTodayKey();
@@ -2901,46 +2912,34 @@ const tryPostCommentOnOpenModal = async (
   await textarea.click({ timeout: 4000 });
   await page.waitForTimeout(jitter(400, 1000));
 
-  const chars = text.split('');
-  const useDistractedTyping = Math.random() < 0.3; // 30% chance of "distracted" typing
+  // The approved draft is immutable at publish time. Simulated typo correction
+  // previously deleted characters without restoring them, so type exactly and
+  // verify the DOM value before Instagram receives the submit action.
+  await textarea.fill('');
+  await textarea.pressSequentially(text, { delay: jitter(55, 140) });
 
-  if (!useDistractedTyping) {
-    // Mode A (70%): steady typing with natural pauses
-    for (let i = 0; i < chars.length; i++) {
-      await textarea.press(chars[i]);
-      await page.waitForTimeout(jitter(50, 200));
-      if (i > 0 && i % 12 === 0) await page.waitForTimeout(jitter(300, 900));
-    }
-  } else {
-    // Mode B (30%): chunked typing — type a few words, pause, scroll, come back
-    let i = 0;
-    while (i < chars.length) {
-      const chunkSize = randInt(3, 8);
-      const end = Math.min(i + chunkSize, chars.length);
-      for (let j = i; j < end; j++) {
-        await textarea.press(chars[j]);
-        await page.waitForTimeout(jitter(45, 160));
-      }
-      i = end;
-      if (i >= chars.length) break;
-
-      // Distraction: scroll post slightly, pause, then resume typing
-      const distraction = Math.random();
-      if (distraction < 0.4) {
-        // Slight scroll like re-reading the image
-        await page.mouse.wheel(0, randInt(-80, 80));
-        await page.waitForTimeout(jitter(600, 1500));
-      } else if (distraction < 0.7) {
-        // Just pause like thinking
-        await page.waitForTimeout(jitter(800, 2500));
-      } else {
-        // Move cursor back a few chars, then retype (simulate typo correction)
-        for (let k = 0; k < randInt(1, 3); k++) {
-          await textarea.press('Backspace');
-          await page.waitForTimeout(jitter(80, 250));
-        }
-      }
-    }
+  const readEnteredText = async () => textarea.evaluate((element: any) =>
+    typeof element.value === 'string' ? element.value : (element.innerText || element.textContent || '')
+  );
+  const canonicalizeEnteredText = (value: string) => String(value || '').replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim();
+  let enteredText = await readEnteredText();
+  if (canonicalizeEnteredText(enteredText) !== canonicalizeEnteredText(text)) {
+    logBehavior('comment_publish_text_retry', {
+      draftId: approval.draftId,
+      expected: text,
+      actual: enteredText,
+    });
+    await textarea.fill('');
+    await textarea.fill(text);
+    enteredText = await readEnteredText();
+  }
+  if (canonicalizeEnteredText(enteredText) !== canonicalizeEnteredText(text)) {
+    logBehavior('comment_publish_blocked_text_mismatch', {
+      draftId: approval.draftId,
+      expected: text,
+      actual: enteredText,
+    });
+    throw new Error('comment_text_mismatch_before_submit');
   }
 
   await page.waitForTimeout(jitter(500, 1500));
@@ -3003,6 +3002,7 @@ let approvedCommentBusy = false;
 const tryPublishApprovedComment = async (): Promise<boolean> => {
   if (!BOT_COMMENT_ENABLED || approvedCommentBusy || !page) return false;
   if (commentsPostedToday() >= BOT_COMMENT_PUBLISH_DAILY_MAX) return false;
+  if (!canPublishApprovedCommentNow()) return false;
   approvedCommentBusy = true;
   let claimedDraftId = '';
   let didPostToInstagram = false;
