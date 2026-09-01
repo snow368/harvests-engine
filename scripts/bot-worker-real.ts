@@ -1013,7 +1013,7 @@ const queueRapportCommentForReview = async (handle: string, fallbackText: string
     let style = meta.postStyle || '';
     let styleConfidence = meta.styleConfidence || 'low';
     if (isVisionEnabled() && meta.postImageSrc) {
-      const vision = await analyzePostImage(meta.postImageSrc);
+      const vision = await analyzePostImage(meta.postImageSrc, meta.caption);
       if (vision?.tattooVisible) {
         visionDescription = buildVisionDescription(vision);
         visionTechniqueHints = extractTechniqueHintsFromVision(visionDescription);
@@ -2876,8 +2876,17 @@ const tryPostCommentOnOpenModal = async (
     logBehavior('comment_publish_blocked_missing_approval', { draftId: approval?.draftId || '' });
     return false;
   }
-  const textarea = page.locator('textarea[aria-label*="comment" i], textarea[placeholder*="comment" i], textarea').first();
-  if ((await textarea.count()) === 0) return false;
+  const textarea = page.locator([
+    'textarea[aria-label*="comment" i]',
+    'textarea[placeholder*="comment" i]',
+    'form textarea',
+    'div[contenteditable="true"][role="textbox"][aria-label*="comment" i]',
+  ].join(', ')).first();
+  try {
+    await textarea.waitFor({ state: 'visible', timeout: 10_000 });
+  } catch {
+    return false;
+  }
   await textarea.click({ timeout: 4000 });
   await page.waitForTimeout(jitter(400, 1000));
 
@@ -2924,7 +2933,13 @@ const tryPostCommentOnOpenModal = async (
   }
 
   await page.waitForTimeout(jitter(500, 1500));
-  await textarea.press('Enter');
+  const form = textarea.locator('xpath=ancestor::form[1]');
+  const postButton = form.locator('button[type="submit"], button').filter({ hasText: /^Post$/i }).first();
+  if ((await postButton.count()) > 0 && await postButton.isEnabled().catch(() => false)) {
+    await postButton.click({ timeout: 5000 });
+  } else {
+    await textarea.press('Enter');
+  }
   await page.waitForTimeout(jitter(1500, 3000));
   return true;
 };
@@ -2996,13 +3011,13 @@ const tryPublishApprovedComment = async (): Promise<boolean> => {
     const approvedBy = String(item.approved_by || '').trim();
     if (!approvedAt || !approvedBy) {
       logBehavior('comment_publish_blocked_missing_approval', { draftId: claimedDraftId, handle });
-      await postJson(`/api/drafts/${encodeURIComponent(claimedDraftId)}/release`, {}).catch(() => null);
+      await postJson(`/api/drafts/${encodeURIComponent(claimedDraftId)}/release`, { reason: 'missing_approval_metadata' }).catch(() => null);
       return false;
     }
     const ok = await tryPostCommentOnOpenModal(text, { draftId: claimedDraftId, approvedAt, approvedBy });
     if (!ok) {
       logBehavior('comment_approved_publish_failed', { draftId: claimedDraftId, handle, reason: 'comment_box_not_found' });
-      await postJson(`/api/drafts/${encodeURIComponent(claimedDraftId)}/release`, {}).catch(() => null);
+      await postJson(`/api/drafts/${encodeURIComponent(claimedDraftId)}/release`, { reason: 'comment_box_not_found' }).catch(() => null);
       return false;
     }
     didPostToInstagram = true;
@@ -3051,7 +3066,9 @@ const tryPublishApprovedComment = async (): Promise<boolean> => {
     return true;
   } catch (error: any) {
     if (claimedDraftId && !didPostToInstagram) {
-      await postJson(`/api/drafts/${encodeURIComponent(claimedDraftId)}/release`, {}).catch(() => null);
+      await postJson(`/api/drafts/${encodeURIComponent(claimedDraftId)}/release`, {
+        reason: String(error?.message || error).slice(0, 300),
+      }).catch(() => null);
     }
     logBehavior('comment_approved_publish_error', { reason: String(error?.message || error).slice(0, 180) });
     return false;
@@ -3125,7 +3142,7 @@ const tryCommentWithStrategy = async (handle: string, facts?: ProfileFacts, like
   let tempSource: string = chosen.meta.styleSource || 'none';
   if (isVisionEnabled() && chosen.meta.postImageSrc) {
     try {
-      const vis = await analyzePostImage(chosen.meta.postImageSrc);
+      const vis = await analyzePostImage(chosen.meta.postImageSrc, chosen.meta.caption);
       if (vis) {
         visionDescription = buildVisionDescription(vis);
         if (vis.styleConfidence === 'high' && vis.style) {
@@ -4129,6 +4146,12 @@ const pollLoop = async () => {
           await sleep(POLL_INTERVAL_MS);
           continue;
         }
+        // Do not make approved comments wait for the entire polled task batch.
+        // Failed drafts are backed off by the API, so another approved draft can proceed.
+        try {
+          const publishedApproved = await tryPublishApprovedComment();
+          if (publishedApproved) await sleep(jitter(3500, 9000));
+        } catch {}
         // 任务级看门狗：单任务执行上限（默认 8 分钟），超时视为 failed 继续下一个，
         // 防止 IG 页面慢/选择器卡死导致 bot 挂死不再消费队列（2026-08-06 修复）
         const TASK_TIMEOUT_MS = Math.max(60_000, Number(process.env.BOT_TASK_TIMEOUT_MS || 5 * 60_000));
