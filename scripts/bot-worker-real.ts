@@ -138,6 +138,7 @@ const BOT_FOLLOW_DAILY_MAX = Math.max(BOT_FOLLOW_DAILY_MIN, Math.min(50, Number(
 const BOT_FOLLOW_MIN_TOUCHES = Math.max(1, Number(process.env.BOT_FOLLOW_MIN_TOUCHES || 2)); // must have >= N visits before follow
 const BOT_DAILY_BROWSE_TARGET_NEW = Math.max(1, Number(process.env.BOT_DAILY_BROWSE_TARGET_NEW || 25));
 const BOT_DAILY_BROWSE_TARGET_TRANSITION = Math.max(1, Number(process.env.BOT_DAILY_BROWSE_TARGET_TRANSITION || 50));
+const BOT_DAILY_TASK_TARGET = Math.max(1, Number(process.env.BOT_DAILY_TASK_TARGET || 80));
 const BOT_DAILY_BROWSE_TARGET_STABLE = Math.max(1, Number(process.env.BOT_DAILY_BROWSE_TARGET_STABLE || 130));
 // OCR 仅用于兜底提取粉丝数，非点赞/评论/关注必需；沙箱环境下 tesseract.js 的
 // createWorker('eng') 会去下载/初始化 WASM 模型并永久挂起，曾导致每个任务卡满看门狗。
@@ -1691,6 +1692,7 @@ const buildWorkerDailyMeta = () => {
     profileDir: PROFILE_DIR,
     accountIds: ACCOUNT_IDS,
     dailyPlan: {
+      taskTarget: BOT_DAILY_TASK_TARGET,
       commentDraftMin: BOT_COMMENT_DRAFT_DAILY_MIN,
       commentDraftMax: BOT_COMMENT_DRAFT_DAILY_MAX,
       commentDraftTarget: getCommentDraftDayTarget(),

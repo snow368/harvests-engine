@@ -172,6 +172,7 @@ const apps = [
       BOT_EXEC_MODE: 'browse_like',
       BOT_POLL_INTERVAL_MS: '4000',
       BOT_HEARTBEAT_INTERVAL_MS: '15000',
+      BOT_DAILY_TASK_TARGET: '80',
       BOT_HUMAN_BREAK_MIN_MS: '300000',
       BOT_HUMAN_BREAK_MAX_MS: '900000',
       BOT_BREAK_EVERY_N: '4',
