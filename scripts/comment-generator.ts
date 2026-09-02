@@ -545,6 +545,40 @@ export const getInteractionFallback = (intent = 'generic', sensitive = false, ca
   return arr[Math.floor(Math.random() * arr.length)];
 };
 
+const TEMPLATE_FLAVOR_RE = /\b(hits different|buttery smooth|so buttery|so clean|crispy already|mad tight|bold af|bold will hold|doing all the heavy lifting|dialed in solid|solid work|looks proper|flow proper)\b/i;
+const SUBJECT_TERMS = [
+  'leaf', 'leaves', 'rose', 'roses', 'flower', 'flowers', 'skull', 'skulls', 'wolf', 'wolves',
+  'eagle', 'eagles', 'ship', 'ships', 'butterfly', 'butterflies', 'snake', 'snakes', 'heart', 'hearts',
+  'portrait', 'portraits', 'eye', 'eyes', 'paw', 'paws', 'clown', 'clowns', 'doll', 'dolls',
+];
+const VISUAL_CLAIMS: Array<{ claim: RegExp; evidence: RegExp }> = [
+  { claim: /\b(crisp|clean)\b/i, evidence: /\b(crisp|clean)\b/i },
+  { claim: /\b(linework|line work|lines?|outlines?)\b/i, evidence: /\b(linework|line work|lines?|outlines?|lettering|script)\b/i },
+  { claim: /\b(shading|shaded|gradient|fade|tones?)\b/i, evidence: /\b(shading|shaded|gradient|fade|tones?|value transitions?)\b/i },
+  { claim: /\b(negative space)\b/i, evidence: /\bnegative space\b/i },
+  { claim: /\b(saturation|packed|color packing|solid fill)\b/i, evidence: /\b(saturation|packed|color packing|solid fill|color fills?)\b/i },
+  { claim: /\b(placement|sits? (perfect|nicely|well))\b/i, evidence: /\b(placement|forearm|upper arm|calf|thigh|back|chest|shoulder|sleeve)\b/i },
+];
+
+/** Final conservative gate before a generated sentence is allowed into human review. */
+export const validateCommentGrounding = (text: string, input: Pick<CommentInput, 'caption' | 'visionDescription'>) => {
+  const comment = String(text || '').trim();
+  const evidence = `${input.caption || ''} ${input.visionDescription || ''}`.toLowerCase();
+  const words = comment.split(/\s+/).filter(Boolean);
+  if (comment.length < 12 || comment.length > 150 || words.length < 4) return false;
+  if (TEMPLATE_FLAVOR_RE.test(comment) || /[?]$/.test(comment)) return false;
+  if (/\b(the|a|an|and|or|to|of|with|for|on|in|is|are|so|that)\s*[.!]*$/i.test(comment)) return false;
+  if (/\b(those|these)\b[^.!?]{0,80}\bis\b/i.test(comment)) return false;
+
+  for (const { claim, evidence: evidencePattern } of VISUAL_CLAIMS) {
+    if (claim.test(comment) && !evidencePattern.test(evidence)) return false;
+  }
+  for (const term of SUBJECT_TERMS) {
+    if (new RegExp(`\\b${term}\\b`, 'i').test(comment) && !new RegExp(`\\b${term}\\b`, 'i').test(evidence)) return false;
+  }
+  return true;
+};
+
 /**
  * 构建专业纹身师视角的 prompt
  */
@@ -719,9 +753,9 @@ const callDeepSeek = async (prompt: string): Promise<string> => {
  */
 export const generateComment = async (input: CommentInput): Promise<GeneratedComment> => {
   if (!DEEPSEEK_API_KEY) {
-    // 无 API key 时直接用「锚定本帖」的互动模板（针对帖型的具体陈述，非提问）
-    const fbText = getInteractionFallback(input.postIntent, !!input.sensitive, input.caption);
-    return { text: fbText, style: 'fallback' };
+    // No model means no grounded draft. A generic fallback creates plausible
+    // sounding but unverified visual claims, so fail closed instead.
+    return { text: '', style: 'skipped_no_model' };
   }
 
   // ⚠️ 2026-08-14 修订：移除 question 风格。权重重偏「针对当帖的具体观察陈述」：
@@ -760,9 +794,9 @@ export const generateComment = async (input: CommentInput): Promise<GeneratedCom
     // 清理常见的 AI 废话
     text = text.replace(/^(here's|here is|sure|okay|of course|absolutely)[,:!. ]+/i, '');
     text = text.replace(/[""]/g, '"').replace(/['']/g, "'");
-    text = text.slice(0, 150); // 硬截断
-
     if (!text || text.length < 3) continue;
+    // Never truncate a generated sentence: that can cut off a word or clause.
+    if (!validateCommentGrounding(text, input)) continue;
     if (isTooSimilar(text)) continue;
 
     // 加入历史去重
@@ -773,12 +807,8 @@ export const generateComment = async (input: CommentInput): Promise<GeneratedCom
     return { text, style, tokens: text.length };
   }
 
-  // 最终 fallback（仅 DeepSeek 连续失败 3 次时触发）：用「针对帖型的具体陈述」模板，而非泛泛 "fire"
-  const fbText = getInteractionFallback(input.postIntent, sensitive, input.caption);
-  recentCommentTexts.push(fbText);
-  if (recentCommentTexts.length > MAX_RECENT) recentCommentTexts.shift();
-  saveDedup(recentCommentTexts);
-  return { text: fbText, style: 'fallback' };
+  // Low-confidence or repeatedly invalid generations should not create a draft.
+  return { text: '', style: 'skipped_quality_gate' };
 };
 
 /**

@@ -283,7 +283,7 @@ export type PostIntent = {
   keywords: string[];
 };
 
-const PET_SIGNALS = ['dog', 'cat', 'puppy', 'kitten', 'pet', 'paw', 'furbaby', 'fur baby', 'animal', 'baby'];
+const PET_SIGNALS = ['dog', 'cat', 'puppy', 'kitten', 'pet portrait', 'paw print', 'furbaby', 'fur baby'];
 
 export const detectPostIntent = (caption: string, alts: string[] = []): PostIntent => {
   const text = `${caption} ${alts.join(' ')}`.toLowerCase();
@@ -332,7 +332,8 @@ export const detectPostIntent = (caption: string, alts: string[] = []): PostInte
   }
 
   // 2.5) 客户「第一次纹身」（细分：区别于普通 portrait/flash，评论角度=里程碑）
-  if (/\b(first tattoo|first piece|first ink|first tat|my first (tattoo|piece|ink)|first (ever )?tattoo|first session|virgin skin|getting my first|my very first (tattoo|piece)|first time (getting|being) (tattooed|inked)|first art)\b/i.test(text)) {
+  const hypotheticalFirstTattoo = /\b(whether|if|thinking about|ready for|considering).{0,45}\bfirst (tattoo|piece|ink)\b|\b(first tattoo|first piece).{0,30}\b(or|and) (the )?(next|another)\b/i.test(text);
+  if (!hypotheticalFirstTattoo && /\b(first tattoo|first piece|first ink|first tat|my first (tattoo|piece|ink)|first (ever )?tattoo|first session|virgin skin|getting my first|my very first (tattoo|piece)|first time (getting|being) (tattooed|inked)|first art)\b/i.test(text)) {
     return {
       intent: 'first_tattoo',
       summary: 'The artist is showing a CLIENT’S FIRST tattoo — a milestone piece. The mood is special, slightly nervous/excited; the comment should acknowledge the first-tattoo moment, not hype it like a flash sheet.',
