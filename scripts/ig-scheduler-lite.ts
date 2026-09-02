@@ -26,6 +26,7 @@ const TARGET_STATES = (process.env.SCHEDULER_STATES || '')
   .split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
 const CLOUD_API_BASE = (process.env.CLOUD_API_BASE || 'https://harvests.pages.dev').replace(/\/+$/, '');
 const BOT_API_TOKEN = (process.env.BOT_API_TOKEN || 'vps-bot-secret-2024').trim();
+const SCHEDULER_INTERVAL_MS = Math.max(15 * 60_000, Number(process.env.SCHEDULER_INTERVAL_MS || 60 * 60_000));
 
 const ENV_PATH = path.resolve(process.cwd(), '.env');
 
@@ -203,6 +204,6 @@ async function main() {
   console.log(`[ig-scheduler] Created ${created}/${batch.length} tasks (${todayCount}/${effectiveLimit} today) for bot=${BOT_ID} state=${scope} age=${acctAgeDays}d`);
 }
 
-console.log(`[ig-scheduler] Running every 5 mins (bot=${BOT_ID}, state=${TARGET_STATES.length ? TARGET_STATES.join(',') : TARGET_STATE}, daily=${DAILY_LIMIT})`);
+console.log(`[ig-scheduler] Running every ${Math.round(SCHEDULER_INTERVAL_MS / 60_000)} mins (bot=${BOT_ID}, state=${TARGET_STATES.length ? TARGET_STATES.join(',') : TARGET_STATE}, daily=${DAILY_LIMIT})`);
 main().catch(e => console.error('[ig-scheduler] first run error:', e));
-setInterval(() => main().catch(e => console.error('[ig-scheduler] error:', e)), 5 * 60 * 1000);
+setInterval(() => main().catch(e => console.error('[ig-scheduler] error:', e)), SCHEDULER_INTERVAL_MS);

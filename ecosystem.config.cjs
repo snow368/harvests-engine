@@ -65,6 +65,7 @@ const apps = [
       SCHEDULER_ACCOUNT_BOUND_AT: '2026-06-19T00:00:00Z',
       // Keep drafting active if a stale frontend preference row still says 0.
       SCHEDULER_COMMENTS_PER_SESSION: '1',
+      SCHEDULER_INTERVAL_MS: '3600000',
     },
     error_file: path.join(LOGS_DIR, 'scheduler-error.log'),
     out_file: path.join(LOGS_DIR, 'scheduler-out.log'),
@@ -173,8 +174,8 @@ const apps = [
       HUMAN_MIMICRY_ENABLED: 'true',
       BOT_LAUNCH_MODE: 'cdp', // 连外部长命 Chrome，bot 不自起浏览器（无 SingletonLock 之战）
       BOT_EXEC_MODE: 'browse_like',
-      BOT_POLL_INTERVAL_MS: '4000',
-      BOT_HEARTBEAT_INTERVAL_MS: '15000',
+      BOT_POLL_INTERVAL_MS: '60000',
+      BOT_HEARTBEAT_INTERVAL_MS: '60000',
       BOT_DAILY_TASK_TARGET: '80',
       BOT_HUMAN_BREAK_MIN_MS: '300000',
       BOT_HUMAN_BREAK_MAX_MS: '900000',
@@ -312,7 +313,7 @@ const apps = [
       ...COMMON_ENV,
       CLOUD_API_BASE: 'https://harvests.pages.dev',
       BOT_API_TOKEN: 'vps-bot-secret-2024',
-      LISTENER_INTERVAL_MS: '10000',
+      LISTENER_INTERVAL_MS: '60000',
       CONTROL_HOST_ID: 'vps-windows',
       CONTROL_HOST_LABEL: 'Windows VPS',
     },

@@ -691,7 +691,7 @@ let lastIndustry: string | undefined = 'tattoo'; // default: tattoo industry
 // Rest-time noise sites — fetched from cloud API so frontend can configure.
 let NOISE_SITES: string[] = ['https://www.cnn.com', 'https://www.nydailynews.com', 'https://www.youtube.com'];
 let NOISE_SITES_CACHED_AT = 0;
-const NOISE_SITES_CACHE_TTL = 5 * 60 * 1000; // re-fetch every 5 min
+const NOISE_SITES_CACHE_TTL = 60 * 60 * 1000; // configuration changes rarely; protect D1 reads
 
 const fetchNoiseSites = async () => {
   if (!API_BASE) return;
