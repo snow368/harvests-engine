@@ -768,7 +768,13 @@ const getBreakDuration = (stage) => {
   return jitter(BOT_HUMAN_BREAK_MIN_MS, BOT_HUMAN_BREAK_MAX_MS);
 };
 const maybeScheduleBreak = async (command) => {
-  const stage = String(command?.accountStage || lastAccountStage || 'stable').toLowerCase();
+  const suppliedAge = Number(command?.accountAgeDays || 0);
+  let stage = String(command?.accountStage || lastAccountStage || 'stable').toLowerCase();
+  if (suppliedAge <= 0 && BOT_ACCOUNT_BOUND_AT) {
+    const boundAt = Date.parse(BOT_ACCOUNT_BOUND_AT);
+    const ageDays = Number.isFinite(boundAt) ? Math.max(0, (Date.now() - boundAt) / 86400_000) : 0;
+    stage = ageDays < 7 ? 'new' : ageDays < 30 ? 'transition' : ageDays < 60 ? 'growing' : 'mature';
+  }
   lastAccountStage = stage;
   if (command?.industry) lastIndustry = String(command.industry);
   profilesSinceBreak++;
@@ -3977,8 +3983,15 @@ const executeCommand = async (command: CommandPayload) => {
   }
   const taskModeRaw = String(command?.suggestedExecMode || '').trim().toLowerCase();
   const execMode = (taskModeRaw === 'browse_only' || taskModeRaw === 'browse_like') ? taskModeRaw : BOT_EXEC_MODE;
-  const stage = String(command?.accountStage || '').trim().toLowerCase() || 'stable';
-  const age = Number(command?.accountAgeDays) ?? -1;
+  const suppliedAge = Number(command?.accountAgeDays || 0);
+  const age = getAccountAgeDays(command);
+  const inferredStage = age < 7 ? 'new' : age < 30 ? 'transition' : age < 60 ? 'growing' : 'mature';
+  const stage = suppliedAge > 0
+    ? (String(command?.accountStage || '').trim().toLowerCase() || inferredStage)
+    : inferredStage;
+  // Repair already-queued legacy tasks carrying the old hardcoded new/0d values.
+  command.accountAgeDays = age;
+  command.accountStage = stage;
   console.log(`[bot-real] execute ${commandId} -> @${handle} [stage=${stage}, age=${age}d, mode=${execMode}]`);
   logBehavior('task_start', { commandId, handle, mode: execMode, suggestedExecMode: taskModeRaw || null, accountStage: stage, accountAgeDays: age });
   likeState.touches![handle] = Number(likeState.touches![handle] || 0) + 1;
@@ -4257,9 +4270,11 @@ const heartbeatLoop = async () => {
       recoverAttempts = 0;
       await sleep(HEARTBEAT_INTERVAL_MS);
     } catch (err: any) {
-      console.error('[bot-real] heartbeat error:', err?.message || err);
+      const message = String(err?.message || err);
+      console.error('[bot-real] heartbeat error:', message);
       recoverAttempts++;
-      if (recoverAttempts <= 3) {
+      const serverPressure = /\b429\b|quota|daily_read|rate limit/i.test(message);
+      if (!serverPressure && recoverAttempts <= 3) {
         // Re-register and re-connect after server restart
         try {
           await registerBot();
@@ -4269,7 +4284,12 @@ const heartbeatLoop = async () => {
           console.error('[bot-real] recovery failed:', recoverErr?.message || recoverErr);
         }
       }
-      await sleep(Math.min(HEARTBEAT_INTERVAL_MS, 5000));
+      // Back off under Cloudflare/D1 pressure instead of retrying every five
+      // seconds and doubling traffic with register attempts.
+      const retryDelay = serverPressure
+        ? Math.min(5 * 60_000, 30_000 * Math.pow(2, Math.min(recoverAttempts - 1, 4)))
+        : Math.min(60_000, Math.max(5000, HEARTBEAT_INTERVAL_MS * recoverAttempts));
+      await sleep(retryDelay);
     }
   }
 };

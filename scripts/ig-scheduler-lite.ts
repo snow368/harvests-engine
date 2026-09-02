@@ -65,10 +65,15 @@ async function fetchArtists(limit = 200): Promise<any[]> {
 }
 
 async function main() {
-  // 账号阶段：bot_accounts 在 D1，但 cloud-api 暂无安全的「只读」端点
-  // （GET /api/automation/bot-account 是带副作用的 upsert），这里按新账号保守默认。
-  const acctAgeDays = 0;
-  const dbStage = 'new';
+  // Derive maturity from the real binding date. The old new/0d payload made
+  // mature accounts pause after every profile.
+  const boundAt = String(process.env.SCHEDULER_ACCOUNT_BOUND_AT || process.env.BOT_ACCOUNT_BOUND_AT || '').trim();
+  const boundMs = boundAt ? Date.parse(boundAt) : NaN;
+  const acctAgeDays = Number.isFinite(boundMs)
+    ? Math.max(0, Math.floor((Date.now() - boundMs) / 86400_000))
+    : 0;
+  const inferredStage = acctAgeDays < 7 ? 'new' : acctAgeDays < 30 ? 'transition' : acctAgeDays < 60 ? 'growing' : 'mature';
+  const dbStage = inferredStage;
   const dbSpeed = 2.5;
 
   const autoStage = 'new';
@@ -93,7 +98,10 @@ async function main() {
     console.error('[ig-scheduler] fetch bot-prefs failed:', e?.message?.slice(0, 80));
   }
   const likesPer = prefs ? (Number(prefs.likesPerSession) || 0) : 2;
-  const commentsPer = prefs ? (Number(prefs.commentsPerSession) || 0) : 1;
+  const commentsOverride = Number(process.env.SCHEDULER_COMMENTS_PER_SESSION);
+  const commentsPer = Number.isFinite(commentsOverride)
+    ? Math.max(0, Math.min(2, Math.round(commentsOverride)))
+    : (prefs ? (Number(prefs.commentsPerSession) || 0) : 1);
   const followsPer = prefs ? (Number(prefs.followsPerSession) || 0) : 0;
   // 互动总开关：全 0 或未配置 → browse_only（只浏览）；任一 > 0 → browse_like（真互动）
   const hasInteraction = likesPer > 0 || commentsPer > 0 || followsPer > 0;

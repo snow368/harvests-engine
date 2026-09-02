@@ -62,6 +62,9 @@ const apps = [
       SCHEDULER_BOT_ID: 'bot_ig_01',
       SCHEDULER_DAILY_LIMIT: '80',
       SCHEDULER_STATE: 'ALL',
+      SCHEDULER_ACCOUNT_BOUND_AT: '2026-06-19T00:00:00Z',
+      // Keep drafting active if a stale frontend preference row still says 0.
+      SCHEDULER_COMMENTS_PER_SESSION: '1',
     },
     error_file: path.join(LOGS_DIR, 'scheduler-error.log'),
     out_file: path.join(LOGS_DIR, 'scheduler-out.log'),
