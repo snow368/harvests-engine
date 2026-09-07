@@ -202,9 +202,10 @@ const apps = [
       // 人工审核通过后逐条发布，间隔随机 8-20 分钟；冷却时间写入状态文件，重启不会绕过。
       BOT_COMMENT_PUBLISH_INTERVAL_MIN_SEC: '480',
       BOT_COMMENT_PUBLISH_INTERVAL_MAX_SEC: '1200',
-      // 关注：总量治理阶段（2026-09-07：following 600+/粉丝十几，比例失衡，先压量再谈增长）。
-      //   每日新增封顶 3-8 个；总量硬顶 BOT_FOLLOW_MAX_FOLLOWING 走 .env（到顶只出不进）。
-      BOT_FOLLOW_ENABLED: 'true',
+      // 关注：2026-09-07 起【自动关注全关】——following 600+/粉丝十几严重失衡，关注改为手动；
+      //   点赞/评论/回关不受影响（回关由 BOT_FOLLOW_BACK_ENABLED 独立控制，默认 true）。
+      //   等粉丝数上来再评估是否重开自动关注（届时可放开 BOT_FOLLOW_DAILY_MIN/MAX 3-8）。
+      BOT_FOLLOW_ENABLED: 'false',
       BOT_FOLLOW_DAILY_MIN: '3',
       BOT_FOLLOW_DAILY_MAX: '8',
       BOT_FOLLOW_MIN_TOUCHES: '1',

@@ -136,6 +136,9 @@ const BOT_COMMENT_PUBLISH_INTERVAL_MAX_SEC = Math.max(
 );
 const BOT_COMMENT_HANDLE_COOLDOWN_HOURS = Math.max(24, Number(process.env.BOT_COMMENT_HANDLE_COOLDOWN_HOURS || 72));
 const BOT_FOLLOW_ENABLED = String(process.env.BOT_FOLLOW_ENABLED || 'false').toLowerCase() === 'true';
+// 回关开关（独立于 BOT_FOLLOW_ENABLED）：别人先关注我们/在我们帖下互动 → 我们礼貌回关。
+// 回关不增加 following（反而 +粉丝），是粉丝维护而非扩张，故默认 true 不受"手动关注"策略影响。
+const BOT_FOLLOW_BACK_ENABLED = String(process.env.BOT_FOLLOW_BACK_ENABLED || 'true').toLowerCase() === 'true';
 const BOT_FOLLOW_DAILY_MIN = Math.max(0, Math.min(30, Number(process.env.BOT_FOLLOW_DAILY_MIN || 2)));
 const BOT_FOLLOW_DAILY_MAX = Math.max(BOT_FOLLOW_DAILY_MIN, Math.min(50, Number(process.env.BOT_FOLLOW_DAILY_MAX || 6)));
 // 关注总量硬上限（0=不限）。following 达到该值后停止新增关注，只能靠取关腾出名额，
@@ -1302,7 +1305,7 @@ const maybeCheckFollowBacks = async () => {
 // 受全局日关注上限（BOT_FOLLOW_DAILY_MAX，与主动关注共享预算）+ 限制信号检测保护。
 const reciprocalFollowBack = async (handle: string): Promise<boolean> => {
   try {
-    if (!BOT_FOLLOW_ENABLED || !page) return false;
+    if (!BOT_FOLLOW_BACK_ENABLED || !page) return false;
     const selfIds = new Set([BOT_ID, ...(ACCOUNT_IDS || [])].map((x) => String(x).toLowerCase()));
     if (selfIds.has(String(handle).toLowerCase())) return false;
     const st = (likeState.follows!.byHandle![handle] || {}) as any;

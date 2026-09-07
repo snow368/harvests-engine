@@ -36,12 +36,14 @@ Start-Process "C:\Program Files\Google\Chrome\Application\chrome.exe" -ArgumentL
 Start-Sleep 5
 Invoke-RestMethod http://127.0.0.1:9222/json/version    # 必须返回 webSocketDebuggerUrl，否则重跑本段
 
-# ---------- Part A2：写取关/关注上限配置（.env） ----------
+# ---------- Part A2：取关回收配置（.env） ----------
+# 注：自动关注已由 ecosystem 的 BOT_FOLLOW_ENABLED=false 关闭（关注改手动），
+#     BOT_FOLLOW_MAX_FOLLOWING 因此不再需要，仅保留取关回收来压低存量 following。
 # bot 启动时 import 'dotenv/config'，会读 cwd\.env。
 # 这些变量 ecosystem.config.cjs 里没有定义，所以 .env 生效（dotenv 不覆盖已有 env，故不会打架）。
 $envLines = @(
-  '# --- 关注/粉丝比治理（2026-09-07）---',
-  'BOT_UNFOLLOW_ENABLED=true',        # 打开关注回收
+  '# --- 取关回收：压低存量 following（2026-09-07）---',
+  'BOT_UNFOLLOW_ENABLED=true',        # 打开关注回收（清存量 600+）
   'BOT_UNFOLLOW_DRY_RUN=true',        # 第一天先只采集+打印名单，不真取关；确认后改 false
   'BOT_UNFOLLOW_ORDER=desc',          # 粉丝多的先取关（小号互动好，尽量保留）
   'BOT_UNFOLLOW_GRACE_DAYS=14',       # 关注满 14 天未回关才动
@@ -49,17 +51,17 @@ $envLines = @(
   'BOT_UNFOLLOW_MIN_FOLLOWING=300',   # following 降到 300 以下自动停手
   'BOT_UNFOLLOW_CHECK_INTERVAL_MIN=30',
   'BOT_UNFOLLOW_KEEP_IF_ENGAGED=true',# 有过互动（回关/DM/赞过我们/评论过）的永不取关
-  'BOT_FOLLOW_MAX_FOLLOWING=300'      # 关注总量硬上限：到顶只出不进
+  'BOT_FOLLOW_BACK_ENABLED=true'      # 回关独立开关：别人关注我们仍礼貌回关（不增 following）
 )
 $envFile = "$ENGINE\.env"
 if (Test-Path $envFile) {
   Copy-Item $envFile "$envFile.bak.$(Get-Date -Format yyyyMMddHHmmss)" -Force
-  $existing = Get-Content $envFile | Where-Object { $_ -notmatch '^BOT_UNFOLLOW_|^BOT_FOLLOW_MAX_FOLLOWING' }
+  $existing = Get-Content $envFile | Where-Object { $_ -notmatch '^BOT_UNFOLLOW_|^BOT_FOLLOW_BACK_ENABLED' }
   ($existing + $envLines) | Set-Content $envFile -Encoding UTF8
 } else {
   $envLines | Set-Content $envFile -Encoding UTF8
 }
-Get-Content $envFile | Select-String "BOT_UNFOLLOW|BOT_FOLLOW_MAX"
+Get-Content $envFile | Select-String "BOT_UNFOLLOW|BOT_FOLLOW_BACK"
 
 # ---------- Part B：起 bot-worker ----------
 # 任务池当前 pending 308，暂不需要 ig-scheduler（其旧版连 Neon 会 402 报错循环）
