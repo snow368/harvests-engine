@@ -8,6 +8,9 @@ import { createWorker } from 'tesseract.js';
 import { generateComment, clearRecentHistory, detectTattooStyle, extractTechniqueHintsFromVision } from './comment-generator';
 import { analyzePostImage, isVisionEnabled, buildVisionDescription } from './vision-analyze';
 import { detectPostType, detectSubject, isPiercingHandle, detectPostIntent, reconcileIntentWithVision, intentEngagement } from './tattoo-voice';
+// 关注回收（follow churn）：清理长期未回关的号，压低 following:followers 比例。
+// 默认关闭，由 BOT_UNFOLLOW_ENABLED 打开；详见 scripts/unfollow-maintenance.ts
+import { runUnfollowMaintenance, countFollowing } from './unfollow-maintenance';
 import { isCommentBlacklisted } from './comment-blacklist';
 
 // 2026-08-07 全局兜底：捕获未处理异常/拒绝，避免单任务内的异步错误直接杀死整个进程
@@ -135,6 +138,9 @@ const BOT_COMMENT_HANDLE_COOLDOWN_HOURS = Math.max(24, Number(process.env.BOT_CO
 const BOT_FOLLOW_ENABLED = String(process.env.BOT_FOLLOW_ENABLED || 'false').toLowerCase() === 'true';
 const BOT_FOLLOW_DAILY_MIN = Math.max(0, Math.min(30, Number(process.env.BOT_FOLLOW_DAILY_MIN || 2)));
 const BOT_FOLLOW_DAILY_MAX = Math.max(BOT_FOLLOW_DAILY_MIN, Math.min(50, Number(process.env.BOT_FOLLOW_DAILY_MAX || 6)));
+// 关注总量硬上限（0=不限）。following 达到该值后停止新增关注，只能靠取关腾出名额，
+// 保证 following:followers 不再恶化（配合 unfollow-maintenance 的回收形成净流出）。
+const BOT_FOLLOW_MAX_FOLLOWING = Math.max(0, Number(process.env.BOT_FOLLOW_MAX_FOLLOWING || 0));
 const BOT_FOLLOW_MIN_TOUCHES = Math.max(1, Number(process.env.BOT_FOLLOW_MIN_TOUCHES || 2)); // must have >= N visits before follow
 const BOT_DAILY_BROWSE_TARGET_NEW = Math.max(1, Number(process.env.BOT_DAILY_BROWSE_TARGET_NEW || 25));
 const BOT_DAILY_BROWSE_TARGET_TRANSITION = Math.max(1, Number(process.env.BOT_DAILY_BROWSE_TARGET_TRANSITION || 50));
@@ -2776,6 +2782,15 @@ const shouldTryFollow = (handle: string, likeSummary: LikeActionSummary, command
   // [1] 总开关
   if (!BOT_FOLLOW_ENABLED) return { ok: false, reason: 'follow_disabled' };
 
+  // [1.5] following 总量上限：到了就只出不进，靠取关腾位（关注/粉丝比治理）
+  if (BOT_FOLLOW_MAX_FOLLOWING > 0) {
+    const followingNow = countFollowing(likeState.follows?.byHandle || {});
+    if (followingNow >= BOT_FOLLOW_MAX_FOLLOWING) {
+      logBehavior('follow_cap_reached', { followingNow, cap: BOT_FOLLOW_MAX_FOLLOWING });
+      return { ok: false, reason: `follow_cap_${followingNow}_gte_${BOT_FOLLOW_MAX_FOLLOWING}` };
+    }
+  }
+
   // [2] 优先级闸门（默认仅 high；设 BOT_FOLLOW_PRIORITIES=high,medium 或 * 可放宽以提升关注量）
   const priority = String(command?.followPriority || '').toLowerCase();
   const allowedPriors = (process.env.BOT_FOLLOW_PRIORITIES || 'high').split(',').map((s) => s.trim().toLowerCase());
@@ -4170,6 +4185,22 @@ const pollLoop = async () => {
       // ── 捕获主动关注我们的回流粉（如 tattooshops.be）：每 20 轮查一次 Followers 列表 ──
       try {
         await checkIncomingFollowBacks();
+      } catch {}
+      // ── 关注回收：清理长期未回关的号，压低 following:followers 比例 ──
+      //    内部自带节流（默认 30 分钟一轮）、日上限、宽限期与忙碌避让，空转成本极低。
+      try {
+        await runUnfollowMaintenance({
+          page: () => page,
+          likeState,
+          saveLikeState: () => saveLikeState(likeState),
+          logBehavior,
+          recordInteraction,
+          sleep,
+          jitter,
+          toBareHandle,
+          igBase: IG_BASE,
+          busy: () => false,
+        });
       } catch {}
       // ── 检测「对方赞过我们」：每 20 轮查一次最新帖子点赞者列表，互赞则提前预热窗口 ──
       try {

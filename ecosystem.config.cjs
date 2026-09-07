@@ -202,11 +202,11 @@ const apps = [
       // 人工审核通过后逐条发布，间隔随机 8-20 分钟；冷却时间写入状态文件，重启不会绕过。
       BOT_COMMENT_PUBLISH_INTERVAL_MIN_SEC: '480',
       BOT_COMMENT_PUBLISH_INTERVAL_MAX_SEC: '1200',
-      // 关注：每日 15-40 个（成熟号满档；按账号年龄连续爬坡，ig_01 绑定 51 天→立即满档；
-      //       触碰门槛降到 1：每个店任务只访问 1 次，旧值 ≥2 永远够不到 → 从不关注）
+      // 关注：总量治理阶段（2026-09-07：following 600+/粉丝十几，比例失衡，先压量再谈增长）。
+      //   每日新增封顶 3-8 个；总量硬顶 BOT_FOLLOW_MAX_FOLLOWING 走 .env（到顶只出不进）。
       BOT_FOLLOW_ENABLED: 'true',
-      BOT_FOLLOW_DAILY_MIN: '15',
-      BOT_FOLLOW_DAILY_MAX: '40',
+      BOT_FOLLOW_DAILY_MIN: '3',
+      BOT_FOLLOW_DAILY_MAX: '8',
       BOT_FOLLOW_MIN_TOUCHES: '1',
       // 关注优先级闸门：'*' = 所有任务层级都允许关注（scheduler 当前不注入 followPriority，留空即放行；
       //   '*' 为未来按优先级排程留余地，同时避免误设为仅 high 卡住关注量）。
