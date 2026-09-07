@@ -167,6 +167,7 @@ const apps = [
       // BOT_API_BASE 用 pages.dev（同源 /api/* 代理到 Worker），VPS/本机/国内都能通；
       // workers.dev 子域在国内被 GFW 屏蔽，VPS 海外虽可直连但 pages.dev 更稳。
       BOT_API_BASE: 'https://harvests.pages.dev',
+      BOT_HOST: 'vps-45-135-46-218', // 实例标识：心跳表一眼区分 VPS vs 本机（代码默认 local-dev 会误导）
       BOT_ACCOUNT_IDS: 'peachtattoosupplyraiha',
       BOT_ID: 'bot_ig_01',
       BOT_CDP_URL: 'http://localhost:9222', // CDP 模式：连 start-bots.bat 已起好的系统 Chrome（9222 调试口）

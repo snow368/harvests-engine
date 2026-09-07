@@ -87,9 +87,12 @@ const BOT_VERSION = process.env.BOT_VERSION || '0.2.0-real';
 const ACCOUNT_IDS = (process.env.BOT_ACCOUNT_IDS || '').split(',').map((x) => x.trim()).filter(Boolean);
 const BOT_API_KEY = (process.env.BOT_API_KEY || '').trim();
 const BOT_API_TOKEN = (process.env.BOT_API_TOKEN || 'vps-bot-secret-2024').trim();
-const POLL_INTERVAL_MS = Math.max(1500, Number(process.env.BOT_POLL_INTERVAL_MS || 4000));
+// D1 配额防御（2026-09-07）：默认 60s/60s，禁止裸跑回 4s/15s 旧档——
+// bot_fizdy8 事件：无 env 裸跑 = 4s poll × 全表扫描，1.4h 烧穿 D1 全天 500 万行额度。
+// 需要更快响应时显式传 BOT_POLL_INTERVAL_MS，但默认必须保守。
+const POLL_INTERVAL_MS = Math.max(5000, Number(process.env.BOT_POLL_INTERVAL_MS || 60000));
 const POLL_LIMIT = Math.max(1, Math.min(5, Number(process.env.BOT_POLL_LIMIT || 1)));
-const HEARTBEAT_INTERVAL_MS = Math.max(5000, Number(process.env.BOT_HEARTBEAT_INTERVAL_MS || 15000));
+const HEARTBEAT_INTERVAL_MS = Math.max(10000, Number(process.env.BOT_HEARTBEAT_INTERVAL_MS || 60000));
 const CONTROL_PAUSE_FILE = path.resolve(process.cwd(), 'data', 'control-pause', 'bot-worker.pause');
 let controlPauseLogged = false;
 const IG_BASE = (process.env.INSTAGRAM_BASE || 'https://www.instagram.com').replace(/\/+$/, '');
