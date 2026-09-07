@@ -139,6 +139,9 @@ const BOT_FOLLOW_ENABLED = String(process.env.BOT_FOLLOW_ENABLED || 'false').toL
 // 回关开关（独立于 BOT_FOLLOW_ENABLED）：别人先关注我们/在我们帖下互动 → 我们礼貌回关。
 // 回关不增加 following（反而 +粉丝），是粉丝维护而非扩张，故默认 true 不受"手动关注"策略影响。
 const BOT_FOLLOW_BACK_ENABLED = String(process.env.BOT_FOLLOW_BACK_ENABLED || 'true').toLowerCase() === 'true';
+// 回关行业审核：默认仅对 bio 判定为 tattoo 相关（tattoo artist/shop/ink 等）的号自动回关，
+// 保证 B2B 受众质量；设 false 则对所有新粉/互动者无条件回关（旧行为）。
+const BOT_FOLLOW_BACK_REQUIRE_TATTOO = String(process.env.BOT_FOLLOW_BACK_REQUIRE_TATTOO || 'true').toLowerCase() === 'true';
 const BOT_FOLLOW_DAILY_MIN = Math.max(0, Math.min(30, Number(process.env.BOT_FOLLOW_DAILY_MIN || 2)));
 const BOT_FOLLOW_DAILY_MAX = Math.max(BOT_FOLLOW_DAILY_MIN, Math.min(50, Number(process.env.BOT_FOLLOW_DAILY_MAX || 6)));
 // 关注总量硬上限（0=不限）。following 达到该值后停止新增关注，只能靠取关腾出名额，
@@ -1320,6 +1323,19 @@ const reciprocalFollowBack = async (handle: string): Promise<boolean> => {
     }
     await openProfile(handle);
     await page.waitForTimeout(jitter(1200, 2400));
+    // 行业审核（2026-09-07）：默认只回关纹身师/纹身相关号。粉丝质量优先——粉圈号、
+    // 无关账号即使关注了我们也不回关（留手动决定），防止粉丝池被无关号稀释。
+    if (BOT_FOLLOW_BACK_REQUIRE_TATTOO) {
+      try {
+        const facts = await captureProfileFacts().catch(() => null);
+        const bio = (facts && String(facts.bio || '')) || '';
+        const subject = bio ? detectSubject(bio, [], handle).subject : 'unknown';
+        if (subject !== 'tattoo') {
+          logBehavior('reciprocal_follow_skipped_not_tattoo', { handle, subject, bio: bio.slice(0, 120) });
+          return false;
+        }
+      } catch { return false; }
+    }
     const followSelectors = ['header button', 'header div[role="button"]', 'main button', 'main div[role="button"]', 'button', 'div[role="button"]'];
     let followBtn: any = null;
     for (const sel of followSelectors) {

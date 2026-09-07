@@ -51,7 +51,8 @@ $envLines = @(
   'BOT_UNFOLLOW_MIN_FOLLOWING=300',   # following 降到 300 以下自动停手
   'BOT_UNFOLLOW_CHECK_INTERVAL_MIN=30',
   'BOT_UNFOLLOW_KEEP_IF_ENGAGED=true',# 有过互动（回关/DM/赞过我们/评论过）的永不取关
-  'BOT_FOLLOW_BACK_ENABLED=true'      # 回关独立开关：别人关注我们仍礼貌回关（不增 following）
+  'BOT_FOLLOW_BACK_ENABLED=true',      # 回关独立开关：别人关注我们仍礼貌回关（不增 following）
+  'BOT_FOLLOW_BACK_REQUIRE_TATTOO=true'# 回关行业审核：bio 判定 tattoo 相关才自动回关；false=无脑全回关
 )
 $envFile = "$ENGINE\.env"
 if (Test-Path $envFile) {
