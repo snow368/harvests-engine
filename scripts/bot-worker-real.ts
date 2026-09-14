@@ -1020,6 +1020,16 @@ const rapportLikePosts = async (handle: string, n: number): Promise<number> => {
   } catch { return 0; }
 };
 
+// 自己的账号绝不自我互动（2026-09-14 用户拍板）：回关队列/取粉来源里偶尔会把
+// 自己的账号混进来，必须显式拦掉，否则会跑去给自己账号的帖子写评论（一眼自嗨）。
+// 覆盖 handle 本体与帖子owner/co-author 两个层面。
+const isOwnAccountHandle = (raw: string): boolean => {
+  const h = String(raw || '').trim().toLowerCase().replace(/^@/, '').split('/').filter(Boolean).pop() || '';
+  if (!h) return false;
+  const selfIds = new Set([BOT_ID, ...(ACCOUNT_IDS || [])].map((x) => String(x).trim().toLowerCase()));
+  return selfIds.has(h);
+};
+
 const hasClearCaptionTheme = (meta: any): boolean => {
   const caption = String(meta?.caption || '')
     .replace(/https?:\/\/\S+/gi, ' ')
@@ -1034,6 +1044,11 @@ const hasClearCaptionTheme = (meta: any): boolean => {
 
 // 回关培养评论也必须进入统一人工审核队列。这里绝不触碰评论输入框。
 const queueRapportCommentForReview = async (handle: string, _fallbackText: string): Promise<string | null> => {
+  // 禁止给自己账号写评论（回关队列里偶有自身账号混入，2026-09-14 用户拍板）
+  if (isOwnAccountHandle(handle)) {
+    logBehavior('comment_skip_own_account', { handle, source: 'follow_back_ladder', scope: 'profile' });
+    return null;
+  }
   if (!page) return null;
   if (!canQueueCommentDraft()) {
     logBehavior('comment_skip_draft_daily_target', {
@@ -3194,6 +3209,13 @@ const tryPublishApprovedComment = async (): Promise<boolean> => {
 
 const tryCommentWithStrategy = async (handle: string, facts?: ProfileFacts, likeSummary?: LikeActionSummary): Promise<CommentActionSummary> => {
   if (!page) throw new Error('page_not_initialized');
+
+  // 禁止在自己账号的帖子里留言（有些来源是别人主页的 co-author / 推荐流混入）
+  if (isOwnAccountHandle(handle)) {
+    logBehavior('comment_skip_own_account', { handle, source: 'task_review', scope: 'profile' });
+    return { attempted: 0, posted: 0, skipped: true, reason: 'own_account_profile' };
+  }
+
   const gate = shouldTryComment(handle, likeSummary);
   if (!gate.ok) return { attempted: 0, posted: 0, skipped: true, reason: gate.reason };
 
@@ -3219,6 +3241,12 @@ const tryCommentWithStrategy = async (handle: string, facts?: ProfileFacts, like
       // 帖子 owner / co-author 在黑名单 → 跳过该帖（不写评论）
       if (isCommentBlacklisted(meta.ownerHandle, { caption: meta.caption })) {
         logBehavior('comment_skip_blacklist', { handle, ownerHandle: meta.ownerHandle, scope: 'post' });
+        await closeModal().catch(() => {});
+        continue;
+      }
+      // 帖子 owner 是自己的账号 → 跳过该帖（不给自己留言）
+      if (isOwnAccountHandle(meta.ownerHandle)) {
+        logBehavior('comment_skip_own_account', { handle, ownerHandle: meta.ownerHandle, source: 'task_review', scope: 'post' });
         await closeModal().catch(() => {});
         continue;
       }
