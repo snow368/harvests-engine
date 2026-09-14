@@ -22,6 +22,10 @@ check('rejects repeated template language', validateCommentGrounding(
   'that pencil to paper sentiment hits different for real',
   { caption: 'Pencil to paper, nothing compares', visionDescription: '' },
 ), false);
+check('rejects hollow critic-speak tail (2026-09-11 user report)', validateCommentGrounding(
+  'greek statues hit different fr, that marble value work is a beast to get reading right',
+  { caption: 'Portrait of Poseidon ❤️ Greek statues are one of my top 3 favorite thing to tattoo #poseidon #greekmythology', visionDescription: 'subject: Poseidon portrait with trident (high) | observed craft: smooth grey wash gradients' },
+), false);
 check('promotional first-tattoo wording stays non-milestone',
   detectPostIntent('Whether it is your first tattoo or the next piece in your collection, our artists are ready.').intent === 'first_tattoo',
   false,

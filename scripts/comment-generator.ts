@@ -545,7 +545,10 @@ export const getInteractionFallback = (intent = 'generic', sensitive = false, ca
   return arr[Math.floor(Math.random() * arr.length)];
 };
 
-const TEMPLATE_FLAVOR_RE = /\b(hits different|buttery smooth|so buttery|so clean|crispy already|mad tight|bold af|bold will hold|doing all the heavy lifting|dialed in solid|solid work|looks proper|flow proper)\b/i;
+// 2026-09-11 扩充（用户实测案例）：原式只拦 "hits different"（带 s），漏掉单数 "hit different"，
+// 也漏掉 "…fr" / "value work" / "is a beast" / "reading right" 这类空腔调评语——
+// 它们不含任何关于这张图的真实信息，只是听起来像同行说话。命中即 reject → 走重试重新生成。
+const TEMPLATE_FLAVOR_RE = /\b(hits? different|buttery smooth|so buttery|so clean|crispy already|mad tight|bold af|bold will hold|doing all the heavy lifting|dialed in solid|solid work|looks proper|flow proper|value work|is a beast|reads? right|reading right)\b|\bfr\b/i;
 const SUBJECT_TERMS = [
   'leaf', 'leaves', 'rose', 'roses', 'flower', 'flowers', 'skull', 'skulls', 'wolf', 'wolves',
   'eagle', 'eagles', 'ship', 'ships', 'butterfly', 'butterflies', 'snake', 'snakes', 'heart', 'hearts',
@@ -606,7 +609,7 @@ const buildPrompt = (input: CommentInput, style: string): string => {
     captionText ? `AUTHOR CAPTION (primary source): "${captionText}"` : null,
     // ⚠️ imageAlt 是 IG 自动生成、可能不准；仅作弱提示，subject 以 caption 为准，绝不可仅凭 alt 判定题材
     input.imageAlt ? `Image auto-description (may be inaccurate — weak hint only, prefer the caption for subject): "${input.imageAlt.slice(0, 200)}"` : null,
-    hasVision ? `IMAGE ANALYSIS (secondary, may be inaccurate; discard anything that conflicts with the caption): ${input.visionDescription!.slice(0, 400)}` : null,
+    hasVision ? `IMAGE ANALYSIS (secondary, may be inaccurate; discard anything that conflicts with the caption). Its first "hook:" line is the single strongest observation a fellow artist would make about the image — your best opening anchor when it agrees with the caption: ${input.visionDescription!.slice(0, 900)}` : null,
     input.isReel ? '(Video/Reel)' : '(Static post)',
     `Stats: ${input.likeCount || '?'} likes, ${input.commentCount || '?'} comments`,
   ].filter(Boolean).join(' | ');
@@ -626,7 +629,7 @@ const buildPrompt = (input: CommentInput, style: string): string => {
 4. Image auto-description is only a weak last resort.`;
 
   const NEUTRAL_RULE = hasVision
-    ? `${captionPriorityRule}\nYou may reference one detail from IMAGE ANALYSIS only after grounding the comment in the caption. Never claim a visual quality beyond that analysis. Never invent.`
+    ? `${captionPriorityRule}\nYou may reference one detail from IMAGE ANALYSIS only after grounding the comment in the caption. When the caption is thin or generic, prefer the IMAGE ANALYSIS "hook:" observation as your opening — it is what a real tattoo artist would notice first about the image. Never claim a visual quality beyond that analysis. Never invent.`
     : `${captionPriorityRule}\nYou CANNOT see the image — you only read text. Therefore:
 - NEVER claim visual qualities you did not observe: do NOT assert shading, linework quality, composition, contrast, color, or execution as if you saw them. (Only exception: the caption itself describes that quality — then you may echo it.)
 - You MAY reference the tattoo's subject or style, but ONLY if the post caption explicitly states it. The caption is text you can read, and the image depicts that same thing, so this is safe and relevant. Do NOT invent a subject the caption does not mention.

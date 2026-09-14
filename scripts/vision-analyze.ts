@@ -42,6 +42,7 @@ export type VisionResult = {
   styleConfidence: 'high' | 'medium' | 'low';
   craftNotes: string[];     // 2-4 条"同行能注意到的可见工艺事实"（linework/shading/composition/color/negative space）
   palette: string;          // 简短配色描述
+  commentHook: string;      // 2026-09-08 新增：同行看到图最可能脱口而出的 ONE 具体观察（陈述句，非赞美/提问）
   raw: string;              // 模型原始输出（截断）
 };
 
@@ -60,13 +61,14 @@ const safeJsonParse = (text: string, fallback: any): any => {
 };
 
 const VISION_PROMPT = `Analyze ONLY the currently displayed Instagram carousel frame. Return ONLY valid JSON, no prose, no markdown:
-{"imageType":"tattoo_on_skin|flash_art|studio|portrait|other","tattooVisible":true,"subject":"what the tattoo itself depicts, or empty when uncertain","subjectConfidence":"high|medium|low","style":"best-fit tattoo style or OTHER","styleConfidence":"high|medium|low","craftNotes":["0 to 3 specific, directly observable tattoo craft facts"],"palette":"short tattoo palette description, or empty"}
+{"imageType":"tattoo_on_skin|flash_art|studio|portrait|other","tattooVisible":true,"subject":"what the tattoo itself depicts, or empty when uncertain","subjectConfidence":"high|medium|low","style":"best-fit tattoo style or OTHER","styleConfidence":"high|medium|low","craftNotes":["0 to 3 specific, directly observable tattoo craft facts"],"palette":"short tattoo palette description, or empty","commentHook":"ONE concrete observation about THIS tattoo that a knowledgeable tattoo artist would naturally call out in a comment — craft, subject choice, placement or technique — a SHORT STATEMENT; or empty if nothing concrete stands out"}
 Strict evidence rules:
 - Describe the TATTOO or flash artwork, not clothing, room decor, plants, jewelry, skin marks, or background props.
-- If no tattoo/flash is clearly visible, set tattooVisible=false and leave subject/style/craftNotes/palette empty.
+- If no tattoo/flash is clearly visible, set tattooVisible=false and leave subject/style/craftNotes/palette/commentHook empty.
 - Do not infer a leaf, flower, animal, face, lettering, or ornament from a vague shape. Use subjectConfidence=low and an empty subject when uncertain.
 - Use craft words such as crisp, clean, smooth shading, fine linework, saturation, spacing, or negative space ONLY when that exact property is clearly visible at this resolution.
-- Omit uncertain craft notes instead of guessing. Never praise quality; report neutral visual facts.`;
+- Omit uncertain craft notes instead of guessing. Never praise quality; report neutral visual facts.
+- commentHook must be grounded in what you SEE (e.g. "the whip shading on that dragon tail", "solid black packing in the negative space", "the placement follows the calf muscle") — NEVER generic praise ("clean", "fire", "love it") and NEVER a question. It is the ONE thing a real artist peer would notice first about this specific piece.`;
 
 /**
  * 调用视觉模型分析帖子图片。
@@ -233,6 +235,7 @@ const parseVisionContent = (content: string): VisionResult | null => {
       ? parsed.craftNotes.map((x: any) => String(x)).slice(0, 4).map((s: string) => s.slice(0, 140))
       : [],
     palette: String(parsed.palette || '').slice(0, 80),
+    commentHook: String(parsed.commentHook || '').slice(0, 180),
     raw: content.slice(0, 500),
   };
 };
@@ -243,6 +246,9 @@ const parseVisionContent = (content: string): VisionResult | null => {
 export const buildVisionDescription = (v: VisionResult): string => {
   if (!v.tattooVisible) return '';
   const parts: string[] = [];
+  // 2026-09-08：commentHook 置首 —— 它是视觉模型挑出的"同行最强观察"，评论生成时最值得做开场锚点；
+  // 放最前面保证下游 slice 截断时优先保留（下游注入上限已同步放宽到 900 字符）。
+  if (v.commentHook) parts.push(`hook: ${v.commentHook}`);
   if (v.subject && v.subjectConfidence !== 'low') parts.push(`subject: ${v.subject} (${v.subjectConfidence})`);
   if (v.imageType) parts.push(`image type: ${v.imageType}`);
   if (v.craftNotes.length) parts.push(`observed craft: ${v.craftNotes.join('; ')}`);

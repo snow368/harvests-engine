@@ -138,6 +138,9 @@ const BOT_COMMENT_PUBLISH_INTERVAL_MAX_SEC = Math.max(
   Number(process.env.BOT_COMMENT_PUBLISH_INTERVAL_MAX_SEC || 20 * 60),
 );
 const BOT_COMMENT_HANDLE_COOLDOWN_HOURS = Math.max(24, Number(process.env.BOT_COMMENT_HANDLE_COOLDOWN_HOURS || 72));
+// 硬闸门（2026-09-14 用户拍板）：视觉判定"图里看不到纹身" → 直接不写评论。
+// 默认开。设 BOT_COMMENT_REQUIRE_TATTOO_VISIBLE=0 可退回旧行为（只按文字意图决定评不评）。
+const BOT_COMMENT_REQUIRE_TATTOO_VISIBLE = String(process.env.BOT_COMMENT_REQUIRE_TATTOO_VISIBLE ?? '1').toLowerCase() !== '0';
 const BOT_FOLLOW_ENABLED = String(process.env.BOT_FOLLOW_ENABLED || 'false').toLowerCase() === 'true';
 // 回关开关（独立于 BOT_FOLLOW_ENABLED）：别人先关注我们/在我们帖下互动 → 我们礼貌回关。
 // 回关不增加 following（反而 +粉丝），是粉丝维护而非扩张，故默认 true 不受"手动关注"策略影响。
@@ -1057,13 +1060,24 @@ const queueRapportCommentForReview = async (handle: string, _fallbackText: strin
     let visionTechniqueHints: string[] = [];
     let style = meta.postStyle || '';
     let styleConfidence = meta.styleConfidence || 'low';
+    // ⚠️ 2026-09-08 修订：视觉常开（原逻辑 caption 主题清晰即跳过看图 → "看图评论"名存实亡，
+    // 用户拍板：看图评论质量更高）。视觉不决定"评不评"（那是 caption/意图闸门的活），
+    // 只负责把评论写具体：caption 清晰 → 视觉补 hook/craft 增强；caption 含糊 → 视觉兜底判 subject。
+    // subjectConfidence='high' 注入门槛移除：buildVisionDescription 内部按 confidence 只拼可信字段，
+    // subject 冲突由 prompt 的 EVIDENCE ORDER（caption 优先）兜底。
     const captionThemeClear = hasClearCaptionTheme(meta);
-    if (captionThemeClear) {
-      logBehavior('comment_vision_skipped_caption_clear', { handle, postUrl, source: 'follow_back_ladder', intent: meta.postIntent || 'generic' });
+    let vision: any = null;
+    // 2026-09-14：社交/生活类帖（生日、聚会、家人朋友）不调识图——图里必然没纹身，
+    // 调了也是浪费 API。纹身意图才进识图。
+    const ladderIntent = intentEngagement(String(meta.postIntent || 'generic')) ;
+    if (ladderIntent === 'social') {
+      logBehavior('comment_skip_social_no_vision', { handle, postUrl, source: 'follow_back_ladder' });
+      await page.keyboard.press('Escape').catch(() => {});
+      return null;
     }
-    if (!captionThemeClear && isVisionEnabled() && meta.postImageSrc) {
-      const vision = await analyzePostImage(meta.postImageSrc);
-      if (vision?.tattooVisible && vision.subjectConfidence === 'high') {
+    if (isVisionEnabled() && meta.postImageSrc) {
+      vision = await analyzePostImage(meta.postImageSrc);
+      if (vision?.tattooVisible) {
         visionDescription = buildVisionDescription(vision);
         visionTechniqueHints = extractTechniqueHintsFromVision(visionDescription);
         if (vision.styleConfidence === 'high' && vision.style) {
@@ -1075,15 +1089,31 @@ const queueRapportCommentForReview = async (handle: string, _fallbackText: strin
           }
         }
       }
-      logBehavior('comment_vision_result', {
+      logBehavior(captionThemeClear ? 'comment_vision_enhance' : 'comment_vision_fallback', {
         handle,
         postUrl,
+        captionThemeClear,
         tattooVisible: !!vision?.tattooVisible,
         imageType: vision?.imageType || '',
         subject: vision?.subject || '',
         subjectConfidence: vision?.subjectConfidence || 'low',
         craftNotes: vision?.craftNotes || [],
+        hook: vision?.commentHook || '',
       });
+    }
+
+    // ===== 纹身硬闸门（2026-09-14 用户拍板）：识图判定"图里看不到纹身" → 不写评论、不建草稿 =====
+    // 这条路径以前没有纹身意图闸门，任何首帖都会过识图并生成评论（= 什么帖子都识别）。
+    // 现在：social 已在上面提前拦；其余必须识图确认有纹身才继续。
+    if (BOT_COMMENT_REQUIRE_TATTOO_VISIBLE && vision && vision.tattooVisible === false) {
+      logBehavior('comment_skip_no_tattoo_in_image', {
+        handle,
+        postUrl,
+        source: 'follow_back_ladder',
+        imageType: vision.imageType || '',
+      });
+      await page.keyboard.press('Escape').catch(() => {});
+      return null;
     }
 
     const caption = String(meta.caption || '').trim();
@@ -3225,19 +3255,14 @@ const tryCommentWithStrategy = async (handle: string, facts?: ProfileFacts, like
   let tempStyle = chosen.meta.postStyle || '';
   let tempConf: string = chosen.meta.styleConfidence || 'low';
   let tempSource: string = chosen.meta.styleSource || 'none';
+  // ⚠️ 2026-09-08 修订：视觉常开（同 follow_back_ladder 路径）——文字意图闸门已决定评不评，
+  // 视觉只负责读懂图把评论写具体；subjectConfidence='high' 注入门槛移除（hook/craft 始终可用）。
   const captionThemeClear = hasClearCaptionTheme(chosen.meta);
-  if (captionThemeClear) {
-    logBehavior('comment_vision_skipped_caption_clear', {
-      handle,
-      postUrl: chosen.meta?.url || '',
-      source: 'task_review',
-      intent: chosen.meta.postIntent || 'generic',
-    });
-  }
-  if (!captionThemeClear && isVisionEnabled() && chosen.meta.postImageSrc) {
+  let vis: any = null;
+  if (isVisionEnabled() && chosen.meta.postImageSrc) {
     try {
-      const vis = await analyzePostImage(chosen.meta.postImageSrc);
-      if (vis?.tattooVisible && vis.subjectConfidence === 'high') {
+      vis = await analyzePostImage(chosen.meta.postImageSrc);
+      if (vis?.tattooVisible) {
         visionDescription = buildVisionDescription(vis);
         if (vis.styleConfidence === 'high' && vis.style) {
           // 视觉判定风格 -> 归一化到分类法 canonical key
@@ -3251,7 +3276,36 @@ const tryCommentWithStrategy = async (handle: string, facts?: ProfileFacts, like
           }
         }
       }
-    } catch {}
+      logBehavior(captionThemeClear ? 'comment_vision_enhance' : 'comment_vision_fallback', {
+        handle,
+        postUrl: chosen.meta?.url || '',
+        source: 'task_review',
+        captionThemeClear,
+        tattooVisible: !!vis?.tattooVisible,
+        subject: vis?.subject || '',
+        subjectConfidence: vis?.subjectConfidence || 'low',
+        craftNotes: vis?.craftNotes || [],
+        hook: vis?.commentHook || '',
+      });
+    } catch {
+      vis = null;
+    }
+  }
+
+  // ===== 纹身硬闸门（2026-09-14 用户拍板）：识图跑通但判定"图里看不到纹身" → 不写评论 =====
+  // 与文字意图闸门的区别：文字闸门管"这个帖在讲纹身吗"，本闸门管"这张图真有纹身吗"。
+  // 只有两者都过才生成评论，避免给自拍/招牌/纹身师聚餐这类图硬编一句纹身评论（一眼机器人）。
+  // 识图不可用/报错时 vis=null → 不拦，退回纯文字意图判定（原有行为）。
+  if (BOT_COMMENT_REQUIRE_TATTOO_VISIBLE && vis && vis.tattooVisible === false) {
+    logBehavior('comment_skip_no_tattoo_in_image', {
+      handle,
+      postUrl: chosen.meta?.url || '',
+      source: 'task_review',
+      imageType: vis.imageType || '',
+      subject: vis.subject || '',
+      captionThemeClear,
+    });
+    return { attempted: 1, posted: 0, skipped: true, reason: 'no_tattoo_in_image' };
   }
 
   // 视觉辅助技法识别（2026-08-14 补·用户要"视觉辅助"）：从 QWEN 观测描述里提取技法词，
