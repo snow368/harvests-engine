@@ -856,6 +856,12 @@ type LikeState = {
     draftDayTarget?: { key: string; target: number };
     byHandle?: Record<string, { lastCommentAt?: number }>;
     recentText?: Array<{ ts: number; hash: number }>;
+    // 帖子级去重：同一个 IG 帖一辈子只允许一条评论。分两张表是因为判定场景不同：
+    //   queuedByPostKey = 产出草稿时记（含被人工 reject 的），用来挡「同一帖再生成一条草稿」
+    //   postedByPostKey = 真发成功后记，用来挡「claim 到旧草稿后给同一帖发第二条」
+    // key 只用 postKey（shortcode），不含文案也不含 handle —— 详见 hasCommentedPost 注释。
+    queuedByPostKey?: Record<string, number>;
+    postedByPostKey?: Record<string, number>;
     nextPublishAt?: number;
   };
   // DM 去重：记录每个 handle 上次已回复的文案哈希，防止把 bot 自己的出站/上轮回复误当客户新消息反复自回复。
@@ -929,6 +935,44 @@ const recordCommentPublished = () => {
   saveLikeState(likeState);
 };
 const canPublishApprovedCommentNow = () => Date.now() >= Number(likeState.comments?.nextPublishAt || 0);
+
+// ── 帖子级去重：同一个 IG 帖子一辈子只允许一条评论（草稿/已发都算）──────────────
+// 背景：draftHash 里带了评论文本，换一句文案就被当成新草稿，导致同一个 post 被写两条不同的评论。
+// 这里的 key 只取 postKey（shortcode），不含文案/不含 handle，跨 handle 也去重（co-author 帖同理）。
+const COMMENT_POST_DEDUP_TTL_MS = 180 * 24 * 60 * 60 * 1000; // 180 天
+const readPostDedupMap = (which: 'queuedByPostKey' | 'postedByPostKey'): Record<string, number> => {
+  if (!likeState.comments) likeState.comments = {};
+  if (!likeState.comments[which]) likeState.comments[which] = {};
+  return likeState.comments[which]!;
+};
+const postDedupFresh = (map: Record<string, number> | undefined, key: string): boolean => {
+  const ts = Number(map?.[key] || 0);
+  return !!ts && (Date.now() - ts) <= COMMENT_POST_DEDUP_TTL_MS;
+};
+const markPostDedup = (which: 'queuedByPostKey' | 'postedByPostKey', postKey: string) => {
+  const key = String(postKey || '').trim().toLowerCase();
+  if (!key) return;
+  const map = readPostDedupMap(which);
+  map[key] = Date.now();
+  for (const k of Object.keys(map)) {
+    if (Date.now() - Number(map[k] || 0) > COMMENT_POST_DEDUP_TTL_MS * 2) delete map[k];
+  }
+  saveLikeState(likeState);
+};
+// 产出草稿前用：同一帖只要已经产出过草稿（不论最后是 pending / approved / 已发 / 被人工 reject），
+// 就不再产出第二条。这是「同一 post 两条不同评论」的主闸门。
+const alreadyHasCommentDraft = (postKey: string): boolean => {
+  const key = String(postKey || '').trim().toLowerCase();
+  if (!key) return false;
+  return postDedupFresh(likeState.comments?.queuedByPostKey, key)
+    || postDedupFresh(likeState.comments?.postedByPostKey, key);
+};
+// 真正发送前用：这个帖已经发出去过评论了 → 别再发第二条（含历史遗留重复草稿）。
+const alreadyPostedComment = (postKey: string): boolean => {
+  const key = String(postKey || '').trim().toLowerCase();
+  if (!key) return false;
+  return postDedupFresh(likeState.comments?.postedByPostKey, key);
+};
 const dmSentToday = () => Number(likeState.dm?.byDay?.[getTodayKey()] || 0);
 const recordDmSent = () => {
   const k = getTodayKey();
@@ -1169,6 +1213,14 @@ const queueRapportCommentForReview = async (handle: string, _fallbackText: strin
     await page.keyboard.press('Escape').catch(() => {});
     if (!text) return null;
 
+    // 同一个帖只允许一条草稿（含 follow_back_ladder 来源）。Key 只用 postKey，不含文案/不含 handle。
+    if (alreadyHasCommentDraft(postKey)) {
+      logBehavior('comment_skip_post_already_commented', {
+        handle, postUrl, postKey, source: 'follow_back_ladder',
+      });
+      await page.keyboard.press('Escape').catch(() => {});
+      return null;
+    }
     const draftHash = hashString(`${handle}|${postUrl}|${text}`).toString(36);
     const draftId = `rapport_${Date.now()}_${draftHash.slice(0, 10)}`;
     await postJson('/api/drafts/ingest', {
@@ -1193,6 +1245,7 @@ const queueRapportCommentForReview = async (handle: string, _fallbackText: strin
         lang: 'en',
       }],
     });
+    markPostDedup('queuedByPostKey', postKey);
     recordCommentDraftQueued();
     logBehavior('comment_review_queued', {
       handle,
@@ -3080,6 +3133,14 @@ const queueCommentDraftForReview = async (
   meta: any,
   extra: Record<string, any> = {}
 ) => {
+  const draftPostKey = extractPostKey(postUrl);
+  // 同一个帖只允许一条草稿：draftHash 里含文本，换一句文案会变成"新草稿"，所以必须在文本之外单独拦。
+  if (alreadyHasCommentDraft(draftPostKey)) {
+    logBehavior('comment_skip_post_already_commented', {
+      handle, postUrl, postKey: draftPostKey, source: extra.source || 'task_review',
+    });
+    return null;
+  }
   const draftHash = hashString(`${handle}|${postUrl}|${text}`).toString(36);
   const draftId = `${Date.now()}_${draftHash.slice(0, 10)}`;
   await postJson('/api/drafts/ingest', {
@@ -3104,6 +3165,7 @@ const queueCommentDraftForReview = async (
       lang: 'en',
     }],
   });
+  markPostDedup('queuedByPostKey', draftPostKey);
   logBehavior('comment_review_queued', {
     handle,
     postUrl,
@@ -3135,6 +3197,17 @@ const tryPublishApprovedComment = async (): Promise<boolean> => {
     const text = String(item.proposed_comment || '').trim();
     logBehavior('comment_approved_publish_start', { draftId: claimedDraftId, handle, postUrl: item.post_url });
 
+    // 🛑 同一帖已发过评论 → 直接终态，不打开页面。历史遗留的重复草稿靠这一步兜底。
+    if (alreadyPostedComment(extractPostKey(String(item.post_url || '')))) {
+      logBehavior('comment_skip_post_already_commented', {
+        draftId: claimedDraftId, handle, postUrl: item.post_url, scope: 'publish',
+      });
+      await postJson(`/api/drafts/${encodeURIComponent(claimedDraftId)}/release`, {
+        reason: 'duplicate_post_already_commented',
+      }).catch(() => null);
+      return false;
+    }
+
     await page.goto(String(item.post_url), { waitUntil: 'domcontentloaded', timeout: 30000 });
     await page.waitForTimeout(jitter(1800, 3200));
     const approvedAt = String(item.approved_at || '').trim();
@@ -3153,6 +3226,7 @@ const tryPublishApprovedComment = async (): Promise<boolean> => {
     didPostToInstagram = true;
 
     const textHash = hashString(normalizeForMatch(text));
+    markPostDedup('postedByPostKey', extractPostKey(String(item.post_url || '')));
     recordCommentPublished();
     if (handle) likeState.comments!.byHandle![handle] = { lastCommentAt: Date.now() };
     likeState.comments!.recentText!.push({ ts: Date.now(), hash: textHash });
