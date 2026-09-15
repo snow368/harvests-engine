@@ -154,13 +154,18 @@ const analyzeOnce = async (imageUrl: string): Promise<VisionResult | null> => {
       attempts.push({ base: VISION_FALLBACK_BASE, model: VISION_FALLBACK_MODEL, key: VISION_FALLBACK_KEY });
     }
     for (const cfg of attempts) {
+      const tag = cfg ? `fallback ${cfg.model}` : `primary ${VISION_MODEL}`;
       try {
         const result = await analyzeWithOpenAI(imageUrl, controller.signal, cfg);
         if (result) return result;
-      } catch {
-        // 这个模型失败，换下一个继续
+        // 2026-09-15：以前这里什么都没有 → 模型改名/下线/被截断时全链路静默（实测出现
+        // "换模型后 0 条 vision 事件、日志里找不到任何原因"）。补日志，失败必须留痕。
+        console.log(`[vision_error] ${tag} 调用成功但内容不可解析（空响应或非法 JSON）`);
+      } catch (e: any) {
+        console.log(`[vision_error] ${tag} ${String(e?.message || e).replace(/\s+/g, ' ').slice(0, 240)}`);
       }
     }
+    console.log(`[vision_error] 主备均失败，本次跳过看图（${imageUrl.slice(0, 80)}）`);
     return null; // 优雅降级：视觉不可用不影响评论主流程
   } finally {
     clearTimeout(timer);
