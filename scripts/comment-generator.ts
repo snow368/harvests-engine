@@ -8,7 +8,10 @@ import path from 'node:path';
 import { buildTattooArtistContext, detectPostType, getSpanishFallback, getIntentGuidance } from './tattoo-voice';
 
 const DEEPSEEK_API_KEY = (process.env.DEEPSEEK_API_KEY || '').trim();
-const DEEPSEEK_BASE = 'https://api.deepseek.com/v1';
+const DEEPSEEK_BASE = (process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com/v1').replace(/\/+$/, '');
+// ⚠️ 2026-09-15：旧别名 `deepseek-chat` / `deepseek-reasoner` 官方已列入停用（原定 2026-07-24），
+// V4 时代应显式用正式 model id。留 env 覆盖口，方便不重启代码就换模型。
+const TEXT_MODEL = (process.env.BOT_COMMENT_TEXT_MODEL || 'deepseek-v4-flash').trim();
 const COMMENT_LANG = (process.env.BOT_COMMENT_LANG || 'auto').trim().toLowerCase(); // auto | en | es | it | pt | fr | de
 
 // Language detection via common function words + character ranges
@@ -548,7 +551,7 @@ export const getInteractionFallback = (intent = 'generic', sensitive = false, ca
 // 2026-09-11 扩充（用户实测案例）：原式只拦 "hits different"（带 s），漏掉单数 "hit different"，
 // 也漏掉 "…fr" / "value work" / "is a beast" / "reading right" 这类空腔调评语——
 // 它们不含任何关于这张图的真实信息，只是听起来像同行说话。命中即 reject → 走重试重新生成。
-const TEMPLATE_FLAVOR_RE = /\b(hits? different|buttery smooth|so buttery|so clean|crispy already|mad tight|bold af|bold will hold|doing all the heavy lifting|dialed in solid|solid work|looks proper|flow proper|value work|is a beast|reads? right|reading right)\b|\bfr\b/i;
+const TEMPLATE_FLAVOR_RE = /\b(hits? different|buttery smooth|so buttery|so clean|crispy already|mad tight|bold af|bold will hold|doing all the heavy lifting|dialed in solid|solid work|looks proper|flow proper|value work|is a beast|reads? right|reading right|insane|gorgeous|flawless|amazing|beautiful|so sick|killing it|great work|nice piece|well done|nailed it|absolutely love)\b|\bfr\b/i;
 const SUBJECT_TERMS = [
   'leaf', 'leaves', 'rose', 'roses', 'flower', 'flowers', 'skull', 'skulls', 'wolf', 'wolves',
   'eagle', 'eagles', 'ship', 'ships', 'butterfly', 'butterflies', 'snake', 'snakes', 'heart', 'hearts',
@@ -629,7 +632,7 @@ const buildPrompt = (input: CommentInput, style: string): string => {
 4. Image auto-description is only a weak last resort.`;
 
   const NEUTRAL_RULE = hasVision
-    ? `${captionPriorityRule}\nYou may reference one detail from IMAGE ANALYSIS only after grounding the comment in the caption. When the caption is thin or generic, prefer the IMAGE ANALYSIS "hook:" observation as your opening — it is what a real tattoo artist would notice first about the image. Never claim a visual quality beyond that analysis. Never invent.`
+    ? `${captionPriorityRule}\nYou may reference details from IMAGE ANALYSIS only after grounding the comment in the caption. When the caption is thin or generic, prefer the "hook:" observation as your opening — it is what a real tattoo artist would notice first about the image.\nPRECISION TARGET (2026-09-15): the most valuable anchors in IMAGE ANALYSIS are, in order, the "hook:" line, then "motif:" (the literal thing drawn), then "placement:" (body part), then "observed craft:". Always try to name ONE concrete noun from motif/placement AND pair it with one concrete craft or composition fact. "both lilies read clearly at this scale" is weak; "the lilies follow the inner forearm line, whipping out at the wrist" is right. Never praise quality in the abstract — never say clean/crisp/insane/beautiful. If you would have nothing concrete to say, say something about the specific subject instead. Never claim a visual quality beyond the analysis. Never invent.`
     : `${captionPriorityRule}\nYou CANNOT see the image — you only read text. Therefore:
 - NEVER claim visual qualities you did not observe: do NOT assert shading, linework quality, composition, contrast, color, or execution as if you saw them. (Only exception: the caption itself describes that quality — then you may echo it.)
 - You MAY reference the tattoo's subject or style, but ONLY if the post caption explicitly states it. The caption is text you can read, and the image depicts that same thing, so this is safe and relevant. Do NOT invent a subject the caption does not mention.
@@ -731,7 +734,7 @@ const callDeepSeek = async (prompt: string): Promise<string> => {
       'Authorization': `Bearer ${DEEPSEEK_API_KEY}`,
     },
     body: JSON.stringify({
-      model: 'deepseek-chat',
+      model: TEXT_MODEL,
       messages: [
         { role: 'system', content: 'Write natural Instagram comments. Read the author caption first and anchor the comment to its most distinctive concrete point. Image analysis is secondary and may be inaccurate: ignore it whenever it conflicts with or distracts from the caption. Never invent. No questions. Respond only with valid JSON.' },
         { role: 'user', content: prompt },

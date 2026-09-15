@@ -36,13 +36,17 @@ const VISION_API_KEY = ((): string => {
 export type VisionResult = {
   imageType: string;        // tattoo_on_skin | flash_art | studio | portrait | other
   tattooVisible: boolean;
-  subject: string;          // 图里纹身描绘的题材
+  motif: string;            // 2026-09-15 精准化：图上画的具体名词短语（例 "panther head with rose"）
+  subject: string;          // 兼容旧字段 = motif（下游 logBehavior 仍在用）
   subjectConfidence: 'high' | 'medium' | 'low';
+  placement: string;        // 2026-09-15：可见的身体部位（inner forearm / sternum...）
+  stage: string;            // 2026-09-15：fresh | healed | wip | unknown
   style: string;            // 视觉模型判定的风格（原始字符串）
   styleConfidence: 'high' | 'medium' | 'low';
-  craftNotes: string[];     // 2-4 条"同行能注意到的可见工艺事实"（linework/shading/composition/color/negative space）
+  craftNotes: string[];     // 2-4 条"同行能注意到的可见工艺事实"
   palette: string;          // 简短配色描述
-  commentHook: string;      // 2026-09-08 新增：同行看到图最可能脱口而出的 ONE 具体观察（陈述句，非赞美/提问）
+  commentHook: string;      // 同行看到图最可能脱口而出的 ONE 具体观察（陈述句，非赞美/提问）
+  hookUsable: boolean;      // hook 是否通过"具体性"闸门（含空腔调/赞美词则 false）
   raw: string;              // 模型原始输出（截断）
 };
 
@@ -60,15 +64,41 @@ const safeJsonParse = (text: string, fallback: any): any => {
   }
 };
 
-const VISION_PROMPT = `Analyze ONLY the currently displayed Instagram carousel frame. Return ONLY valid JSON, no prose, no markdown:
-{"imageType":"tattoo_on_skin|flash_art|studio|portrait|other","tattooVisible":true,"subject":"what the tattoo itself depicts, or empty when uncertain","subjectConfidence":"high|medium|low","style":"best-fit tattoo style or OTHER","styleConfidence":"high|medium|low","craftNotes":["0 to 3 specific, directly observable tattoo craft facts"],"palette":"short tattoo palette description, or empty","commentHook":"ONE concrete observation about THIS tattoo that a knowledgeable tattoo artist would naturally call out in a comment — craft, subject choice, placement or technique — a SHORT STATEMENT; or empty if nothing concrete stands out"}
+// 2026-09-15 精准化重写（用户要求"评论越来越精准"）：
+// 旧 prompt 把"题材"当可选项（允许留空）→ qwen-vl-plus 经常交白卷（实测 hook/subject 大量为空、
+// subjectConfidence=low），下游只能退回泛泛评语。现在强制三件套必须落地：
+//   motif（具体名词）+ placement（身体部位）+ craftNotes（可见工艺事实），
+// 并把 commentHook 钉死为「可见名词 + 一个具体工艺/构图事实」的陈述句，带正反例与禁用词表。
+const VISION_PROMPT = `You are a working tattoo artist looking at ONE Instagram frame. Report ONLY what is clearly visible. Return ONLY valid JSON, no prose, no markdown:
+{"imageType":"tattoo_on_skin|flash_art|studio|portrait|other","tattooVisible":true,"motif":"the most specific noun phrase for WHAT IS DRAWN — always name the literal thing(s), e.g. \\"panther head with a rose\\", \\"raven skull with pocket watch\\", \\"fine-line lavender sprig\\", \\"traditional dagger through a banner\\", \\"blackwork mandala\\". Leave empty ONLY when there is no tattoo in frame or the shape is too blurry to name.","subjectConfidence":"high|medium|low","placement":"the body part the tattoo sits on, e.g. \\"inner forearm\\", \\"outer calf\\", \\"sternum\\", \\"ribcage\\", \\"upper back\\" — empty when not visible","stage":"fresh|healed|wip|unknown","palette":"short palette description, or empty","style":"best-fit tattoo style or OTHER","styleConfidence":"high|medium|low","craftNotes":["0 to 3 specific observable craft facts — each MUST name a real visible property: line weight change, whip-shading direction, dot-gradient density, solid-black packing, negative-space use, symmetry, edge crispness, saturation"],"commentHook":"ONE concrete observation another tattoo artist would actually say out loud about THIS piece. MUST contain a visible NOUN (the motif or the placement) AND one concrete craft or composition fact. Max 12 words. No praise. No question."}
+Examples of GOOD commentHook values:
+- "the whip shading on that panther's jaw"
+- "solid black packing doing the depth behind the rose"
+- "that lavender sprig follows the inner forearm line"
+- "the dot gradient carries the whole background here"
+- "sternum placement sits dead centre on the sternum notch"
+Examples of USELESS hooks (never output these):
+- "so clean", "crisp linework", "this is fire", "insane detail", "love this piece", "the linework is clean", "amazing work"
 Strict evidence rules:
-- Describe the TATTOO or flash artwork, not clothing, room decor, plants, jewelry, skin marks, or background props.
-- If no tattoo/flash is clearly visible, set tattooVisible=false and leave subject/style/craftNotes/palette/commentHook empty.
-- Do not infer a leaf, flower, animal, face, lettering, or ornament from a vague shape. Use subjectConfidence=low and an empty subject when uncertain.
-- Use craft words such as crisp, clean, smooth shading, fine linework, saturation, spacing, or negative space ONLY when that exact property is clearly visible at this resolution.
-- Omit uncertain craft notes instead of guessing. Never praise quality; report neutral visual facts.
-- commentHook must be grounded in what you SEE (e.g. "the whip shading on that dragon tail", "solid black packing in the negative space", "the placement follows the calf muscle") — NEVER generic praise ("clean", "fire", "love it") and NEVER a question. It is the ONE thing a real artist peer would notice first about this specific piece.`;
+- Describe the TATTOO or flash artwork only. Ignore clothing, room decor, plants, jewelry, background props and skin marks.
+- If no tattoo/flash is clearly visible: set tattooVisible=false and leave every other field empty.
+- Never invent a motif from a vague blob. If you cannot name it literally, return an empty motif and subjectConfidence=low.
+- Use craft words ONLY when that exact property is visible at this resolution. Omit rather than guess.
+- BANNED anywhere in the output: clean, crispy, insane, fire, sick, dope, amazing, gorgeous, flawless, perfect, beautiful, "great work", "nice piece", "love this". If the only thing you can say is praise, return an empty commentHook.
+- Never praise quality in any field. Report neutral visual facts only.`;
+
+// 空腔调/纯赞美 hook 闸门：命中即判定"这条 hook 没有信息量"，下游当作没有 hook 处理。
+// 同时要求至少 3 个词 —— 单词/双词 hook 基本都是空赞美（"clean lines"）。
+const HOOK_FLAVOR_RE = /\b(clean|crispy|crisp|fire|sick|dope|insane|amazing|gorgeous|flawless|perfect|beautiful|gorgeous|slaps|beast|hits? different|great work|nice piece|love this|solid work|well done|killing it|fine shyt|insane detail)\b/i;
+export const usableHook = (hook?: string): string => {
+  const h = String(hook || '').trim();
+  if (h.length < 8) return '';
+  const words = h.split(/\s+/).filter(Boolean);
+  if (words.length < 3) return '';
+  if (HOOK_FLAVOR_RE.test(h)) return '';
+  if (/[?]$/.test(h)) return '';
+  return h;
+};
 
 /**
  * 调用视觉模型分析帖子图片。
@@ -156,7 +186,9 @@ const analyzeWithOpenAI = async (
         },
       ],
       temperature: 0.2,
-      max_tokens: 300,
+      // 2026-09-15：新增 motif/placement/stage 三个字段后 JSON 变长，300 token 会被截断
+      // → 实测出现"返回不完整 JSON → 解析失败 → 整张图当没看懂"。放宽到 500。
+      max_tokens: 500,
     }),
     signal,
   });
@@ -195,7 +227,7 @@ const analyzeWithGemini = async (imageUrl: string, signal: AbortSignal): Promise
           ],
         },
       ],
-      generationConfig: { temperature: 0.2, maxOutputTokens: 300 },
+      generationConfig: { temperature: 0.2, maxOutputTokens: 500 },
     }),
     signal,
   });
@@ -222,20 +254,29 @@ const parseVisionContent = (content: string): VisionResult | null => {
   const styleConfidence: 'high' | 'medium' | 'low' =
     confRaw === 'high' ? 'high' : confRaw === 'medium' ? 'medium' : 'low';
 
+  // 2026-09-15：subject 名改成 motif，同时保留旧字段名（下游 logBehavior 仍在读 subject）
+  const motif = String(parsed.motif ?? parsed.subject ?? '').slice(0, 120);
+  const stage = String(parsed.stage || 'unknown').toLowerCase();
+  const hook = String(parsed.commentHook || '').slice(0, 180);
+
   return {
     imageType: String(parsed.imageType || 'other').slice(0, 40),
     tattooVisible: parsed.tattooVisible === true,
-    subject: String(parsed.subject || '').slice(0, 120),
+    motif,
+    subject: motif,
     subjectConfidence: String(parsed.subjectConfidence || 'low').toLowerCase() === 'high'
       ? 'high'
       : String(parsed.subjectConfidence || 'low').toLowerCase() === 'medium' ? 'medium' : 'low',
+    placement: String(parsed.placement || '').slice(0, 60),
+    stage: ['fresh', 'healed', 'wip'].includes(stage) ? stage : 'unknown',
     style: String(parsed.style || '').slice(0, 60),
     styleConfidence,
     craftNotes: Array.isArray(parsed.craftNotes)
       ? parsed.craftNotes.map((x: any) => String(x)).slice(0, 4).map((s: string) => s.slice(0, 140))
       : [],
     palette: String(parsed.palette || '').slice(0, 80),
-    commentHook: String(parsed.commentHook || '').slice(0, 180),
+    commentHook: usableHook(hook), // 空腔调/过短的 hook 直接在此丢弃，下游拿不到 = 不会被写进 prompt
+    hookUsable: !!usableHook(hook),
     raw: content.slice(0, 500),
   };
 };
@@ -249,7 +290,12 @@ export const buildVisionDescription = (v: VisionResult): string => {
   // 2026-09-08：commentHook 置首 —— 它是视觉模型挑出的"同行最强观察"，评论生成时最值得做开场锚点；
   // 放最前面保证下游 slice 截断时优先保留（下游注入上限已同步放宽到 900 字符）。
   if (v.commentHook) parts.push(`hook: ${v.commentHook}`);
-  if (v.subject && v.subjectConfidence !== 'low') parts.push(`subject: ${v.subject} (${v.subjectConfidence})`);
+  // 2026-09-15 精准化：把新字段注入观测串，给下游 LLM 更多"可引用的具体素材"。
+  // motif 现已强制要求具体名词（上游已截断到 120 字符）；confidence 低时不注入，
+  // 避免把一个瞎猜的名词当成事实写进评论。
+  if (v.motif && v.subjectConfidence !== 'low') parts.push(`motif: ${v.motif} (${v.subjectConfidence})`);
+  if (v.placement) parts.push(`placement: ${v.placement}`);
+  if (v.stage && v.stage !== 'unknown') parts.push(`stage: ${v.stage}`);
   if (v.imageType) parts.push(`image type: ${v.imageType}`);
   if (v.craftNotes.length) parts.push(`observed craft: ${v.craftNotes.join('; ')}`);
   if (v.palette) parts.push(`palette: ${v.palette}`);

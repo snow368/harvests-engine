@@ -1154,8 +1154,12 @@ const queueRapportCommentForReview = async (handle: string, _fallbackText: strin
         captionThemeClear,
         tattooVisible: !!vision?.tattooVisible,
         imageType: vision?.imageType || '',
-        subject: vision?.subject || '',
+        subject: vision?.motif || vision?.subject || '',
         subjectConfidence: vision?.subjectConfidence || 'low',
+        placement: vision?.placement || '',
+        stage: vision?.stage || 'unknown',
+        // hookUsable=false = 视觉模型交上来的是空腔调/赞美词（已被 usableHook 丢弃）
+        hookUsable: !!vision?.hookUsable,
         craftNotes: vision?.craftNotes || [],
         hook: vision?.commentHook || '',
       });
@@ -3061,6 +3065,25 @@ const buildCommentText = async (facts?: ProfileFacts, postMeta?: any): Promise<s
   }
 };
 
+// 评论框找不到时把页面实况记下来，否则只能看到一个干巴巴的 comment_box_not_found，
+// 分不清是「页面没加载完」「帖子关了评论」还是「IG 改版换了选择器」。
+const collectCommentBoxDiagnostics = async (draftId: string) => {
+  if (!page) return;
+  try {
+    const info = await page.evaluate(() => ({
+      url: String(location.href || '').slice(0, 200),
+      title: String(document.title || '').slice(0, 120),
+      textareas: document.querySelectorAll('textarea').length,
+      editables: document.querySelectorAll('div[contenteditable="true"]').length,
+      forms: document.querySelectorAll('form').length,
+      hasArticle: !!document.querySelector('article'),
+      loggedIn: !/\/accounts\/login|challenge\//.test(String(location.href || '')),
+      snippet: String((document.body && document.body.innerText) || '').replace(/\s+/g, ' ').slice(0, 300),
+    }));
+    logBehavior('comment_box_debug', { draftId, ...info });
+  } catch {}
+};
+
 const tryPostCommentOnOpenModal = async (
   text: string,
   approval: { draftId: string; approvedAt: string; approvedBy: string }
@@ -3384,8 +3407,11 @@ const tryCommentWithStrategy = async (handle: string, facts?: ProfileFacts, like
         source: 'task_review',
         captionThemeClear,
         tattooVisible: !!vis?.tattooVisible,
-        subject: vis?.subject || '',
+        subject: vis?.motif || vis?.subject || '',
         subjectConfidence: vis?.subjectConfidence || 'low',
+        placement: vis?.placement || '',
+        stage: vis?.stage || 'unknown',
+        hookUsable: !!vis?.hookUsable,
         craftNotes: vis?.craftNotes || [],
         hook: vis?.commentHook || '',
       });

@@ -218,13 +218,22 @@ const apps = [
       //   vision-analyze.ts 自动识别「非 googleapis.com」→ 走 OpenAI image_url 分支（无需改代码）。
       //   DASHSCOPE_API_KEY 走 VPS 用户环境变量（不进 git）；留空 → isVisionEnabled()=false → 降级回纯 caption。
       //   备选 Gemini：BASE_URL=https://generativelanguage.googleapis.com/v1beta/models, MODEL=gemini-2.0-flash, API_KEY=GOOGLE_API_KEY
+      // 2026-09-15 升级：主模型换 DeepSeek-V4-Flash-Vision-Exp（2026-08-21 上线，支持图片输入，
+      //   走 api.deepseek.com 同 key，图片按 ≤384 token 计费 ≈ $0.00017/张，几乎免费）。
+      //   原 qwen-vl-plus（DashScope 最低档）识图常交白卷（hook/subject 大量为空）→ 降级为备用。
+      //   更深一层备用 qwen-vl-max-latest：主备都挂时最后兜底（需 DASHSCOPE_API_KEY）。
       BOT_VISION_ENABLED: '1',
-      BOT_VISION_MODEL: 'qwen-vl-plus',
-      BOT_VISION_BASE_URL: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-      BOT_VISION_API_KEY: process.env.DASHSCOPE_API_KEY || '',
-      // AI 评论文案（读帖子 caption）：依赖 DeepSeek deepseek-chat（纯文本，能跑）。
+      BOT_VISION_MODEL: 'deepseek-v4-flash-vision-exp',
+      BOT_VISION_BASE_URL: 'https://api.deepseek.com',
+      BOT_VISION_API_KEY: process.env.DEEPSEEK_API_KEY || '',
+      BOT_VISION_FALLBACK_MODEL: 'qwen-vl-plus',
+      BOT_VISION_FALLBACK_BASE_URL: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      BOT_VISION_FALLBACK_KEY: process.env.DASHSCOPE_API_KEY || '',
+      // AI 评论文案（读帖子 caption）：V4 时代显式用正式 model id，
+      //   旧别名 deepseek-chat 官方已列入停用（原定 2026-07-24，务必不要再退回）。
       //   DEEPSEEK_API_KEY 同样走 VPS 用户环境变量（不进 git）。
       DEEPSEEK_API_KEY: process.env.DEEPSEEK_API_KEY || '',
+      BOT_COMMENT_TEXT_MODEL: 'deepseek-v4-flash',
       // 放宽 round 1（Stage B，待观察 Stage A 后 push）：点赞目标降到 2 篇（DM 闸门本就需 ≥2 赞）、
       //   点赞间隔降到 4h、评论间隔降到 4h → 回关号 ~4h 即攒够 ≥2 赞 + 1 评跨过 DM-able 门槛（Stage A 为 ~8h）
       RAPPORT_LIKE_TARGET: '2',
