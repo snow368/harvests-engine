@@ -196,7 +196,7 @@ const apps = [
       BOT_LIKE_COOLDOWN_MAX_HOURS: '72',
       // 评论：80 条数据中生成 15-25 条待审草稿；人工审核后每天最多发布 12 条。
       BOT_COMMENT_ENABLED: 'true',
-      BOT_COMMENT_CHANCE: '0.4',
+      // （评论抽签率 BOT_COMMENT_CHANCE 见下方「互动优先策略」区块）
       BOT_COMMENT_DRAFT_DAILY_MIN: '15',
       BOT_COMMENT_DRAFT_DAILY_MAX: '25',
       BOT_COMMENT_PUBLISH_DAILY_MAX: '12',
@@ -204,15 +204,27 @@ const apps = [
       BOT_COMMENT_PUBLISH_INTERVAL_MIN_SEC: '480',
       BOT_COMMENT_PUBLISH_INTERVAL_MAX_SEC: '1200',
       // 关注：2026-09-07 起【自动关注全关】——following 600+/粉丝十几严重失衡，关注改为手动；
-      //   点赞/评论/回关不受影响（回关由 BOT_FOLLOW_BACK_ENABLED 独立控制，默认 true）。
-      //   等粉丝数上来再评估是否重开自动关注（届时可放开 BOT_FOLLOW_DAILY_MIN/MAX 3-8）。
+      //   2026-09-15 用户拍板：连「回关」也关（BOT_FOLLOW_BACK_ENABLED=false），
+      //   策略改为「不关注任何人，靠互动吸引对方关注我们」：点赞/评论/回赞全保留。
+      //   （注：VPS 那份历史上写的是 'true' → 与模板漂移，已导致 9/15 仍在 follow 别人。）
       BOT_FOLLOW_ENABLED: 'false',
+      BOT_FOLLOW_BACK_ENABLED: 'false',
       BOT_FOLLOW_DAILY_MIN: '3',
       BOT_FOLLOW_DAILY_MAX: '8',
       BOT_FOLLOW_MIN_TOUCHES: '1',
       // 关注优先级闸门：'*' = 所有任务层级都允许关注（scheduler 当前不注入 followPriority，留空即放行；
       //   '*' 为未来按优先级排程留余地，同时避免误设为仅 high 卡住关注量）。
       BOT_FOLLOW_PRIORITIES: '*',
+      // ── 互动优先策略（2026-09-15）：不关注任何人，把预算全给互动 ──
+      // 回赞：对方赞/评过我们的帖子或评论 → 我们回赞 TA 一篇帖（对方收到通知 → 回访主页）。
+      //   = 零关注成本的增长动作；AUDIENCE_LIKE_DAILY_MAX 同时是"互动者回流"和"暖受众"两条通道的日预算。
+      AUDIENCE_LIKE_DAILY_MAX: '20',
+      // 回关 rapport 阶梯（仅对「对方已关注我们」的号）：赞帖 2 篇 → 真诚评论 → 赞对方评论 → DM。
+      //   这是 DM-able 漏斗的燃料，与回赞预算解耦；30 表示每天最多推进 30 个 rapport 动作。
+      BOT_RAPPORT_DAILY_MAX: '30',
+      BOT_DM_DAILY_MAX: '15',
+      // 评论抽签率：每次访问目标号生成草稿的概率（0.4 → 0.7，评论是涨粉主力动作）
+      BOT_COMMENT_CHANCE: '0.7',
       // 视觉分析（Qwen-VL 多模态，经阿里云 DashScope OpenAI 兼容端点）：看图产出图观测，注入评论生成。
       //   Qwen-VL 原生支持 image_url（服务端拉取远程图），比 Gemini 更易拿额度（国内/支付宝免费额度）。
       //   vision-analyze.ts 自动识别「非 googleapis.com」→ 走 OpenAI image_url 分支（无需改代码）。

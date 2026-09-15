@@ -1037,7 +1037,7 @@ const recordRapport = () => {
 };
 
 // 给某号近期帖子点 n 篇赞（建立"同行在关注你"的好感信号）。返回实际点赞数。
-const rapportLikePosts = async (handle: string, n: number): Promise<number> => {
+const rapportLikePosts = async (handle: string, n: number, countRapport = true): Promise<number> => {
   if (!page) return 0;
   try {
     await openProfile(handle);
@@ -1053,7 +1053,7 @@ const rapportLikePosts = async (handle: string, n: number): Promise<number> => {
         if ((await likeBtn.count()) > 0) {
           await likeBtn.click({ timeout: 6000 }).catch(() => {});
           liked++;
-          recordRapport();
+          if (countRapport) recordRapport();
           recordInteraction(handle, 'like', { rapport: true, reason: 'follow_back_ladder' }).catch(() => {});
         }
         await page.keyboard.press('Escape').catch(() => {});
@@ -1062,6 +1062,25 @@ const rapportLikePosts = async (handle: string, n: number): Promise<number> => {
     }
     return liked;
   } catch { return 0; }
+};
+
+// ── 回赞（like-back）：2026-09-15 用户拍板「不主动关注，改靠互动吸引对方关注」──
+// 场景：对方先赞/评了我们的帖子或评论 → 我们回赞 TA 的一篇帖。
+// 对方会收到 "peachtattoosupplyraiha liked your post" 通知 → 回访我们主页 → 关注我们。
+// 这是零关注成本的增长动作（不增加 following），与回关 rapport 阶梯的日预算解耦。
+const LIKE_BACK_DAILY_MAX = Math.max(0, Number(process.env.AUDIENCE_LIKE_DAILY_MAX || 20));
+const likeBackToday = () => Number((likeState as any).likeBackByDay?.[getTodayKey()] || 0);
+const recordLikeBack = () => {
+  const k = getTodayKey();
+  if (!(likeState as any).likeBackByDay) (likeState as any).likeBackByDay = {};
+  (likeState as any).likeBackByDay[k] = ((likeState as any).likeBackByDay[k] || 0) + 1;
+};
+const likeBackEngager = async (handle: string): Promise<number> => {
+  if (!page) return 0;
+  if (LIKE_BACK_DAILY_MAX > 0 && likeBackToday() >= LIKE_BACK_DAILY_MAX) return 0;
+  const got = await rapportLikePosts(handle, 1, false).catch(() => 0);
+  if (got > 0) recordLikeBack();
+  return got;
 };
 
 // 自己的账号绝不自我互动（2026-09-14 用户拍板）：回关队列/取粉来源里偶尔会把
@@ -1520,7 +1539,9 @@ const checkCommentEngagers = async () => {
   try {
     commentEngagerTick = (commentEngagerTick + 1) % 20;
     if (commentEngagerTick !== 0) return;
-    if (!BOT_FOLLOW_ENABLED || !page) return;
+    // 2026-09-15：不再依赖 BOT_FOLLOW_ENABLED。关掉主动关注后这条"互动者回流"通道改为
+    //   回赞（对方收到通知 → 回访我们主页），关注动作单独由 BOT_FOLLOW_BACK_ENABLED 控制。
+    if (!page) return;
     const selfIds = new Set([BOT_ID, ...(ACCOUNT_IDS || [])].map((x) => String(x).toLowerCase()));
     // 1) 扫通知 Others 页（含"赞了你的评论/回复了你的评论"的互动信号）
     await page.goto(`${IG_BASE}/notifications/others/`, { waitUntil: 'domcontentloaded', timeout: 45000 });
@@ -1568,15 +1589,32 @@ const checkCommentEngagers = async () => {
       } catch {}
       await sleep(jitter(2500, 5000));
     }
-    // 4) Pass B：遍历持久化状态，次日已到点的 tattoo 互动者才真正回关（不依赖当前页）
+    // 4) Pass B：遍历持久化状态，次日已到点的 tattoo 互动者 → 先「回赞」建立互动；
+    //    回关仅当 BOT_FOLLOW_BACK_ENABLED 开时执行（默认关，关掉不影响回赞）
     for (const h of Object.keys(likeState.follows?.byHandle || {})) {
       const st = likeState.follows!.byHandle![h] as any;
-      if (!st || st.followedAt || !st.commentEngagerFollowAt) continue;
+      if (!st || !st.commentEngagerFollowAt) continue;
       if (Date.now() < st.commentEngagerFollowAt) continue;
       if (st.commentEngagerSubject && st.commentEngagerSubject !== 'tattoo') continue; // 仅 tattoo 相关
-      logBehavior('comment_engager_follow', { handle: h });
-      recordInteraction(h, 'follow', { reason: 'comment_engager', subject: st.commentEngagerSubject || 'tattoo' }).catch(() => {});
-      await reciprocalFollowBack(h);
+      // ① 回赞对方最新一篇帖（对方收到 "liked your post" 通知 → 回访/关注我们的主力信号）
+      if (!st.commentEngagerLikedAt) {
+        const got = await likeBackEngager(h).catch(() => 0);
+        if (got > 0) {
+          st.commentEngagerLikedAt = Date.now();
+          saveLikeState(likeState);
+          logBehavior('comment_engager_like_back', { handle: h, liked: got, dayCount: likeBackToday(), dayCap: LIKE_BACK_DAILY_MAX });
+          await sleep(jitter(3000, 6000));
+        } else if (LIKE_BACK_DAILY_MAX > 0 && likeBackToday() >= LIKE_BACK_DAILY_MAX) {
+          break; // 今日回赞预算用尽：不标记已完成，下一轮/明天继续
+        }
+      }
+      // ② 回关（可选，默认关）
+      if (!BOT_FOLLOW_BACK_ENABLED || st.followedAt) continue;
+      const followed = await reciprocalFollowBack(h);
+      if (followed) {
+        logBehavior('comment_engager_follow', { handle: h });
+        recordInteraction(h, 'follow', { reason: 'comment_engager', subject: st.commentEngagerSubject || 'tattoo' }).catch(() => {});
+      }
       await sleep(jitter(3000, 6000));
     }
   } catch {}
@@ -1631,12 +1669,15 @@ const checkWhoLikedUs = async (): Promise<void> => {
 // 主动关注我们自己帖子下「点赞/评论过」的人——他们已对我们的内容感兴趣，回关率远高于冷触达 artist。
 // 与 checkWhoLikedUs 的区别：后者只标记「已认识粉丝」的赞；本函数发现并关注「新」暖线索，扩大漏斗顶部。
 // 受 AUDIENCE_FOLLOW_DAILY_MAX（默认 20）+ 限制信号检测保护；AUDIENCE_DM_ENABLED 为真时对关注的暖线索发软性 DM。
+// 2026-09-15 双模式：BOT_FOLLOW_ENABLED=false（当前策略）→ 只回赞不关注，受 AUDIENCE_LIKE_DAILY_MAX（默认 20）阀值。
 let audienceTick = 0;
 const checkAudienceReciprocate = async () => {
   try {
     audienceTick = (audienceTick + 1) % 20;
     if (audienceTick !== 0) return;
-    if (!BOT_FOLLOW_ENABLED || !page) return;
+    // 2026-09-15：不再依赖 BOT_FOLLOW_ENABLED —— 关掉主动关注后本通道降级为「回赞」模式
+    //   （对方赞/评过我们的帖子 → 我们回赞 TA 一篇帖），关注动作仍只在 BOT_FOLLOW_ENABLED 开时做。
+    if (!page) return;
     const me = (ACCOUNT_IDS && ACCOUNT_IDS[0]) || '';
     if (!me) return;
     const dayKey = todayKey();
@@ -1685,6 +1726,21 @@ const checkAudienceReciprocate = async () => {
       if (followedToday >= followCap && dmToday >= dmCap) break;
       if (selfIds.has(h.toLowerCase())) continue;
       const st: any = (likeState.follows!.byHandle![h] || (likeState.follows!.byHandle![h] = {}));
+      // ── 关注关闭时（默认）：本通道只做「回赞」——对方已对我们的内容表示过兴趣，
+      //    回赞 TA 一篇帖 = 对方收到通知 → 回访我们主页，零关注成本的增长动作。──
+      if (!BOT_FOLLOW_ENABLED) {
+        if (st.audienceLikedAt) continue;
+        if (LIKE_BACK_DAILY_MAX > 0 && likeBackToday() >= LIKE_BACK_DAILY_MAX) break;
+        const got = await likeBackEngager(h).catch(() => 0);
+        if (got > 0) {
+          st.audienceLikedAt = Date.now();
+          saveLikeState(likeState);
+          recordInteraction(h, 'like', { audience: true, reason: 'audience_like_back' }).catch(() => {});
+          logBehavior('audience_like_back', { handle: h, dayCount: likeBackToday(), dayCap: LIKE_BACK_DAILY_MAX });
+        }
+        await sleep(jitter(3000, 6000));
+        continue;
+      }
       if (st.followedAt) continue; // 已关注过，跳过
       if (followedToday >= followCap) continue; // 已达关注上限，本轮回填只处理新关注的
       const ok = await followAudienceLead(h);
