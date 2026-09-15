@@ -104,6 +104,10 @@ type GeneratedComment = {
   text: string;
   style: string;
   tokens?: number;
+  // 2026-09-15：`comment_skip_generation_failed` 以前只有事件名、没有原因，
+  // 分不清「API 挂了 / 太短 / 没过 grounding / 与历史太像」,排查只能靠猜。
+  // 失败时把这个原因带出去（调用方去 logBehavior 里落库）。
+  reason?: string;
 };
 
 const safeJsonParse = (text: string, fallback: any) => {
@@ -761,7 +765,7 @@ export const generateComment = async (input: CommentInput): Promise<GeneratedCom
   if (!DEEPSEEK_API_KEY) {
     // No model means no grounded draft. A generic fallback creates plausible
     // sounding but unverified visual claims, so fail closed instead.
-    return { text: '', style: 'skipped_no_model' };
+    return { text: '', style: 'skipped_no_model', reason: 'no_api_key' };
   }
 
   // ⚠️ 2026-08-14 修订：移除 question 风格。权重重偏「针对当帖的具体观察陈述」：
@@ -789,21 +793,29 @@ export const generateComment = async (input: CommentInput): Promise<GeneratedCom
   if (sensitive && (style === 'slang' || style === 'detail_focused')) style = 'casual';
 
   // 最多重试3次生成不重复的评论
+  let lastReason = 'unknown';
   for (let attempt = 0; attempt < 3; attempt++) {
     // 重试时降级上下文防重复，但高风格时继续走 detail_focused 保持细节化，不退回泛泛赞美
     const retryStyle = (attempt > 0 && style === 'short_praise') ? 'casual' : style;
     const prompt = buildPrompt(input, retryStyle);
-    const raw = await callDeepSeek(prompt);
+    let raw = '';
+    try {
+      raw = await callDeepSeek(prompt);
+    } catch (e: any) {
+      // 不再让异常一路冒泡成「无原因的失败」：记下真正的错误再收摊
+      lastReason = `api_error:${String(e?.message || e).slice(0, 160)}`;
+      break;
+    }
     const parsed = safeJsonParse(raw, { text: raw.slice(0, 100), style });
 
     let text = String(parsed.text || '').trim();
     // 清理常见的 AI 废话
     text = text.replace(/^(here's|here is|sure|okay|of course|absolutely)[,:!. ]+/i, '');
     text = text.replace(/[""]/g, '"').replace(/['']/g, "'");
-    if (!text || text.length < 3) continue;
+    if (!text || text.length < 3) { lastReason = `too_short(model=${TEXT_MODEL})`; continue; }
     // Never truncate a generated sentence: that can cut off a word or clause.
-    if (!validateCommentGrounding(text, input)) continue;
-    if (isTooSimilar(text)) continue;
+    if (!validateCommentGrounding(text, input)) { lastReason = 'grounding_fail'; continue; }
+    if (isTooSimilar(text)) { lastReason = 'too_similar'; continue; }
 
     // 加入历史去重
     recentCommentTexts.push(text);
@@ -814,7 +826,7 @@ export const generateComment = async (input: CommentInput): Promise<GeneratedCom
   }
 
   // Low-confidence or repeatedly invalid generations should not create a draft.
-  return { text: '', style: 'skipped_quality_gate' };
+  return { text: '', style: 'skipped_quality_gate', reason: lastReason };
 };
 
 /**

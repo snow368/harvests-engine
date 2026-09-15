@@ -3083,7 +3083,10 @@ const tryFollowOnProfile = async (handle: string, likeSummary: LikeActionSummary
   return { attempted: 1, followed: 1, skipped: false };
 };
 
-const buildCommentText = async (facts?: ProfileFacts, postMeta?: any): Promise<string> => {
+// 2026-09-15：返回 { text, diag } 而不是裸字符串 —— 失败时把原因带出去落库，
+// 否则 `comment_skip_generation_failed` 只有事件名，分不清「API 错 / 太短 / 没过 grounding / 太像历史」。
+type CommentGenResult = { text: string; diag: string };
+const buildCommentText = async (facts?: ProfileFacts, postMeta?: any): Promise<CommentGenResult> => {
   // ⚠️ 不再优先取预热池：池里是启动时脱离具体帖生成的泛评，回在真实帖上最像 bot。
   // 改为实时按帖生成；失败时不排入草稿，避免脱离真实 caption 的泛评。
   // DeepSeek 实时生成
@@ -3093,7 +3096,7 @@ const buildCommentText = async (facts?: ProfileFacts, postMeta?: any): Promise<s
   const styleConf = postMeta?.styleConfidence || 'low';
 
   try {
-    const result = await Promise.race([
+    const result: any = await Promise.race([
       generateComment({
         caption: postMeta?.caption?.slice(0, 700) || facts?.sampleCaption?.slice(0, 700),
         imageAlt: postMeta?.imageAlt || facts?.imageAltHints?.join(' ').slice(0, 200),
@@ -3115,9 +3118,13 @@ const buildCommentText = async (facts?: ProfileFacts, postMeta?: any): Promise<s
         setTimeout(() => reject(new Error('comment_gen_timeout')), 20000)
       ),
     ]);
-    return result.text;
-  } catch {
-    return '';
+    const text = String(result?.text || '');
+    return {
+      text,
+      diag: text.trim() ? 'ok' : `empty:${result?.reason || result?.style || 'unknown'}`,
+    };
+  } catch (e: any) {
+    return { text: '', diag: `throw:${String(e?.message || e).slice(0, 160)}` };
   }
 };
 
@@ -3539,7 +3546,7 @@ const tryCommentWithStrategy = async (handle: string, facts?: ProfileFacts, like
   // 注意：social 帖已在候选筛选阶段(intentEngagement==='tattoo' 闸门)剔除，
   // 这里不再用视觉补判社交——QWEN 只负责读图喂评论，不决定评不评。
 
-  const text = await buildCommentText(facts, {
+  const gen = await buildCommentText(facts, {
     ...chosen.meta,
     style: tempStyle,
     styleConfidence: tempConf,
@@ -3552,8 +3559,18 @@ const tryCommentWithStrategy = async (handle: string, facts?: ProfileFacts, like
     postTone: reconciledIntent.tone,
     sensitive: reconciledIntent.sensitive,
   });
+  const text = gen.text;
   if (!text.trim()) {
-    logBehavior('comment_skip_generation_failed', { handle, postUrl: chosen.meta?.url || '', source: 'task_review' });
+    logBehavior('comment_skip_generation_failed', {
+      handle,
+      postUrl: chosen.meta?.url || '',
+      source: 'task_review',
+      // 空 = 模型没吐可用文案；非空 = 真原因（api_error / too_short / grounding_fail / too_similar / timeout）
+      diag: gen.diag,
+      visionUsed: !!visionDescription,
+      style: tempStyle,
+      styleConfidence: tempConf,
+    });
     return { attempted: 1, posted: 0, skipped: true, reason: 'comment_generation_failed' };
   }
   pruneRecentCommentHashes();
