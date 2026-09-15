@@ -25,6 +25,28 @@ const VISION_FALLBACK_MODEL = (process.env.BOT_VISION_FALLBACK_MODEL || '').trim
 const VISION_FALLBACK_BASE = (process.env.BOT_VISION_FALLBACK_BASE_URL || '').trim();
 const VISION_FALLBACK_KEY = (process.env.BOT_VISION_FALLBACK_KEY || '').trim();
 
+// 2026-09-15 A/B 影子对照（评测用）：主模型跑完后，用第二个视觉模型对同一张图再跑一次，
+// 结果只进日志、不参与任何决策。用来在真实 IG 图上成对比较 hookUsable / motif 命中率，
+// 避免"换模型靠感觉"。三个变量都配齐才启用；删掉 env 即彻底关闭（零额外开销）。
+const SHADOW_MODEL = (process.env.BOT_VISION_SHADOW_MODEL || '').trim();
+const SHADOW_BASE = (process.env.BOT_VISION_SHADOW_BASE_URL || '').trim();
+const SHADOW_KEY = (process.env.BOT_VISION_SHADOW_KEY || '').trim();
+const SHADOW_TIMEOUT_MS = Number(process.env.BOT_VISION_SHADOW_TIMEOUT_MS || '30000');
+
+const shadowEnabled = (): boolean => !!SHADOW_MODEL && !!SHADOW_BASE && !!SHADOW_KEY;
+
+export type VisionShadowResult = {
+  model: string;
+  ms: number;
+  ok: boolean;              // 调用是否成功（false = 报错/返回不可解析）
+  hookUsable: boolean;
+  commentHook: string;
+  motif: string;
+  placement: string;
+  craftNoteCount: number;
+  error?: string;
+};
+
 const isGemini = (): boolean => VISION_BASE.includes('googleapis.com');
 
 // key 解析：显式 BOT_VISION_API_KEY 优先；否则 Gemini 后端用 GOOGLE_API_KEY，OpenAI 后端用 DEEPSEEK_API_KEY
@@ -48,6 +70,8 @@ export type VisionResult = {
   commentHook: string;      // 同行看到图最可能脱口而出的 ONE 具体观察（陈述句，非赞美/提问）
   hookUsable: boolean;      // hook 是否通过"具体性"闸门（含空腔调/赞美词则 false）
   raw: string;              // 模型原始输出（截断）
+  // 仅当配置 BOT_VISION_SHADOW_* 时存在：第二个模型在同一张图上的对照结果（不参与决策）
+  shadow?: VisionShadowResult;
 };
 
 export const isVisionEnabled = (): boolean => VISION_ENABLED && !!VISION_API_KEY;
@@ -107,7 +131,17 @@ export const usableHook = (hook?: string): string => {
  */
 export const analyzePostImage = async (imageUrl: string): Promise<VisionResult | null> => {
   if (!isVisionEnabled() || !imageUrl) return null;
+  const primary = await analyzeOnce(imageUrl);
+  // 影子模型只在配齐 env 时跑，且跑在主链路之外：结果不参与任何决策、失败静默。
+  if (primary && shadowEnabled()) {
+    primary.shadow = await runShadowCompare(imageUrl);
+    logShadowCompare(primary);
+  }
+  return primary;
+};
 
+// 单次完整识别（主 → 备降级），带整体超时。
+const analyzeOnce = async (imageUrl: string): Promise<VisionResult | null> => {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), VISION_TIMEOUT_MS);
   try {
@@ -130,6 +164,63 @@ export const analyzePostImage = async (imageUrl: string): Promise<VisionResult |
     return null; // 优雅降级：视觉不可用不影响评论主流程
   } finally {
     clearTimeout(timer);
+  }
+};
+
+// 同一张图用影子模型再跑一遍 —— A/B 评测专用，只产出观测数据。
+const runShadowCompare = async (imageUrl: string): Promise<VisionShadowResult> => {
+  const t0 = Date.now();
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), SHADOW_TIMEOUT_MS);
+  try {
+    const r = await analyzeWithOpenAI(imageUrl, ctrl.signal, {
+      base: SHADOW_BASE,
+      model: SHADOW_MODEL,
+      key: SHADOW_KEY,
+    });
+    return {
+      model: SHADOW_MODEL,
+      ms: Date.now() - t0,
+      ok: !!r,
+      hookUsable: !!r?.hookUsable,
+      commentHook: r?.commentHook || '',
+      motif: r?.motif || '',
+      placement: r?.placement || '',
+      craftNoteCount: r?.craftNotes?.length || 0,
+    };
+  } catch (e: any) {
+    return {
+      model: SHADOW_MODEL,
+      ms: Date.now() - t0,
+      ok: false,
+      hookUsable: false,
+      commentHook: '',
+      motif: '',
+      placement: '',
+      craftNoteCount: 0,
+      error: String(e?.message || e).slice(0, 160),
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+};
+
+// 一行日志同时打主/影结果 → PM2 日志里 grep `[vision_shadow]` 即可逐条对照。
+const logShadowCompare = (primary: VisionResult): void => {
+  const s = primary.shadow;
+  if (!s) return;
+  try {
+    console.log(`[vision_shadow] ${JSON.stringify({
+      primaryModel: VISION_MODEL,
+      primaryHookUsable: primary.hookUsable,
+      primaryHook: primary.commentHook,
+      primaryMotif: primary.motif,
+      primaryPlacement: primary.placement,
+      primaryCraftNotes: primary.craftNotes.length,
+      shadow: s,
+    })}`);
+  } catch {
+    // 日志绝不能把主流程搞崩
   }
 };
 
