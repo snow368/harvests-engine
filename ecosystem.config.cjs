@@ -223,8 +223,11 @@ const apps = [
       //   这是 DM-able 漏斗的燃料，与回赞预算解耦；30 表示每天最多推进 30 个 rapport 动作。
       BOT_RAPPORT_DAILY_MAX: '30',
       BOT_DM_DAILY_MAX: '15',
-      // 评论抽签率：每次访问目标号生成草稿的概率（0.4 → 0.7，评论是涨粉主力动作）
-      BOT_COMMENT_CHANCE: '0.7',
+      // 评论抽签率：每次访问目标号生成草稿的概率。
+      //   0.4 → 1（2026-09-15 定）：不关注任何人之后，评论是唯一的涨粉主力动作，抽签率拉满；
+      //   真正的日闸门是 BOT_COMMENT_DRAFT_DAILY_MIN/MAX（15-25），不是这里。
+      //   ⚠️ VPS 实测长期就是 1，曾因本模板写 0.7 被误改小（改小 = 直接少 30% 评论）。
+      BOT_COMMENT_CHANCE: '1',
       // 视觉分析（Qwen-VL 多模态，经阿里云 DashScope OpenAI 兼容端点）：看图产出图观测，注入评论生成。
       //   Qwen-VL 原生支持 image_url（服务端拉取远程图），比 Gemini 更易拿额度（国内/支付宝免费额度）。
       //   vision-analyze.ts 自动识别「非 googleapis.com」→ 走 OpenAI image_url 分支（无需改代码）。
