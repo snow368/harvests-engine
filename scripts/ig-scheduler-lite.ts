@@ -34,6 +34,15 @@ const CLOUD_API_BASE = (process.env.CLOUD_API_BASE || 'https://harvests.pages.de
 const BOT_API_TOKEN = (process.env.BOT_API_TOKEN || 'vps-bot-secret-2024').trim();
 const SCHEDULER_INTERVAL_MS = Math.max(15 * 60_000, Number(process.env.SCHEDULER_INTERVAL_MS || 60 * 60_000));
 
+// 所有出站请求都带超时。Node 的 fetch **默认没有超时**：对端不回包就永久挂住，
+// 而且一行日志都不打 —— 2026-09-16 实锤：VPS 重启后打了 banner + bot-prefs，
+// 之后 Created 一行永远不出现、D1 里也没有新任务，看日志像"什么都没发生"。
+// 加超时后 → 抛错 → 走各自 catch → 变成一条可见的 error 日志。
+const FETCH_TIMEOUT_MS = Math.min(120_000, Math.max(3_000, Number(process.env.SCHEDULER_FETCH_TIMEOUT_MS) || 20_000));
+async function fetchT(url: string, init: any = {}): Promise<Response> {
+  return await fetch(url, { ...init, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+}
+
 const ENV_PATH = path.resolve(process.cwd(), '.env');
 
 // ============ Load .env ============
@@ -54,7 +63,7 @@ async function fetchArtists(limit = 200): Promise<any[]> {
     // 这批号基本都落在 7 天去重窗口里 → /api/tasks/create 全部拒收 → 日志刷 `Created 0/N`。
     // 这就是 2026-09-10 起排产器整周一条都排不出来的原因。
     // 实测（2026-09-16 同一时刻）：不带 total=1439（混着已派过的）；带 total=888（= 真实可用量）。
-    const resp = await fetch(`${CLOUD_API_BASE}/api/automation/artists?limit=${limit}&excludeRecentlyTasked=1`);
+    const resp = await fetchT(`${CLOUD_API_BASE}/api/automation/artists?limit=${limit}&excludeRecentlyTasked=1`);
     if (!resp.ok) {
       console.error(`[ig-scheduler] artists API error ${resp.status}`);
       return [];
@@ -101,7 +110,7 @@ async function main() {
   // 读不到偏好时回退：likes=2, comments=1, follows=0（默认），且按账号阶段定模式。
   let prefs: any = null;
   try {
-    const pRes = await fetch(`${CLOUD_API_BASE}/api/automation/bot-prefs/by-bot?botId=${encodeURIComponent(BOT_ID)}&token=${BOT_API_TOKEN}`);
+    const pRes = await fetchT(`${CLOUD_API_BASE}/api/automation/bot-prefs/by-bot?botId=${encodeURIComponent(BOT_ID)}&token=${BOT_API_TOKEN}`);
     if (pRes.ok) {
       const pData = await pRes.json() as any;
       if (pData?.prefs) prefs = pData.prefs;
@@ -125,7 +134,7 @@ async function main() {
   // 今日配额 — 从 Cloud API 读 D1 统计（按 source 限定，别的供货脚本不占排产器的额度）
   let todayCount = 0;
   try {
-    const resp = await fetch(`${CLOUD_API_BASE}/api/tasks/count?botId=${encodeURIComponent(BOT_ID)}&source=ig_scheduler_lite&token=${BOT_API_TOKEN}`);
+    const resp = await fetchT(`${CLOUD_API_BASE}/api/tasks/count?botId=${encodeURIComponent(BOT_ID)}&source=ig_scheduler_lite&token=${BOT_API_TOKEN}`);
     if (resp.ok) {
       const data = await resp.json() as any;
       todayCount = Number(data?.todayCount || 0);
@@ -197,7 +206,7 @@ async function main() {
   let created = 0;
   if (batch.length > 0) {
     try {
-      const resp = await fetch(`${CLOUD_API_BASE}/api/tasks/create?token=${BOT_API_TOKEN}`, {
+      const resp = await fetchT(`${CLOUD_API_BASE}/api/tasks/create?token=${BOT_API_TOKEN}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ tasks: batch }),
