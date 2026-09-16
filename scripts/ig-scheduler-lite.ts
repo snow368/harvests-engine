@@ -20,6 +20,12 @@ import path from 'node:path';
 const BOT_ID = process.env.SCHEDULER_BOT_ID || 'bot_ig_01';
 const DAILY_LIMIT = Number(process.env.SCHEDULER_DAILY_LIMIT) || 80;
 const BATCH_SIZE = Math.min(20, Math.max(1, Number(process.env.SCHEDULER_BATCH_SIZE) || 10));
+// 单轮最多排多少条。本进程小时级运行，所以「日限 / 24」≈ 单轮上限，把全天量摊匀。
+// 为什么需要它（2026-09-16 实锤）：日限是「一天的总池子」，一次跑就吃掉，
+// 之后 23 次运行全部 Created 0 → bot 约 8-9 条/小时，11 小时吃完当天货 →
+// 剩下 13 小时完全空转（且那 13 小时正好是美国白天，帖子互动最差的时间段）。
+// 默认 3 = 72/天，**低于默认日限 80，所以永远碰不到日限闸门** → 不需要改任何 env 即可全天供上。
+const MAX_PER_RUN = Math.min(50, Math.max(1, Number(process.env.SCHEDULER_MAX_PER_RUN) || 3));
 const TARGET_STATE = (process.env.SCHEDULER_STATE || 'ALL').trim().toUpperCase();
 // 多州定向（西语浓度高州测试用）：SCHEDULER_STATES='TX,CA,FL' 优先于单州 SCHEDULER_STATE
 const TARGET_STATES = (process.env.SCHEDULER_STATES || '')
@@ -43,7 +49,12 @@ if (fs.existsSync(ENV_PATH)) {
 // ============ Fetch artists from Cloud API (D1) ============
 async function fetchArtists(limit = 200): Promise<any[]> {
   try {
-    const resp = await fetch(`${CLOUD_API_BASE}/api/automation/artists?limit=${limit}`);
+    // excludeRecentlyTasked=1 —— 让服务端用 7 天去重把「已派过的号」排除掉。
+    // 不加这个参数时，端点返回的是**固定候选窗口**（按 shop_name 最前 N 个），
+    // 这批号基本都落在 7 天去重窗口里 → /api/tasks/create 全部拒收 → 日志刷 `Created 0/N`。
+    // 这就是 2026-09-10 起排产器整周一条都排不出来的原因。
+    // 实测（2026-09-16 同一时刻）：不带 total=1439（混着已派过的）；带 total=888（= 真实可用量）。
+    const resp = await fetch(`${CLOUD_API_BASE}/api/automation/artists?limit=${limit}&excludeRecentlyTasked=1`);
     if (!resp.ok) {
       console.error(`[ig-scheduler] artists API error ${resp.status}`);
       return [];
@@ -111,10 +122,10 @@ async function main() {
   const today = new Date().toISOString().slice(0, 10);
   const startOfDay = new Date(today).getTime();
 
-  // 今日配额 — 从 Cloud API 读 D1 统计
+  // 今日配额 — 从 Cloud API 读 D1 统计（按 source 限定，别的供货脚本不占排产器的额度）
   let todayCount = 0;
   try {
-    const resp = await fetch(`${CLOUD_API_BASE}/api/tasks/count?botId=${encodeURIComponent(BOT_ID)}&token=${BOT_API_TOKEN}`);
+    const resp = await fetch(`${CLOUD_API_BASE}/api/tasks/count?botId=${encodeURIComponent(BOT_ID)}&source=ig_scheduler_lite&token=${BOT_API_TOKEN}`);
     if (resp.ok) {
       const data = await resp.json() as any;
       todayCount = Number(data?.todayCount || 0);
@@ -127,9 +138,11 @@ async function main() {
     console.log(`[ig-scheduler] Quota used (${todayCount}/${effectiveLimit}, stage=${acctStage})`);
     return;
   }
+  // 本轮配额 = min(今日剩余, 单轮上限) —— 把日限摊到全天，避免「一次排满、其余 23 轮空转」
+  const runQuota = Math.max(1, Math.min(remaining, MAX_PER_RUN));
 
-  // 从 Cloud API (D1) 读 artists
-  const artists = await fetchArtists(Math.min(remaining * 3, 200));
+  // 从 Cloud API (D1) 读 artists（多抓几倍，抵消 handle 合法性过滤的损耗）
+  const artists = await fetchArtists(Math.min(runQuota * 4, 200));
   if (!artists.length) {
     const scope = TARGET_STATES.length ? TARGET_STATES.join(',') : (TARGET_STATE !== 'ALL' ? TARGET_STATE : '');
     console.log(`[ig-scheduler] No new artists available${scope ? ' for ' + scope : ''}`);
@@ -150,6 +163,7 @@ async function main() {
   const batch: Array<{ id: string; payload: any; runAt: number }> = [];
 
   for (const artist of artists) {
+    if (batch.length >= runQuota) break;
     const handle = extractHandle(artist.ig_handle, artist.website);
     if (!handle || !isValidHandle(handle)) continue;
 
@@ -201,7 +215,7 @@ async function main() {
   }
 
   const scope = TARGET_STATES.length ? TARGET_STATES.join(',') : TARGET_STATE;
-  console.log(`[ig-scheduler] Created ${created}/${batch.length} tasks (${todayCount}/${effectiveLimit} today) for bot=${BOT_ID} state=${scope} age=${acctAgeDays}d`);
+  console.log(`[ig-scheduler] Created ${created}/${batch.length} tasks (runQuota=${runQuota}, ${todayCount}/${effectiveLimit} today) for bot=${BOT_ID} state=${scope} age=${acctAgeDays}d`);
 }
 
 console.log(`[ig-scheduler] Running every ${Math.round(SCHEDULER_INTERVAL_MS / 60_000)} mins (bot=${BOT_ID}, state=${TARGET_STATES.length ? TARGET_STATES.join(',') : TARGET_STATE}, daily=${DAILY_LIMIT})`);

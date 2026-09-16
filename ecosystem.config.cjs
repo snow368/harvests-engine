@@ -60,7 +60,10 @@ const apps = [
       // pages.dev 同源代理（→ cloud-api Worker），VPS 国内/海外都能通；workers.dev 子域国内被 GFW 屏蔽
       CLOUD_API_BASE: 'https://harvests.pages.dev',
       SCHEDULER_BOT_ID: 'bot_ig_01',
+      // 2026-09-16：以前没有单轮上限，日限 80 被一轮跑完 → 之后 23 轮全部 Created 0，
+      // bot 半天没活干。现在单轮 3 条 × 24 轮 = 72/天，低于日限所以全天均匀供货。
       SCHEDULER_DAILY_LIMIT: '80',
+      SCHEDULER_MAX_PER_RUN: '3',
       SCHEDULER_STATE: 'ALL',
       SCHEDULER_ACCOUNT_BOUND_AT: '2026-06-19T00:00:00Z',
       // Keep drafting active if a stale frontend preference row still says 0.
