@@ -154,7 +154,7 @@ async function resolveCities(state: string, country: string): Promise<string[]> 
   }
   console.log(`[maps-scrape-sched] generating cities for ${stateName} via fetch_cities.py`);
   await new Promise<void>((resolve) => {
-    const p = spawn(PYTHON, ['fetch_cities.py', stateName], { cwd: ENGINE_DIR, env: SCRAPER_ENV });
+    const p = spawn(PYTHON, ['fetch_cities.py', stateName], { cwd: ENGINE_DIR, env: SCRAPER_ENV, windowsHide: true });
     p.stdout.on('data', () => {});
     p.stderr.on('data', (d) => process.stderr.write(`[fetch_cities:${state}] ${d}`));
     p.on('close', () => resolve());
@@ -188,7 +188,7 @@ function runScraper(state: string, country: string, citiesFile: string, jobId: a
       '--output-dir', path.join(path.resolve(ENGINE_DIR, '..'), 'data', 'scrape_output'),
     ];
     console.log(`[maps-scrape-sched] â–¶ launching scraper ${state} (${country}) [cdp=${CDP_URL || 'headless'}]`);
-    const child = spawn(PYTHON, args, { cwd: ENGINE_DIR, env: SCRAPER_ENV });
+    const child = spawn(PYTHON, args, { cwd: ENGINE_DIR, env: SCRAPER_ENV, windowsHide: true });
     const watchdog = setTimeout(() => {
       timedOut = true;
       console.error(`[maps-scrape-sched] ${state} exceeded MAX_RUNTIME (${(MAX_RUNTIME_MS / 3600000)}h), killing`);

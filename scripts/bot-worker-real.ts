@@ -1962,7 +1962,7 @@ const clearProfileLock = () => {
   // 文件被打开时 fs.rmSync 删不掉。VPS 专用机，直接整机关所有 chrome 最可靠。
   try {
     if (process.platform === 'win32') {
-      try { execSync('taskkill /F /IM chrome.exe', { stdio: 'ignore' }); }
+      try { execSync('taskkill /F /IM chrome.exe', { stdio: 'ignore', windowsHide: true }); }
       catch { /* 没有 chrome 在跑也正常 */ }
     } else {
       try { execSync(`pkill -f "${ud}" || true`, { stdio: 'ignore' }); } catch {}

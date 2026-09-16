@@ -19,6 +19,9 @@ async function importState(state: string): Promise<boolean> {
       cwd: ROOT_DIR,
       env: process.env,
       stdio: ['ignore', 'pipe', 'pipe'],
+      // Windows：python.exe 是控制台程序，父进程（pm2 守护）没有控制台时
+      // 每次 spawn 都会**新分配一个控制台窗口**→弹窗。必须显式隐藏。
+      windowsHide: true,
     });
     child.stdout.on('data', (data) => process.stdout.write(`[bridge:${state}] ${data}`));
     child.stderr.on('data', (data) => process.stderr.write(`[bridge:${state}|err] ${data}`));

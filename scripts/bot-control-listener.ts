@@ -6,6 +6,11 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const execAsync = promisify(exec);
+// ⚠️ 2026-09-16：Windows 上 exec/execSync 默认 windowsHide=false —— pm2 是 .cmd，
+// 需要经过 cmd.exe，而 pm2 守护进程没有控制台 → 每次调用都会**闪一个新的控制台窗口**。
+// 这个监听器每 60s 调一次 pm2 jlist，等于每分钟弹一次窗（用户实测"老是有弹窗"）。
+// 所有子进程调用必须带 windowsHide: true。
+const EXEC_OPTS = { windowsHide: true, maxBuffer: 4 * 1024 * 1024 } as const;
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CLOUD_API_BASE = (process.env.CLOUD_API_BASE || 'https://harvests-cloud-api.pages.dev').replace(/\/+$/, '');
 const BOT_API_TOKEN = process.env.BOT_API_TOKEN || 'vps-bot-secret-2024';
@@ -55,7 +60,7 @@ async function fetchCommands(): Promise<Cmd[]> {
 
 async function pm2Snapshot(): Promise<Record<string, any>> {
   try {
-    const { stdout } = await execAsync('pm2 jlist', { maxBuffer: 4 * 1024 * 1024 });
+    const { stdout } = await execAsync('pm2 jlist', EXEC_OPTS);
     const rows = JSON.parse(stdout || '[]');
     const snapshot: Record<string, any> = {};
     for (const row of rows) {
@@ -111,11 +116,11 @@ async function runCommand(cmd: Cmd): Promise<{ ok: boolean; error?: string }> {
       fs.writeFileSync(GENERAL_INTEL_CONFIG, JSON.stringify(cmd.env, null, 2), 'utf8');
     }
     if (cmd.action === 'stop') {
-      await execAsync(`pm2 stop ${pm2Name}`);
+      await execAsync(`pm2 stop ${pm2Name}`, EXEC_OPTS);
     } else if (cmd.action === 'restart') {
-      await execAsync(`pm2 restart ${pm2Name} --update-env`);
+      await execAsync(`pm2 restart ${pm2Name} --update-env`, EXEC_OPTS);
     } else {
-      await execAsync(`pm2 restart ${pm2Name} --update-env || pm2 start ecosystem.config.cjs --only ${pm2Name}`);
+      await execAsync(`pm2 restart ${pm2Name} --update-env || pm2 start ecosystem.config.cjs --only ${pm2Name}`, EXEC_OPTS);
     }
     return { ok: true };
   } catch (error: any) {
