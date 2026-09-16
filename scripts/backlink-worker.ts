@@ -71,9 +71,11 @@ interface ProjectConfig {
 
 // --- 配置加载 ---
 
-const BASE_DIR = 'F:/SEO_Project';
+// 2026-09-16：原来硬编码 'F:/SEO_Project' —— VPS 没有 F 盘，new Database() 直接抛错，
+// 于是 pm2 每 15 秒重启一次（每次都闪一个控制台窗口）。改为 env 可配。
+const BASE_DIR = process.env.SEO_PROJECT_DIR || 'F:/SEO_Project';
 const DATA_DIR = path.join(BASE_DIR, 'data');
-const DB_PATH = path.join(BASE_DIR, 'data/backlinks.db'); // 可改为复用 deep_scan_tasks.db
+const DB_PATH = process.env.BACKLINK_DB_PATH || path.join(BASE_DIR, 'data/backlinks.db'); // 可改为复用 deep_scan_tasks.db
 
 function loadPlatforms(): Record<string, BacklinkPlatform> {
   const raw = fs.readFileSync(path.join(DATA_DIR, 'backlink-platforms.yaml'), 'utf-8');
@@ -538,7 +540,25 @@ async function main() {
   console.log(`\n📊 汇总: ${successCount}/${tasks.length} 成功`);
 }
 
-main().catch(err => {
-  console.error('❌ Worker 异常退出:', err);
-  process.exit(1);
-});
+// ── 预检：依赖目录缺失时进入待机，而不是崩溃 ──
+// 崩溃 → pm2 无限重启 → Windows 上每次重启弹一个控制台窗口。缺依赖时保持 online 空转更安全。
+function missingDeps(): string[] {
+  return [
+    DATA_DIR,
+    path.join(DATA_DIR, 'backlink-platforms.yaml'),
+    path.join(DATA_DIR, 'project-configs.yaml'),
+  ].filter(p => !fs.existsSync(p));
+}
+
+const _missing = missingDeps();
+if (_missing.length) {
+  console.warn('[backlink-worker] 依赖缺失 → 待机（进程保持 online，不退出、不重启）：');
+  for (const m of _missing) console.warn('   ✗ ' + m);
+  console.warn('   修复：设 SEO_PROJECT_DIR=<SEO_Project 路径> 后重启本进程，或把缺失文件放到位。');
+  setInterval(() => {}, 1 << 30);
+} else {
+  main().catch(err => {
+    console.error('❌ Worker 异常退出:', err);
+    process.exit(1);
+  });
+}

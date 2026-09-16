@@ -1,24 +1,24 @@
 ﻿/**
- * Maps Scrape Scheduler â€” æ¶ˆè´¹ maps_scrape_jobs é˜Ÿåˆ—ï¼ˆMaps Scrape é¡µé¢ã€ŒåŠ å…¥é˜Ÿåˆ—ã€ï¼‰
+ * Maps Scrape Scheduler — 消费 maps_scrape_jobs 队列（Maps Scrape 页面「加入队列」）
  *
- * é—­çŽ¯ï¼š
- *   å‰ç«¯é€‰å·ž/åŸŽå¸‚ â†’ POST /api/maps-scrape/jobs (status=pending)
- *   â†’ æœ¬è°ƒåº¦å™¨æ¯ N ç§’è½®è¯¢ pending job
- *   â†’ è¯¥å·žæ— åŸŽå¸‚åˆ—è¡¨åˆ™å…ˆ fetch_cities.py çŽ°ç”Ÿæˆ
- *   â†’ æ‹‰èµ· python_scraper.py å­è¿›ç¨‹ï¼ˆheadless è‡ªèµ·æµè§ˆå™¨ï¼Œä¸æŠ¢ IG bot çš„ Chromeï¼‰
- *   â†’ scraper è‡ªå·±è°ƒ cloud_status å›žæŠ¥ runningâ†’completedï¼Œå‰ç«¯è¿›åº¦æ¡(cities_done/total)å®žæ—¶æ›´æ–°
+ * 闭环：
+ *   前端选州/城市 → POST /api/maps-scrape/jobs (status=pending)
+ *   → 本调度器每 N 秒轮询 pending job
+ *   → 该州无城市列表则先 fetch_cities.py 现生成
+ *   → 拉起 python_scraper.py 子进程（headless 自起浏览器，不抢 IG bot 的 Chrome）
+ *   → scraper 自己调 cloud_status 回报 running→completed，前端进度条(cities_done/total)实时更新
  *
- * ä¸²è¡Œå¤„ç†ï¼ˆä¸€æ¬¡ä¸€ä¸ªå·žï¼‰ï¼Œé¿å… Chrome / Neon äº‰ç”¨ã€‚
+ * 串行处理（一次一个州），避免 Chrome / Neon 争用。
  *
  * ENV:
- *   CLOUD_API_BASE          â€” cloud-api Worker åœ°å€ï¼ˆé»˜è®¤ https://harvests-cloud-api.inkflowapp.workers.devï¼‰
- *   BOT_API_TOKEN           â€” VPS bot å¯†é’¥ï¼ˆé»˜è®¤ vps-bot-secret-2024ï¼Œé¡»ä¸Ž cloud-api ä¸€è‡´ï¼‰
- *   SCRAPE_POLL_INTERVAL_MS â€” è½®è¯¢é—´éš”ï¼ˆé»˜è®¤ 60000ï¼‰
- *   SCRAPE_PYTHON           â€” python å¯æ‰§è¡Œåï¼ˆé»˜è®¤ pythonï¼‰
- *   SCRAPE_MAX_RUNTIME_MS   â€” å•å·žçœ‹é—¨ç‹—ï¼ˆé»˜è®¤ 6hï¼Œè¶…æ—¶å¼ºæ€é˜²æŒ‚æ­»ï¼‰
- *   SCRAPE_CDP_URL          â€” ä¼ ç©º=headless è‡ªèµ·æµè§ˆå™¨ï¼ˆé»˜è®¤ç©ºï¼‰ï¼›å¡« http://127.0.0.1:9222 åˆ™å¤ç”¨å¤–éƒ¨ Chrome
- *   SCRAPE_COUNTRY          â€” é»˜è®¤å›½å®¶ï¼ˆé»˜è®¤ USAï¼‰
- *   NEON_DATABASE_URL       â€” é€ä¼ ç»™ scraperï¼ˆå†™ artists åˆ° Neonï¼‰
+ *   CLOUD_API_BASE          — cloud-api Worker 地址（默认 https://harvests-cloud-api.inkflowapp.workers.dev）
+ *   BOT_API_TOKEN           — VPS bot 密钥（默认 vps-bot-secret-2024，须与 cloud-api 一致）
+ *   SCRAPE_POLL_INTERVAL_MS — 轮询间隔（默认 60000）
+ *   SCRAPE_PYTHON           — python 可执行名（默认 python）
+ *   SCRAPE_MAX_RUNTIME_MS   — 单州看门狗（默认 6h，超时强杀防挂死）
+ *   SCRAPE_CDP_URL          — 传空=headless 自起浏览器（默认空）；填 http://127.0.0.1:9222 则复用外部 Chrome
+ *   SCRAPE_COUNTRY          — 默认国家（默认 USA）
+ *   NEON_DATABASE_URL       — 透传给 scraper（写 artists 到 Neon）
  */
 
 import { spawn } from 'node:child_process';
@@ -27,7 +27,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 // ============ Config ============
-// é˜²å¾¡ï¼šæ¸…æŽ‰æœ¬åœ°ä»£ç† envï¼ˆæœ¬æœº/VPS çš„ 127.0.0.1:10808 ä»£ç†ç«¯å£åœ¨æ²™ç®±é‡Œä¸å­˜åœ¨ï¼Œä¼šè®© node fetch / python urllib å¤±è´¥ï¼‰
+// 防御：清掉本地代理 env（本机/VPS 的 127.0.0.1:10808 代理端口在沙箱里不存在，会让 node fetch / python urllib 失败）
 for (const k of ['HTTPS_PROXY','HTTP_PROXY','https_proxy','http_proxy','ALL_PROXY','all_proxy','NODE_USE_ENV_PROXY']) {
   delete process.env[k];
 }
@@ -55,13 +55,13 @@ if (fs.existsSync(ENV_PATH)) {
   }
 }
 
-// scraper å­è¿›ç¨‹çŽ¯å¢ƒï¼šç»§æ‰¿æœ¬è¿›ç¨‹ï¼ˆå« .env æ³¨å…¥çš„ NEON_DATABASE_URL / CLOUD_API_BASE ç­‰ï¼‰ï¼Œå¹¶å‰”æŽ‰ä»£ç† env
+// scraper 子进程环境：继承本进程（含 .env 注入的 NEON_DATABASE_URL / CLOUD_API_BASE 等），并剔掉代理 env
 const SCRAPER_ENV: Record<string, string> = { ...(process.env as Record<string, string>) };
 for (const k of ['HTTPS_PROXY','HTTP_PROXY','https_proxy','http_proxy','ALL_PROXY','all_proxy','NODE_USE_ENV_PROXY']) {
   delete (SCRAPER_ENV as any)[k];
 }
-// å…³é”®ï¼šscraper çš„ stdout è¢«ç®¡é“æŽ¥ç®¡æ—¶æ˜¯å—ç¼“å†²ï¼Œprogress JSON ä¸ä¼šå®žæ—¶åˆ·å‡ºï¼Œ
-// å¯¼è‡´è°ƒåº¦å™¨è§£æžä¸åˆ°è¿›åº¦ã€‚è®¾ PYTHONUNBUFFERED=1 å¼ºåˆ¶è¡Œç¼“å†²ï¼Œè¿›åº¦æ¡æ‰èƒ½å®žæ—¶èµ°åŠ¨ã€‚
+// 关键：scraper 的 stdout 被管道接管时是块缓冲，progress JSON 不会实时刷出，
+// 导致调度器解析不到进度。设 PYTHONUNBUFFERED=1 强制行缓冲，进度条才能实时走动。
 SCRAPER_ENV.PYTHONUNBUFFERED = '1';
 
 // ============ in-memory lock ============
@@ -110,7 +110,7 @@ function parseJobCities(job: any): string[] {
   return [];
 }
 
-// ç¾Žå›½å·žç¼©å†™ â†’ å…¨åï¼ˆfetch_cities.py èµ° Wikipediaï¼Œå¿…é¡»å…¨åï¼‰
+// 美国州缩写 → 全名（fetch_cities.py 走 Wikipedia，必须全名）
 const US_STATE_NAMES: Record<string, string> = {
   AL: 'Alabama', AK: 'Alaska', AZ: 'Arizona', AR: 'Arkansas', CA: 'California', CO: 'Colorado',
   CT: 'Connecticut', DE: 'Delaware', FL: 'Florida', GA: 'Georgia', HI: 'Hawaii', ID: 'Idaho',
@@ -124,7 +124,7 @@ const US_STATE_NAMES: Record<string, string> = {
   WV: 'West Virginia', WI: 'Wisconsin', WY: 'Wyoming', DC: 'District of Columbia',
 };
 
-// cloud-api å·²æŒ‰ (country, state) ç¼“å­˜äº†å…¨çƒåŸŽå¸‚æ¸…å•ï¼Œä¸Žå‰ç«¯é€‰æ‹©å™¨åŒæº
+// cloud-api 已按 (country, state) 缓存了全球城市清单，与前端选择器同源
 async function fetchCitiesFromCloud(country: string, state: string): Promise<string[]> {
   try {
     const cc = country === 'USA' ? 'US' : country;
@@ -139,7 +139,7 @@ async function fetchCitiesFromCloud(country: string, state: string): Promise<str
   }
 }
 
-// åŸŽå¸‚åˆ—è¡¨ï¼šä¼˜å…ˆ job è‡ªå¸¦ â†’ cloud-api â†’ æœ¬åœ°ç¼“å­˜æ–‡ä»¶ â†’ fetch_cities.py
+// 城市列表：优先 job 自带 → cloud-api → 本地缓存文件 → fetch_cities.py
 async function resolveCities(state: string, country: string): Promise<string[]> {
   const cloud = await fetchCitiesFromCloud(country, state);
   if (cloud.length) {
@@ -178,23 +178,23 @@ function runScraper(state: string, country: string, citiesFile: string, jobId: a
       '--country', country,
       '--keyword', 'Tattoo Shops',
       '--cities-file', citiesFile,
-      '--cloud-base', CLOUD_API_BASE, // worker æ ¹åŸŸåï¼›scraper å†…éƒ¨ä¼šå†æ‹¼ /api/...
+      '--cloud-base', CLOUD_API_BASE, // worker 根域名；scraper 内部会再拼 /api/...
       '--cloud-token', BOT_API_TOKEN,
-      '--job-id', String(jobId), // é€ä¼  job idï¼Œscraper æ®æ­¤å›žæŠ¥ progressï¼ˆå¦åˆ™ cloud_status æ˜¯ no-opï¼‰
-      '--cdp-url', CDP_URL, // ç©º=headless è‡ªèµ·ï¼›éžç©ºå‰å¤ç”¨å¤–éƒ¨ Chrome
-      // æ˜¾å¼æŒ‡å®šè¾“å‡ºç›®å½• = å¼•æ“Žæ ¹/data/scrape_outputï¼ˆä¸Žæ¡¥æŽ¥è„šæœ¬ _import_maps_to_d1.py è¯»å–è·¯å¾„ä¸€è‡´ï¼‰ã€‚
-      // âš ï¸ 2026-08-06 ä¿®å¤ï¼šENGINE_DIR=__dirname=scripts/ï¼Œè‹¥ä¸ä¼  --output-dirï¼Œscraper çš„ cwd ç›¸å¯¹è·¯å¾„
-      //    ä¼šå†™åˆ° scripts/data/scrape_output/ï¼Œä¸Žæ¡¥æŽ¥è¯»çš„ data/scrape_output/ åˆ†è£‚ï¼Œå¯¼è‡´æ¡¥æŽ¥è¯»ä¸åˆ°æ–°æ•°æ®ã€‚
+      '--job-id', String(jobId), // 透传 job id，scraper 据此回报 progress（否则 cloud_status 是 no-op）
+      '--cdp-url', CDP_URL, // 空=headless 自起；非空前复用外部 Chrome
+      // 显式指定输出目录 = 引擎根/data/scrape_output（与桥接脚本 _import_maps_to_d1.py 读取路径一致）。
+      // ⚠️ 2026-08-06 修复：ENGINE_DIR=__dirname=scripts/，若不传 --output-dir，scraper 的 cwd 相对路径
+      //    会写到 scripts/data/scrape_output/，与桥接读的 data/scrape_output/ 分裂，导致桥接读不到新数据。
       '--output-dir', path.join(path.resolve(ENGINE_DIR, '..'), 'data', 'scrape_output'),
     ];
-    console.log(`[maps-scrape-sched] â–¶ launching scraper ${state} (${country}) [cdp=${CDP_URL || 'headless'}]`);
+    console.log(`[maps-scrape-sched] ▶ launching scraper ${state} (${country}) [cdp=${CDP_URL || 'headless'}]`);
     const child = spawn(PYTHON, args, { cwd: ENGINE_DIR, env: SCRAPER_ENV, windowsHide: true });
     const watchdog = setTimeout(() => {
       timedOut = true;
       console.error(`[maps-scrape-sched] ${state} exceeded MAX_RUNTIME (${(MAX_RUNTIME_MS / 3600000)}h), killing`);
       child.kill('SIGKILL');
     }, MAX_RUNTIME_MS);
-    // è§£æž scraper çš„è¿›åº¦è¾“å‡ºï¼Œå®žæ—¶æ›´æ–°äº‘ç«¯è¿›åº¦æ¡ï¼ˆscraper è‡ªèº« cloud_status å¶å‘ 403ï¼Œè¿™é‡Œå…œåº•ï¼‰
+    // 解析 scraper 的进度输出，实时更新云端进度条（scraper 自身 cloud_status 偶发 403，这里兜底）
     const processOutputLine = (line: string) => {
       if (!line) return;
       try {
@@ -246,13 +246,13 @@ async function processOne(job: any): Promise<void> {
     await setJobStatus(id, 'failed', 'no cities resolved (cloud-api + fetch_cities.py both empty)');
     return;
   }
-  // è®©å‰ç«¯è¿›åº¦æ¡ä»Žä¸€å¼€å§‹å°±æœ‰åˆ†æ¯ï¼›æ–­ç‚¹ç»­è·‘æ—¶ä¿ç•™å·²æœ‰ cities_doneï¼Œé¿å…è¿›åº¦æ¡å›žè·³å½’é›¶
+  // 让前端进度条从一开始就有分母；断点续跑时保留已有 cities_done，避免进度条回跳归零
   await setJobStatus(id, 'running', null, {
     cities_total: cities.length,
     cities_done: Number(job.cities_done) || 0,
   });
 
-  // å†™å…¥ä¸´æ—¶åŸŽå¸‚æ–‡ä»¶ï¼ˆä¾› --cities-file ä½¿ç”¨ï¼‰
+  // 写入临时城市文件（供 --cities-file 使用）
   const queueDir = path.join(ENGINE_DIR, 'data', 'scrape_queue');
   fs.mkdirSync(queueDir, { recursive: true });
   const citiesFile = path.join(queueDir, `${state}_cities.txt`);
@@ -260,8 +260,8 @@ async function processOne(job: any): Promise<void> {
 
   const { code, lastFound, complete, timedOut } = await runScraper(state, country, citiesFile, id);
   console.log(`[maps-scrape-sched] ${state} scraper exited code=${code} timedOut=${timedOut}`);
-  // scraper æ­£å¸¸é€€å‡º(code 0)ï¼šä¸»åŠ¨ç½® completedï¼ˆä¸ä¾èµ– scraper è‡ªèº« cloud_status ä¸ŠæŠ¥ï¼Œ
-  // å…¶ urllib å¶å‘è¢« Cloudflare æ‹¦ 403 å¯¼è‡´ completed æ¼æŠ¥ï¼Œä»»åŠ¡å¡åœ¨ runningï¼‰
+  // scraper 正常退出(code 0)：主动置 completed（不依赖 scraper 自身 cloud_status 上报，
+  // 其 urllib 偶发被 Cloudflare 拦 403 导致 completed 漏报，任务卡在 running）
   if (timedOut) {
     await setJobStatus(id, 'running', `runtime slice ${Math.round(MAX_RUNTIME_MS / 3600000)}h ended; scheduler will resume`, {
       cities_total: cities.length,
@@ -282,7 +282,7 @@ async function processOne(job: any): Promise<void> {
     });
     console.warn(`[maps-scrape-sched] ${state} has incomplete cities; leaving job running for resume`);
   } else {
-    // å¼‚å¸¸é€€å‡º(-1/éž0)ä¸”ä» pending/runningï¼Œæ ‡ failed é˜²æ­»å¾ªçŽ¯
+    // 异常退出(-1/非0)且仍 pending/running，标 failed 防死循环
     const jobs = await fetchJobs();
     const still = jobs.find((j) => String(j.id) === String(id));
     if (still && (still.status === 'pending' || still.status === 'running')) {
@@ -299,7 +299,7 @@ async function tick(): Promise<void> {
     const isEligible = (j: any) => {
       if (launched.has(String(j.id))) return false;
       if (j.status === 'pending') return true;
-      // è‡ªæ¢å¤ï¼šå´©æºƒåŽæ®‹ç•™çš„ running ä»»åŠ¡ï¼ˆcities_done < total ä¸”æ— äººæŽ¥ç®¡ï¼‰é‡æ–°æŽ¥æ‰‹ï¼Œé¿å…å¡æ­»
+      // 自恢复：崩溃后残留的 running 任务（cities_done < total 且无人接管）重新接手，避免卡死
       if (j.status === 'running' && (Number(j.cities_done) || 0) < (Number(j.cities_total) || 1)) return true;
       return false;
     };

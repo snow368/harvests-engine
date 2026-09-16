@@ -38,6 +38,13 @@ const DEFAULTS = {
   exec_mode: 'fork',
   autorestart: true,
   max_restarts: 10,
+  // 2026-09-16：启动即崩的 app 必须「停下来」而不是无限重启。
+  // pm2 默认 min_uptime=1000ms：一个能活过 1 秒再崩的进程会被判为「稳定」，
+  // 于是 max_restarts 永远不生效 → 每 15~30 秒重启一次 → Windows 上每次重启
+  // 都会给这个控制台程序新分配一个可见窗口（= 用户看到的"老是闪弹窗"）。
+  // 改成 10s 后，启动 10 秒内崩溃算「不稳定重启」，累计 10 次后 pm2 直接置为
+  // errored 并停止，不再刷窗。
+  min_uptime: 10_000,
   watch: false,
   merge_logs: true,
   log_date_format: 'YYYY-MM-DD HH:mm:ss Z',

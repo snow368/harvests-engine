@@ -3956,10 +3956,9 @@ async function claimPendingTask(): Promise<any | null> {
 }
 
 // ── Helper: random delay ──
-
-function jitter(min: number, max: number): number {
-  return Math.floor(Math.random() * (max - min + 1)) + min;
-}
+// 2026-09-16：原此处另有一份 `function jitter`，与 L242 的 `const jitter` 重名 →
+// esbuild / tsx 报 "The symbol \"jitter\" has already been declared"，整个文件无法加载。
+// 已删除该重复定义，统一使用 L242 的版本（带 BOT_SPEED_FACTOR / BOT_VARIANCE 缩放）。
 
 // ── Helper: check if char is Chinese ──
 

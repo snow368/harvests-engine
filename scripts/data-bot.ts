@@ -1,9 +1,9 @@
 ﻿/**
- * Data Bot â€” çº¯æ•°æ®é‡‡é›†ï¼Œä¸äº’åŠ¨ä¸å…»å·
- * èŒè´£ï¼šè®¿é—® IG ä¸»é¡µ + æŠ½æ ·å¸–å­ â†’ æå–æ·±åº¦æ•°æ® â†’ å›žä¼  Server
- * æ˜¯ bot1-100 çš„å‰ç½®æ¡ä»¶
+ * Data Bot — 纯数据采集，不互动不养号
+ * 职责：访问 IG 主页 + 抽样帖子 → 提取深度数据 → 回传 Server
+ * 是 bot1-100 的前置条件
  *
- * ç”¨æ³•ï¼šnpx ts-node scripts/data-bot.ts
+ * 用法：npx ts-node scripts/data-bot.ts
  */
 import fs from 'fs';
 import path from 'path';
@@ -14,7 +14,7 @@ import { dirname } from 'node:path';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-// ========== è¯» .env ==========
+// ========== 读 .env ==========
 const envPath = path.resolve(__dirname, '..', '.env');
 if (fs.existsSync(envPath)) {
   const raw = fs.readFileSync(envPath, 'utf-8');
@@ -30,22 +30,22 @@ if (fs.existsSync(envPath)) {
   }
 }
 
-// ========== é…ç½® ==========
+// ========== 配置 ==========
 const API_BASE = (process.env.BOT_API_BASE || 'http://localhost:3000').replace(/\/+$/, '');
 const BOT_ID = process.env.DATA_BOT_ID || 'data_bot_01';
 const BOT_API_KEY = (process.env.BOT_API_KEY || '').trim();
 const INSTAGRAM_BASE = 'https://www.instagram.com';
 const PROFILE_DIR = path.resolve(process.env.BOT_PROFILE_DIR || './data/bot_profiles/data_bot');
-const HEADLESS = process.env.DATA_BOT_HEADLESS !== 'false'; // é»˜è®¤ headless
+const HEADLESS = process.env.DATA_BOT_HEADLESS !== 'false'; // 默认 headless
 
-// é€Ÿåº¦é…ç½®ï¼ˆæ•°æ® bot å¯æ¯”å…»å· bot å¿«ï¼‰
+// 速度配置（数据 bot 可比养号 bot 快）
 const POLL_INTERVAL_SEC = Number(process.env.DATA_BOT_POLL_INTERVAL || 15);
 const PROFILE_SCROLL_PAUSE_MS = Number(process.env.DATA_BOT_SCROLL_PAUSE || 800);
 const POST_GAP_MS = Number(process.env.DATA_BOT_POST_GAP || 1200);
 const POSTS_TO_SAMPLE = Math.min(5, Math.max(2, Number(process.env.DATA_BOT_POST_SAMPLE || 3)));
 const MAX_RETRIES = 2;
 
-// ========== ç±»åž‹ ==========
+// ========== 类型 ==========
 interface DeepScanTask {
   id: string;
   artistIds: string[];
@@ -82,7 +82,7 @@ interface PostSample {
   videoViewCount: number;
 }
 
-// ========== å·¥å…· ==========
+// ========== 工具 ==========
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const jitter = (base: number, range = 0.3) => Math.floor(base * (1 + (Math.random() - 0.5) * range * 2));
 
@@ -138,12 +138,12 @@ const getJson = async (endpoint: string) => {
   return resp.json();
 };
 
-// ========== æ‹‰å–ä»»åŠ¡ ==========
+// ========== 拉取任务 ==========
 const fetchBatch = async (): Promise<DeepScanTask | null> => {
   try {
     const data = await postJson('/api/deep-scan/next/data-bot', {
       botId: BOT_ID,
-      batchSize: 5, // æ¯æ¬¡æ‹¿ 5 ä¸ª
+      batchSize: 5, // 每次拿 5 个
     });
     if (data?.artistIds?.length > 0) return data as DeepScanTask;
     return null;
@@ -152,7 +152,7 @@ const fetchBatch = async (): Promise<DeepScanTask | null> => {
   }
 };
 
-// ========== å›žä¼ ç»“æžœ ==========
+// ========== 回传结果 ==========
 const reportResults = async (taskId: string, profiles: ProfileData[]) => {
   const successIds = profiles.filter((p) => !p.error).map((p) => p.id);
   const failedItems = profiles
@@ -167,16 +167,16 @@ const reportResults = async (taskId: string, profiles: ProfileData[]) => {
   });
 };
 
-// ========== IG æ“ä½œ ==========
+// ========== IG 操作 ==========
 const navigateToProfile = async (page: Page, handle: string): Promise<{ ok: boolean; isPrivate: boolean }> => {
   await page.goto(`${INSTAGRAM_BASE}/${handle}/`, { waitUntil: 'domcontentloaded', timeout: 30000 });
   await sleep(jitter(2000));
 
-  // æ£€æµ‹ç§å¯†è´¦å·
+  // 检测私密账号
   const privateText = await page.locator('text=This Account is Private').count().catch(() => 0);
   if (privateText > 0) return { ok: false, isPrivate: true };
 
-  // æ£€æµ‹æ— æ•ˆé¡µé¢
+  // 检测无效页面
   const notFound = await page.locator('text=Page Not Found, text=Sorry, this page').count().catch(() => 0);
   if (notFound > 0) return { ok: false, isPrivate: false };
 
@@ -184,7 +184,7 @@ const navigateToProfile = async (page: Page, handle: string): Promise<{ ok: bool
 };
 
 const extractProfileStats = async (page: Page): Promise<Partial<ProfileData>> => {
-  // èŽ·å– header åŒºåŸŸçš„ç»Ÿè®¡æ•°å­—
+  // 获取 header 区域的统计数字
   const headerText = await page.locator('header section').first().innerText().catch(() => '');
   const numberPattern = /(\d[\d,.]*[kKmM]?)\s*(posts?|followers?|following)/gi;
 
@@ -278,13 +278,13 @@ const samplePosts = async (page: Page): Promise<PostSample[]> => {
         videoViewCount,
       });
 
-      // å…³é—­å¼¹çª—
+      // 关闭弹窗
       const closeBtn = page.locator('svg[aria-label="Close"]').first();
       if ((await closeBtn.count()) > 0) await closeBtn.click({ timeout: 4000 });
       else await page.keyboard.press('Escape');
       await sleep(jitter(800));
     } catch {
-      // å¼¹çª—å·²å…³æˆ–å¸–å­æ‰“ä¸å¼€
+      // 弹窗已关或帖子打不开
       await page.keyboard.press('Escape').catch(() => {});
       await sleep(jitter(500));
     }
@@ -300,7 +300,7 @@ const scrollProfile = async (page: Page) => {
   await sleep(jitter(1000));
 };
 
-// ========== å¤„ç†å•ä¸ªåº—é“º ==========
+// ========== 处理单个店铺 ==========
 const processArtist = async (page: Page, artistId: string, igHandle: string): Promise<ProfileData> => {
   const base: ProfileData = {
     id: artistId,
@@ -321,20 +321,20 @@ const processArtist = async (page: Page, artistId: string, igHandle: string): Pr
   base.url = page.url();
   base.isPrivate = isPrivate;
 
-  // æ»šåŠ¨åŠ è½½å¸–å­
+  // 滚动加载帖子
   await scrollProfile(page);
 
-  // æå–ä¸»é¡µæ•°æ®
+  // 提取主页数据
   const profileData = await extractProfileStats(page);
   Object.assign(base, profileData);
 
-  // æŠ½æ ·å¸–å­
+  // 抽样帖子
   base.postsSample = await samplePosts(page);
 
   return base;
 };
 
-// ========== æµè§ˆå™¨ç®¡ç† ==========
+// ========== 浏览器管理 ==========
 let context: BrowserContext | null = null;
 let page: Page | null = null;
 
@@ -357,12 +357,12 @@ const ensureBrowser = async () => {
   console.log(`[data-bot] Browser ready (headless=${HEADLESS})`);
 };
 
-// ========== ä¸»å¾ªçŽ¯ ==========
+// ========== 主循环 ==========
 const main = async () => {
   console.log(`[data-bot] Starting | ID: ${BOT_ID} | API: ${API_BASE}`);
   await ensureBrowser();
 
-  // æ³¨å†Œ
+  // 注册
   try {
     await postJson('/api/bot/register', {
       botId: BOT_ID,
@@ -391,7 +391,7 @@ const main = async () => {
       const profiles: ProfileData[] = [];
 
       for (const artistId of task.artistIds) {
-        // ä»Ž DB èŽ·å– artist çš„ IG handleï¼ˆé€šè¿‡ server APIï¼‰
+        // 从 DB 获取 artist 的 IG handle（通过 server API）
         let igHandle = '';
         try {
           const info = await getJson(`/api/artists/${artistId}/social`);
