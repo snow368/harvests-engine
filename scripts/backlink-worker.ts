@@ -25,7 +25,15 @@ dns.setDefaultResultOrder('ipv4first');
 import { chromium, type Browser, type Page } from 'playwright';
 import fs from 'node:fs';
 import path from 'node:path';
-import yaml from 'js-yaml';
+import * as yamlModule from 'js-yaml';
+
+// 2026-09-17：js-yaml 4.x 的 "exports" 把 `import` 条件指向 dist/js-yaml.mjs，
+// 那份 ESM 构建没有 default 导出（只有 load/dump/…），因此
+//     import yaml from 'js-yaml'
+// 在 ESM 下必抛 "does not provide an export named 'default'" →
+// pm2 每 15s 重启一次 → Windows 控制台窗口刷屏（与 backlink-scheduler 同因）。
+// 命名空间导入 + 兼容取值：ESM 取命名空间，CJS 取 .default。
+const yaml: any = (yamlModule as any).default ?? yamlModule;
 
 // --- 类型定义 ---
 

@@ -14,8 +14,17 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import yaml from 'js-yaml';
+import * as yamlModule from 'js-yaml';
 import Database from 'better-sqlite3';
+
+// 2026-09-17：js-yaml 4.x 的 package.json 用 "exports" 把 `import` 条件指向 dist/js-yaml.mjs，
+// 那份 ESM 构建**只有具名导出**（load/dump/…）、没有 default，于是 ESM 下
+//     import yaml from 'js-yaml'
+// 必抛 SyntaxError: The requested module 'js-yaml' does not provide an export named 'default'
+// （该 import 由 2026-09-02 的 64e93c0 引入，此后这两个 app 一次都没成功跑起来过 →
+//   pm2 每 30s 重启一次 → Windows 每次重启新分配一个可见控制台窗口 = 弹窗刷屏的真凶之一）
+// 改法：命名空间导入 + 兼容取值。ESM 构建取命名空间本身，CJS 构建取 .default。
+const yaml: any = (yamlModule as any).default ?? yamlModule;
 
 // ── 路径 ──
 // 2026-09-16：原来硬编码 'F:/SEO_Project' —— VPS 没有 F 盘，new Database() 直接抛错，
