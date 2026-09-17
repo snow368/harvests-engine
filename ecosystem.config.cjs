@@ -237,14 +237,19 @@ const apps = [
       // 人工审核通过后逐条发布，间隔随机 8-20 分钟；冷却时间写入状态文件，重启不会绕过。
       BOT_COMMENT_PUBLISH_INTERVAL_MIN_SEC: '480',
       BOT_COMMENT_PUBLISH_INTERVAL_MAX_SEC: '1200',
-      // 关注：2026-09-07 起【自动关注全关】——following 600+/粉丝十几严重失衡，关注改为手动；
-      //   2026-09-15 用户拍板：连「回关」也关（BOT_FOLLOW_BACK_ENABLED=false），
-      //   策略改为「不关注任何人，靠互动吸引对方关注我们」：点赞/评论/回赞全保留。
-      //   （注：VPS 那份历史上写的是 'true' → 与模板漂移，已导致 9/15 仍在 follow 别人。）
+      // 关注（2026-09-17 用户拍板，当前策略）：
+      //   ① 主动关注 = 永久关（BOT_FOLLOW_ENABLED=false）。following 600+/粉丝十几严重失衡，
+      //      主动 follow 陌生人直接判死；checkAudienceReciprocate / followAudienceLead 都受
+      //      这个开关约束，关掉后那两条通道自动降级为「只回赞不关注」（bot-worker-real.ts:1843）。
+      //   ② 回关 = 开（BOT_FOLLOW_BACK_ENABLED=true）。只对【已经先关注我们】的号回关
+      //      （checkIncomingFollowBacks 扫自己 Followers 列表 → reciprocalFollowBack），
+      //      绝不主动 follow 陌生人。IG 上风险最低的关注动作，也是唯一被许可的关注动作。
+      //   ③ BOT_FOLLOW_BACK_REQUIRE_TATTOO 默认 true ⇒ 只回关纹身相关号，粉圈号/无关号不回。
       BOT_FOLLOW_ENABLED: 'false',
-      BOT_FOLLOW_BACK_ENABLED: 'false',
-      // 关注量配额（2026-09-17 从 VPS 回收）。注意：上面两个开关都是 false，
-      // 所以这两项当前**不生效**，只是保持与 VPS 实际配置一致，避免再出现"仓库/VPS 漂移"。
+      BOT_FOLLOW_BACK_ENABLED: 'true',
+      // 关注量配额：getFollowDayCap() = getAccountFollowRamp(ageDays) → 账号 ≥ FOLLOW_RAMP_MAX_AGE
+      //   时取 BOT_FOLLOW_DAILY_MAX，实际日上限 = rand[floor(MAX*0.7), MAX]（当前即 17–25）。
+      //   ⚠️ 这个预算是「主动关注 + 回关 + 互动者回流」共享的；主动关注关掉后，全给回关用。
       BOT_FOLLOW_DAILY_MIN: '15',
       BOT_FOLLOW_DAILY_MAX: '25',
       BOT_FOLLOW_MIN_TOUCHES: '1',
