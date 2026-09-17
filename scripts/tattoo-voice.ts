@@ -240,17 +240,35 @@ export const isPiercingHandle = (handle: string): boolean => {
   return HANDLE_PIERCING_TOKENS.some((k) => h.includes(k));
 };
 
-const STRONG_PIERCING = [
-  'piercing', 'piercer', 'pierced', 'nose ring', 'belly ring', 'navel', 'industrial',
-  'helix', 'labret', 'septum', 'daith', 'tragus', 'rook', 'conch', 'dermal', 'microdermal',
-  'ear piercing', 'surface bar', 'nostril', 'forward helix', 'snug', 'orbital',
-  'body jewelry', 'body jewellery', 'implant grade', 'barbell', 'stud', 'hoop',
-  'cartilage', 'gauge', 'gauges', 'stretching', 'stretched', 'plug', 'plugs',
+// 🔴 2026-09-17 修：旧版对 STRONG_PIERCING 直接用 text.includes() 做**子串**匹配，
+//   `stud` 命中 `studio/studied/student`、`rook` 命中 `Brooklyn`、`hoop/plug/gauge/snug/stretching`
+//   同理命中一大堆纹身文案 ⇒ 正常纹身帖被判成穿孔 ⇒ like/comment 闸门整场跳过。
+//   VPS 实测：`like_skip_piercing` 8 连跳、`like_session_done liked:0`、`dayCountAfter:0` —— 即**永远点不了赞**。
+//   回归用例：`tmp/test-subject-gate.mts`（修复前 12/18 假阳性）。
+//
+// 判据分两档（词边界匹配，杜绝 studio/Brooklyn 这类子串误杀）：
+//   CORE  = 穿孔解剖/首饰专有词 —— 命中即穿孔，纹身文案里不会出现；
+//   SOFT  = 歧义词（stud/hoop/gauge/industrial/snug…）—— 需 **≥2 个** 命中，且文案无纹身信号，才算穿孔。
+const CORE_PIERCING = [
+  'piercing', 'piercer', 'pierced', 'nose ring', 'belly ring', 'navel',
+  'helix', 'labret', 'septum', 'daith', 'tragus', 'conch', 'dermal', 'microdermal',
+  'ear piercing', 'surface bar', 'nostril', 'forward helix', 'orbital',
+  'body jewelry', 'body jewellery', 'implant grade', 'barbell', 'cartilage',
+];
+// 歧义词：单独出现时不可作为判据（"industrial style"/"snug fit"/"12 gauge liner" 全是纹身语境）
+const SOFT_PIERCING = [
+  'stud', 'hoop', 'gauge', 'gauges', 'plug', 'plugs', 'industrial', 'rook', 'snug',
+  'stretching', 'stretched',
 ];
 const TATTOO_SIGNALS = [
   'tattoo', 'tattooed', 'tattooer', 'tattooist', 'ink', 'flash sheet', 'sleeve',
   'blackwork', 'whip shading', 'linework', 'fineline', 'fine line',
 ];
+
+const escRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+/** 词边界匹配：`stud` 不再命中 `studio`，`rook` 不再命中 `Brooklyn`。 */
+const tokenHit = (text: string, tokens: string[]): string[] =>
+  tokens.filter((k) => new RegExp(`(?<![a-z0-9])${escRe(k)}(?![a-z0-9])`).test(text));
 
 export const detectSubject = (caption: string, alts: string[] = [], ownerHandle = ''): SubjectResult => {
   const text = `${caption} ${alts.join(' ')}`.toLowerCase();
@@ -258,17 +276,22 @@ export const detectSubject = (caption: string, alts: string[] = [], ownerHandle 
   if (isPiercingHandle(ownerHandle)) {
     return { subject: 'piercing', source: 'handle', signals: [`handle:${ownerHandle}`], visionUsed: false };
   }
-  // 2) 文字强信号：穿孔解剖词直接判穿孔
-  const pHit = STRONG_PIERCING.filter((k) => text.includes(k));
-  if (pHit.length) {
-    return { subject: 'piercing', source: 'caption', signals: pHit.slice(0, 3), visionUsed: false };
+  // 2) 专有穿孔词（词边界）→ 直接判穿孔
+  const core = tokenHit(text, CORE_PIERCING);
+  if (core.length) {
+    return { subject: 'piercing', source: 'caption', signals: core.slice(0, 3), visionUsed: false };
   }
-  // 3) 文字纹身信号：命中纹身词 → 判纹身（本 bot 主场景）
+  // 3) 纹身信号：**保持宽松子串匹配**（#tattooartist 这类标签必须命中；误判成纹身无害，误判成穿孔才有害）
   const tHit = TATTOO_SIGNALS.filter((k) => text.includes(k));
+  // 4) 歧义穿孔词：≥2 个命中且文案无纹身信号，才算穿孔
+  const soft = tokenHit(text, SOFT_PIERCING);
+  if (soft.length >= 2 && !tHit.length) {
+    return { subject: 'piercing', source: 'caption', signals: soft.slice(0, 3), visionUsed: false };
+  }
   if (tHit.length) {
     return { subject: 'tattoo', source: 'caption', signals: tHit.slice(0, 3), visionUsed: false };
   }
-  // 4) 两边都没信号 → 交给识图（调用方借 visionDescription 二次判定）
+  // 5) 两边都没信号 → 交给识图（调用方借 visionDescription 二次判定）
   return { subject: 'unknown', source: 'default', signals: [], visionUsed: false };
 };
 

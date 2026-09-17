@@ -16,11 +16,13 @@
   可选参数：
     -SkipPull            不执行 git pull
     -SkipChromeRestart   不重启 Chrome（保留当前浏览器会话）
+    -KeepCrashLoopers    不停 competitor-ig-monitor（默认会停掉这个 9222 CDP 污染源）
     -WaitSeconds 90      重建后等多久再抓日志（默认 90 秒）
 #>
 param(
   [switch]$SkipPull,
   [switch]$SkipChromeRestart,
+  [switch]$KeepCrashLoopers,
   [int]$WaitSeconds = 90
 )
 
@@ -143,6 +145,30 @@ $startup = @(Get-CimInstance Win32_StartupCommand -ErrorAction SilentlyContinue 
   Where-Object { $_.Command -match '(?i)watchdog|scraper|harvests|bot-worker|cdp-probe' })
 if ($startup.Count -eq 0) { Line '(无)' } else {
   $startup | ForEach-Object { Line "$($_.Name)  [$($_.Location)]  $($_.Command)" }
+}
+
+Say ''
+Say '--- (d) 共用 9222 的崩溃重启循环 app（CDP 协议假死的制造者） ---'
+# competitor-ig-monitor 与 bot-worker 共用同一个 9222 Chrome，但它在崩溃重启循环里
+# （实测 ↺ 2500+ 且持续上涨、0b 零产出），每一轮都会 connectOverCDP 且不清理 target/session
+# ⇒ 把 CDP 会话搞到「WS 握手成功但命令无响应」的假死状态。它没有任何产出，先停不删（可随时恢复）。
+$CrashLoopers = @('competitor-ig-monitor')
+if ($KeepCrashLoopers) {
+  Line '(-KeepCrashLoopers：跳过)'
+} else {
+  foreach ($app in $CrashLoopers) {
+    $desc = (& pm2 describe $app 2>&1 | Out-String)
+    if ($desc -match '(?i)not found|does not exist') {
+      Line "$app : pm2 里不存在，跳过"
+      continue
+    }
+    $rt = ''
+    if ($desc -match '(?m)^.*restarts?\s*[:│|]?\s*(\d+)') { $rt = $matches[1] }
+    Line "$app : 停止（重启次数=$rt；它是 9222 CDP 会话的污染源，且零产出）"
+    & pm2 stop $app 2>&1 | ForEach-Object { Line "    $_" }
+    Line "    恢复命令： pm2 start ecosystem.config.cjs --only $app --update-env"
+  }
+  & pm2 save 2>$null | Out-Null
 }
 
 # ─────────────────────────────────────────────────────────────────────
