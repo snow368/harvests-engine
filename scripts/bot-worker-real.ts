@@ -1596,6 +1596,19 @@ const reciprocalFollowBack = async (handle: string): Promise<boolean> => {
   } catch { return false; }
 };
 
+// IG 保留路径词：`a[href^="/"]` 里会混入导航/功能链接，它们不是用户 handle。
+// ⚠️ 2026-09-17 实测：Followers 列表抓取把 `reels` / `popular` 当成「新粉」写进
+//    likeState.follows.byHandle（还 recordInteraction('follow_back') + 开 DM 预热窗），
+//    然后尝试回关一个不存在的用户。当前 IG 页面无 "Follows you" 时不影响主链路，
+//    但会污染状态文件并把垃圾号推进 DM 队列，必须剔除。
+const IG_RESERVED_PATHS = new Set([
+  'p', 'reel', 'reels', 'explore', 'accounts', 'direct', 'tv', 'stories', 'saved',
+  'popular', 'nametag', 'about', 'legal', 'api', 'web', 'emails', 'session',
+  'challenge', 'graphql', 'developer', 'your_activity', 'notifications',
+]);
+const isRealHandle = (h: string) =>
+  /^[A-Za-z0-9._]{2,30}$/.test(h) && !IG_RESERVED_PATHS.has(String(h).toLowerCase());
+
 let incomingFbTick = 0;
 const checkIncomingFollowBacks = async () => {
   try {
@@ -1610,9 +1623,9 @@ const checkIncomingFollowBacks = async () => {
     await page.waitForTimeout(jitter(2000, 4000));
     const handles = await page.locator('a[href^="/"]').evaluateAll((els: any[]) =>
       els.map((e) => (e.getAttribute('href') || '').replace(/[?#].*$/, '').replace(/^\/+|\/+$/g, ''))
-        .filter((h: string) => /^[A-Za-z0-9._]{2,30}$/.test(h) && !['p', 'reel', 'explore', 'accounts', 'direct', 'tv', 'stories'].includes(h))
+        .filter((h: string) => /^[A-Za-z0-9._]{2,30}$/.test(h) && !['p', 'reel', 'explore', 'accounts', 'direct', 'tv', 'stories', 'saved', 'reels', 'popular'].includes(h))
     ).catch(() => []);
-    const sample = (handles || []).slice(0, 40);
+    const sample = (handles || []).filter(isRealHandle).slice(0, 40);
     const selfIds = new Set([BOT_ID, ...(ACCOUNT_IDS || [])].map((x) => String(x).toLowerCase()));
     const newFans: string[] = []; // 🔁 收集本轮新粉，关弹窗后统一礼貌回关（避免逐个导航打断列表枚举）
     for (const h of sample) {
