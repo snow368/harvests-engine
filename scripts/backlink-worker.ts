@@ -565,8 +565,13 @@ if (_missing.length) {
   console.warn('   修复：设 SEO_PROJECT_DIR=<SEO_Project 路径> 后重启本进程，或把缺失文件放到位。');
   setInterval(() => {}, 1 << 30);
 } else {
+  // 2026-09-17：原来 catch 里 `process.exit(1)` —— 那等于把「一次运行期异常」升级成
+  // 「pm2 无限崩溃重启」。Windows 上每次重启都要新开一个控制台窗口，代价极高。
+  // 改为记录后待机保活：进程保持 online，问题留在日志里，等人工修。
+  // （实测触发场景：依赖目录存在、但 backlink-platforms.yaml 解析抛 YAMLException。）
   main().catch(err => {
-    console.error('❌ Worker 异常退出:', err);
-    process.exit(1);
+    console.error('[backlink-worker] main() 异常 → 待机（不退出，避免 pm2 崩溃重启）：');
+    console.error('   ' + (err?.message || err));
+    setInterval(() => {}, 1 << 30);
   });
 }

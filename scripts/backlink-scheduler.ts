@@ -307,5 +307,14 @@ if (_missing.length) {
   console.warn('   修复：设 SEO_PROJECT_DIR=<SEO_Project 路径> 后重启本进程，或把缺失文件放到位。');
   setInterval(() => {}, 1 << 30);
 } else {
-  main();
+  // 2026-09-17：main() 也必须兜住。曾实测到「依赖都在、但 backlink-platforms.yaml 解析失败」
+  // → 抛 YAMLException → 进程退出 → pm2 重启 → 无限崩溃循环。
+  // pm2 托管的进程在 Windows 上「退出」是最贵的行为（重启 + 刷窗口），所以一律兜住并保活。
+  try {
+    main();
+  } catch (e: any) {
+    console.error('[backlink-scheduler] main() 异常 → 待机（不退出，避免 pm2 崩溃重启）：');
+    console.error('   ' + (e?.message || e));
+    setInterval(() => {}, 1 << 30);
+  }
 }
