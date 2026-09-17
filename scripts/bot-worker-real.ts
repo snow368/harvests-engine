@@ -1965,7 +1965,7 @@ const clearProfileLock = () => {
       try { execSync('taskkill /F /IM chrome.exe', { stdio: 'ignore', windowsHide: true }); }
       catch { /* 没有 chrome 在跑也正常 */ }
     } else {
-      try { execSync(`pkill -f "${ud}" || true`, { stdio: 'ignore' }); } catch {}
+      try { execSync(`pkill -f "${ud}" || true`, { stdio: 'ignore', windowsHide: true }); } catch {}
     }
   } catch (e) {
     console.warn('[bot-real] clearProfileLock: kill failed:', (e as any)?.message);
