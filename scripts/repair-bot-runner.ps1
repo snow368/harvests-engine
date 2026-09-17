@@ -153,9 +153,27 @@ if ($SkipChromeRestart) {
   Line '杀掉所有 chrome（VPS 上已无抓取器，不会误伤）...'
   Get-Process chrome -ErrorAction SilentlyContinue | Stop-Process -Force
   Start-Sleep -Seconds 3
+  # 🔴 2026-09-17 二修：Chrome 会把上次的会话原样恢复 —— 实测重启后一次带出 **6 个标签**。
+  # connectOverCDP 会逐个 attach 每个 page target，其中只要有一个僵尸 tag，整个连接就卡到超时
+  # （这就是日志里 `<ws connected>` 之后 `Timeout 20000ms exceeded` 的机制）。bot 只需要 1 个标签，
+  # 所以启动前先把会话恢复文件清掉，从根上不让它复活。
+  foreach ($f in @('Current Session','Current Tabs','Last Session','Last Tabs')) {
+    Remove-Item (Join-Path $ProfileDir "Default\$f") -Force -ErrorAction SilentlyContinue
+  }
+  Remove-Item (Join-Path $ProfileDir 'Default\Sessions') -Recurse -Force -ErrorAction SilentlyContinue
   if (Test-Path $ChromePath) {
-    Start-Process $ChromePath -ArgumentList "--remote-debugging-port=$CdpPort", "--user-data-dir=$ProfileDir", "--new-window", 'https://www.instagram.com'
-    Line "已启动 Chrome：profile=$ProfileDir  CDP=$CdpPort"
+    Start-Process $ChromePath -ArgumentList @(
+      "--remote-debugging-port=$CdpPort",
+      '--remote-allow-origins=*',
+      "--user-data-dir=$ProfileDir",
+      '--no-first-run',
+      '--no-default-browser-check',
+      '--disable-session-crashed-bubble',
+      '--hide-crash-restore-bubble',
+      '--new-window',
+      'https://www.instagram.com'
+    )
+    Line "已启动 Chrome：profile=$ProfileDir  CDP=$CdpPort（已清会话恢复文件，目标 = 单标签）"
   } else {
     Line ('!! 找不到 Chrome 可执行文件：' + $ChromePath + ' —— 请修改脚本顶部的 $ChromePath')
   }
@@ -171,9 +189,55 @@ if ($SkipChromeRestart) {
     } catch {}
   }
   if (-not $ok) { Line '!! 30 秒内 CDP 没起来，请手动确认 Chrome 窗口是否开着' }
+  # 🔴 协议探活：HTTP 通 ≠ 协议通。连 WS 发 Browser.getVersion，5s 无响应 = 主线程假死。
+  if ($ok) {
+    $frozen = $true
+    try {
+      $wsUrl = (Invoke-RestMethod "http://localhost:$CdpPort/json/version" -TimeoutSec 3).webSocketDebuggerUrl
+      if ($wsUrl) {
+        $ws = New-Object System.Net.WebSockets.ClientWebSocket
+        $cts = [System.Threading.CancellationTokenSource]::new()
+        $cts.CancelAfter(5000)
+        $ws.ConnectAsync([Uri]$wsUrl, $cts.Token).Wait(6000) | Out-Null
+        if ($ws.State -eq 'Open') {
+          $bytes = [System.Text.Encoding]::UTF8.GetBytes('{"id":1,"method":"Browser.getVersion"}')
+          $seg = [ArraySegment[byte]]::new($bytes)
+          $ws.SendAsync($seg, 'Text', $true, $cts.Token).Wait(3000) | Out-Null
+          $buf = New-Object byte[] 4096
+          $rseg = [ArraySegment[byte]]::new($buf)
+          $recv = $ws.ReceiveAsync($rseg, $cts.Token)
+          if ($recv.Wait(6000)) {
+            $txt = [System.Text.Encoding]::UTF8.GetString($buf, 0, $recv.Result.Count)
+            if ($txt -match '"id"\s*:\s*1') { $frozen = $false }
+          }
+          $ws.Dispose()
+        }
+      }
+    } catch {}
+    if ($frozen) {
+      Line '!! CDP 协议探活失败：端口通、WS 握手成功但 Browser.getVersion 无响应 = Chrome 主线程假死。'
+      Line '   → 请把 Chrome 窗口关掉后重跑本脚本的第 4 步（或加 -SkipChromeRestart:$false 全量重跑）。'
+    } else {
+      Line 'CDP 协议探活：OK（Browser.getVersion 有响应）'
+    }
+  }
+  # 清成单标签：有僵尸 tag 会让 connectOverCDP 整体卡死
   try {
-    $tabs = (Invoke-RestMethod "http://localhost:$CdpPort/json/list" -TimeoutSec 3).Count
-    Line "当前标签数 = $tabs（IG 会话靠 profile 保留，不需要重登；若被踢到登录页请在窗口里登录一次）"
+    $list = @(Invoke-RestMethod "http://localhost:$CdpPort/json/list" -TimeoutSec 3)
+    $pages = @($list | Where-Object { $_.type -eq 'page' })
+    if ($pages.Count -gt 1) {
+      $keep = $pages | Where-Object { $_.url -like '*instagram.com*' } | Select-Object -First 1
+      if (-not $keep) { $keep = $pages[0] }
+      $n = 0
+      foreach ($p in $pages) {
+        if ($p.id -ne $keep.id) {
+          try { Invoke-RestMethod "http://localhost:$CdpPort/json/close/$($p.id)" -TimeoutSec 3 | Out-Null; $n++ } catch {}
+        }
+      }
+      Line "已清掉 $n 个多余标签，只保留：$($keep.url)"
+    }
+    $tabs = @(Invoke-RestMethod "http://localhost:$CdpPort/json/list" -TimeoutSec 3).Count
+    Line "当前标签数 = $tabs（期望 1；IG 会话靠 profile 保留，不需要重登；若被踢到登录页请在窗口里登录一次）"
   } catch {}
 }
 

@@ -726,6 +726,80 @@ const probeCdpHttp = async (): Promise<{ ok: boolean; reason: string; targets: n
     clearTimeout(timer);
   }
 };
+
+// ── CDP 协议探活（2026-09-17 二修）──────────────────────────────────────
+// VPS 实测把真因顶到了更深一层：HTTP 探活**通过**（/json/version 与 /json/list 都答），
+// 但 connectOverCDP 在 `<ws connected>` 之后 `Timeout 20000ms exceeded`。
+// 即：端口通 → WS 握手成功 → **CDP 命令不响应**。这就是 ig-watchdog 8-14 日志里反复出现的
+// "CDP protocol FROZEN (fake-dead)"：Chrome 主线程假死，HTTP 端点还在答，协议层已经死。
+// 单靠 HTTP 探活永远判不出来，只会在 20s 后抛一句毫无信息量的 timeout。
+// 判据直接复用 scripts/cdp-probe.cjs：连 browser 级 WS + 发 Browser.getVersion，5s 无响应即冻结。
+const probeCdpProtocol = async (): Promise<{ ok: boolean; reason: string }> => {
+  const base = BOT_CDP_URL.replace(/\/+$/, '');
+  let wsUrl = '';
+  try {
+    const ctl = new AbortController();
+    const t = setTimeout(() => ctl.abort(), 4_000);
+    const r = await fetch(`${base}/json/version`, { signal: ctl.signal });
+    clearTimeout(t);
+    wsUrl = String(((await r.json()) as any)?.webSocketDebuggerUrl || '');
+  } catch (e: any) {
+    return { ok: false, reason: `http_unreachable:${e?.message || e}` };
+  }
+  if (!wsUrl) return { ok: false, reason: 'no_webSocketDebuggerUrl' };
+  const WS = (globalThis as any).WebSocket;
+  if (typeof WS !== 'function') return { ok: true, reason: 'ws_probe_skipped' };
+  return await new Promise((resolve) => {
+    let done = false;
+    let ws: any = null;
+    const finish = (ok: boolean, reason: string) => {
+      if (done) return;
+      done = true;
+      try { ws?.close?.(); } catch {}
+      resolve({ ok, reason });
+    };
+    const timer = setTimeout(() => finish(false, 'protocol_frozen_5s'), 5_000);
+    try { ws = new WS(wsUrl); } catch (e: any) { clearTimeout(timer); return finish(false, `ws_ctor:${e?.message || e}`); }
+    ws.onopen = () => { try { ws.send(JSON.stringify({ id: 1, method: 'Browser.getVersion' })); } catch {} };
+    ws.onmessage = (m: any) => {
+      try {
+        const j = JSON.parse(String(m?.data || ''));
+        if (j && j.id === 1) { clearTimeout(timer); finish(true, 'ok'); }
+      } catch {}
+    };
+    ws.onerror = () => { clearTimeout(timer); finish(false, 'ws_error'); };
+    ws.onclose = () => { clearTimeout(timer); finish(false, 'ws_closed_before_reply'); };
+  });
+};
+
+// ── CDP 标签清理（2026-09-17 二修）──────────────────────────────────────
+// connectOverCDP 会把**每一个** page target 都 attach 一遍；其中只要有一个僵尸 target
+// （渲染进程已死、target 仍挂在 /json/list 上），整个 browser 级连接就会卡到超时。
+// VPS 重启后 Chrome 一启动就带 6 个标签（profile 自动恢复了上次会话）—— 正是高发条件，
+// bot 只需要 1 个 IG 页。这里在连接前用纯 HTTP 的 /json/close/{id} 把多余标签关掉；
+// 只关标签、**不杀 Chrome**（9222 那个 Chrome 是三个进程共用的）。
+const healCdpTargets = async (): Promise<void> => {
+  const base = BOT_CDP_URL.replace(/\/+$/, '');
+  try {
+    const r = await fetch(`${base}/json/list`);
+    const list = ((await r.json()) as any[]) || [];
+    const pages = list.filter((t) => t?.type === 'page' && t?.id);
+    if (pages.length <= 1) return;
+    const keep = pages.find((t) => String(t.url || '').includes('instagram.com')) || pages[0];
+    const extra = pages.filter((t) => t.id !== keep.id);
+    let closed = 0;
+    for (const t of extra.slice(0, 12)) {
+      try {
+        const cr = await fetch(`${base}/json/close/${t.id}`);
+        if (cr.ok) closed++;
+      } catch {}
+    }
+    console.log(`[bot-real] cdp-target-heal: ${pages.length} page targets → closed ${closed}, kept "${String(keep.url || '').slice(0, 60)}"`);
+  } catch (e: any) {
+    console.log(`[bot-real] cdp-target-heal skipped: ${e?.message || e}`);
+  }
+};
+
 const randInt = (min: number, max: number) => Math.floor(Math.random() * (max - min + 1)) + min;
 const hashString = (s: string) => {
   let h = 0;
@@ -2077,6 +2151,20 @@ const ensureBrowser = async () => {
       if (!pre.ok) {
         throw new Error(`cdp_unreachable(${BOT_CDP_URL}) → ${pre.reason}。需要重启 9222 那个 Chrome 窗口（scripts\\repair-bot-runner.ps1 第 4 步）`);
       }
+      // 🔴 2026-09-17 二修：HTTP 通 ≠ 协议通。
+      // VPS 实测 line: `<ws connected>` 之后 `connectOverCDP: Timeout 20000ms exceeded`
+      // = Chrome 主线程假死（协议冻结）。HTTP 探活查不出，只会给一句没信息量的 timeout。
+      const proto = await probeCdpProtocol();
+      if (!proto.ok) {
+        throw new Error(
+          `cdp_protocol_frozen(${BOT_CDP_URL}) → ${proto.reason}。` +
+          `端口通、WS 能握手，但 CDP 命令无响应（Chrome 主线程卡死，HTTP 探活看不出来）。` +
+          `bot 自己不动这个 Chrome（9222 是三进程共用）—— 请跑 scripts\\repair-bot-runner.ps1 第 4 步重启它。`
+        );
+      }
+      // 僵尸 page target 会让 connectOverCDP 逐 target attach 时整体卡死（重启后 Chrome
+      // 常一次带出 6 个恢复标签）。连接前先清成单标签。
+      await healCdpTargets();
       browser = await chromium.connectOverCDP(BOT_CDP_URL, { timeout: CDP_CONNECT_TIMEOUT_MS });
       // 🔴 2026-09-17：**不能**再 `browser.contexts()[0] || await browser.newContext()`。
       // Playwright 在 CDP 连接上不支持 newContext()，而旧代码又会在任务失败时
