@@ -13,14 +13,23 @@ import { detectPostType, detectSubject, isPiercingHandle, detectPostIntent, reco
 import { runUnfollowMaintenance, countFollowing } from './unfollow-maintenance';
 import { isCommentBlacklisted } from './comment-blacklist';
 
+// 2026-09-17 致命日志必须**同时**进 out 日志。
+// pm2 把 console.error 写进 error_file、console.log 写进 out_file；而运维习惯只看
+// bot-worker-out.log ⇒ 启动期的致命原因一直"看不见"（排查时 out 日志里只有重启后的
+// config 打印，看着像"启动完就没动静"，实际是 error 日志里在刷 fatal）。
+const logFatal = (...args: any[]) => {
+  console.error(...args);
+  try { console.log(...args); } catch {}
+};
+
 // 2026-08-07 全局兜底：捕获未处理异常/拒绝，避免单任务内的异步错误直接杀死整个进程
 // （此前 bot 在首个任务执行中静默退出，导致任务永远停在 leased、无法 done/failed，违反"需要跑通"要求）。
 // 注册 handler 后 Node 不会因 unhandledRejection 默认退出，进程保持存活并落盘原因。
 process.on('uncaughtException', (err: any) => {
-  console.error('[FATAL uncaughtException]', err?.stack || err);
+  logFatal('[FATAL uncaughtException]', err?.stack || err);
 });
 process.on('unhandledRejection', (reason: any) => {
-  console.error('[FATAL unhandledRejection]', reason?.stack || reason);
+  logFatal('[FATAL unhandledRejection]', reason?.stack || reason);
 });
 
 
@@ -688,6 +697,35 @@ const behaviorBuffer: Record<string, any>[] = [];
 const FLUSH_AT = 20; // flush every 20 events
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// ── CDP 预探活（2026-09-17）──────────────────────────────────────────────
+// 旧代码直接 connectOverCDP：Chrome 假死（端口通、协议冻结）时它会一直挂到超时，
+// 4 次尝试 ≈ 2.5 分钟，日志里只有一句 timeout —— 完全看不出"是 Chrome 那边不行"。
+// 现在先用 5 秒的 HTTP 探活给出**明确结论**（浏览器名 + 标签数），失败原因直接进 out 日志。
+// 标签数是 IG 页面变慢的前兆指标（browse_like 每开一个帖子页都算一个 target）。
+const CDP_CONNECT_TIMEOUT_MS = Math.max(5_000, Number(process.env.BOT_CDP_CONNECT_TIMEOUT_MS || 20_000));
+const probeCdpHttp = async (): Promise<{ ok: boolean; reason: string; targets: number }> => {
+  const base = BOT_CDP_URL.replace(/\/+$/, '');
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 5_000);
+  try {
+    const resp = await fetch(`${base}/json/version`, { signal: ctl.signal });
+    if (!resp.ok) return { ok: false, reason: `http_${resp.status}`, targets: -1 };
+    const ver: any = await resp.json().catch(() => ({}));
+    let targets = -1;
+    try {
+      const list = await fetch(`${base}/json/list`, { signal: ctl.signal });
+      if (list.ok) targets = ((await list.json()) as any[]).length;
+    } catch {}
+    console.log(`[bot-real] cdp-probe OK: ${ver?.Browser || 'unknown'} | open targets=${targets}`);
+    return { ok: true, reason: 'ok', targets };
+  } catch (e: any) {
+    const reason = e?.name === 'AbortError' ? 'timeout_5s（端口通但不响应 → Chrome 假死）' : String(e?.message || e);
+    return { ok: false, reason, targets: -1 };
+  } finally {
+    clearTimeout(timer);
+  }
+};
 const randInt = (min: number, max: number) => Math.floor(Math.random() * (max - min + 1)) + min;
 const hashString = (s: string) => {
   let h = 0;
@@ -1991,8 +2029,11 @@ const ensureBrowser = async () => {
   // Retry with backoff. 关键：每一次重试前，上一轮若已半启动了一个浏览器/标签页，
   // 必须在 catch 里把它 context.close() 掉 —— 否则孤儿浏览器 + 孤儿标签会越积越多
   // （之前"七八个 about:blank"就是这样来的：12 次重试每次都 newPage 且不清旧进程）。
-  const MAX_ATTEMPTS = 4;
-  const BACKOFF_MS = 8_000;
+  // 2026-09-17：内层重试改短（3 次 × 5s 退避）。
+  // 旧值 4 次 × 8s 退避 + 每次 30s 连接超时 ⇒ 单次 ensureBrowser 最坏 2.5 分钟，
+  // 而外层（bootstrap）现在会无限重试 ⇒ 内层只需"快速判定 + 快速交还"，不要长时间占着。
+  const MAX_ATTEMPTS = 3;
+  const BACKOFF_MS = 5_000;
   let lastErr: any;
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     try {
@@ -2031,8 +2072,22 @@ const ensureBrowser = async () => {
 
       // CDP mode (legacy): connect to an already-running Chrome.
       if (!BOT_CDP_URL) throw new Error('cdp_required_set_BOT_CDP_URL_or_use_BOT_LAUNCH_MODE_persistent');
-      browser = await chromium.connectOverCDP(BOT_CDP_URL);
-      context = browser.contexts()[0] || await browser.newContext();
+      // 🔴 2026-09-17：先 5s 探活，再连。失败原因写进 out 日志，不再是一句干巴巴的 timeout。
+      const pre = await probeCdpHttp();
+      if (!pre.ok) {
+        throw new Error(`cdp_unreachable(${BOT_CDP_URL}) → ${pre.reason}。需要重启 9222 那个 Chrome 窗口（scripts\\repair-bot-runner.ps1 第 4 步）`);
+      }
+      browser = await chromium.connectOverCDP(BOT_CDP_URL, { timeout: CDP_CONNECT_TIMEOUT_MS });
+      // 🔴 2026-09-17：**不能**再 `browser.contexts()[0] || await browser.newContext()`。
+      // Playwright 在 CDP 连接上不支持 newContext()，而旧代码又会在任务失败时
+      // `page.context().close()` —— 那关掉的正是外部 Chrome 的**默认 context**。
+      // 于是"默认 context 没了 → newContext() 抛错 → 4 次重试全败 → ensureBrowser 抛错"
+      // 彻底自锁：Chrome 明明活着（/json/version 能答），bot 却永远连不上，
+      // 表现就是心跳正常、任务一条不动。这里直接把真因说清楚。
+      context = browser.contexts()[0] || null;
+      if (!context) {
+        throw new Error('cdp_no_default_context：外部 Chrome 的默认 context 已消失（多半被上一次任务失败时的 context.close() 关掉了）。请重启 9222 的 Chrome 窗口。');
+      }
       const existingPages = context.pages();
       if (existingPages.length > 0) {
         for (const p of existingPages) {
@@ -2056,10 +2111,20 @@ const ensureBrowser = async () => {
       return;
     } catch (e) {
       lastErr = e;
-      console.error(`[bot-real] browser ensure attempt ${attempt}/${MAX_ATTEMPTS} failed: ${e?.message || e}`);
-      // 🔴 失败后若留下了半残 context，立刻关掉它，避免孤儿进程/标签堆积（多标签根因）。
-      try { if (context) { await context.close(); } } catch {}
+      logFatal(`[bot-real] browser ensure attempt ${attempt}/${MAX_ATTEMPTS} failed: ${e?.message || e}`);
+      // 🔴 2026-09-17：CDP 模式下 **绝不** `context.close()`。
+      // 那关掉的是外部 Chrome 的默认 context（= 把浏览器端所有标签一起关），
+      // 关完连下一个进程都连不上 → 变成永久自锁。CDP 模式只回收本进程的半残标签。
+      try {
+        if (BOT_LAUNCH_MODE === 'persistent') {
+          if (context) await context.close();
+        } else if (page) {
+          await page.close().catch(() => {});
+        }
+      } catch {}
       context = null as any; page = null as any;
+      // 断掉本次 CDP 连接的引用（★ 不要 browser.close()：那会真的把外部 Chrome 关掉）
+      browser = null as any;
       if (attempt < MAX_ATTEMPTS) {
         await sleep(BACKOFF_MS);
       }
@@ -4517,6 +4582,16 @@ const pollLoop = async () => {
         if (!running) break;
         await humanBreak(); // wait if currently in a break period
         // ── 执行前再确认登录态：登录页/挑战页出现则跳过本任务，不抢、不标 failed，下一轮重判 ──
+        // 🔴 2026-09-17：page 为 null 时**先尝试重建浏览器**再决定跳过。
+        // 旧写法直接 `if (!page || ...) continue`，而 pollLoop 全程没有 ensureBrowser 调用点
+        // ⇒ 一旦 page 被置空（见上面任务失败分支），这里就无限跳过：心跳在、任务永不动。
+        if (!page) {
+          try {
+            await ensureBrowser();
+          } catch (e: any) {
+            console.log(`[bot-real] page not ready — ensureBrowser retry failed: ${e?.message || e} (will retry next cycle)`);
+          }
+        }
         if (!page || await isOnLoginPage()) {
           console.log(`[bot-real] ⏸ login page present before task ${cmd?.id} — skipping (retries next cycle after you log in).`);
           await sleep(POLL_INTERVAL_MS);
@@ -4558,8 +4633,22 @@ const pollLoop = async () => {
             try { await reportCommand(cmd.id, 'failed', reason); } catch {}
           }
           // 超时/异常后重建浏览器上下文，避免脏状态传染下一个任务
+          // 🔴 2026-09-17 修复（"bot 活着但不干活"的真凶）：
+          // CDP 模式下 page.context() 就是外部 Chrome 的**默认 context**，close() 会把
+          // 整个浏览器端 context 关掉；接着 ensureBrowser 里 `browser.contexts()[0]` 变空，
+          // 而 Playwright 在 CDP 连接上又不支持 newContext() → 永远连不回来。
+          // 于是 page 恒为 null → poll 循环每 25s 打一句 "browser not ready / login page present"
+          // 就跳过，心跳照常 → 用户看到"进程活着、任务一条不动、日志一片空"。
+          // CDP 模式只能回收这一个标签页，绝不能动 context。
           try {
-            if (page) { await page.context().close().catch(() => {}); page = null as any; }
+            if (page) {
+              if (BOT_LAUNCH_MODE === 'persistent') {
+                await page.context().close().catch(() => {});
+              } else {
+                await page.close().catch(() => {});
+              }
+              page = null as any;
+            }
           } catch {}
         }
       }
@@ -4619,7 +4708,12 @@ const shutdown = async (signal: string) => {
     if (BOT_LAUNCH_MODE === 'persistent') {
       if (context) await (context as any).close?.();
     } else if (BOT_CDP_URL) {
-      if (browser) await browser.close();
+      // 🔴 2026-09-17：CDP 模式下 `browser.close()` 会**真的把外部 Chrome 关掉**
+      // （Playwright 对 connectOverCDP 的 close 透传 CDP `Browser.close`）。
+      // 那个 9222 Chrome 是 bot-worker / competitor-ig-monitor / general-intel **三个进程
+      // 共用的长命浏览器** —— 一关就全体瘫痪；随后的重启进程连不上 Chrome，又走到 exit(1)
+      // 重启循环里。停机时只断开原生连接：置空引用，随进程退出一起回收。
+      browser = null as any; context = null as any; page = null as any;
     }
   } catch {}
   process.exit(0);
@@ -4663,8 +4757,29 @@ const main = async () => {
   await Promise.all([heartbeatLoop(), pollLoop()]);
 };
 
-main().catch((err) => {
-  console.error('[bot-real] fatal:', err);
-  process.exit(1);
-});
+// 🔴 2026-09-17：启动期失败**不再** exit(1)。
+// 旧写法 `main().catch(err => process.exit(1))`：启动期任何一步抛错（最典型 = 连不上 CDP
+// Chrome）进程立刻死 → pm2 拉起 → 再死 …… VPS 实测 ↺ 42、每 ~3 分钟一轮，
+// 而 out 日志里永远只有重启后的 config 打印（fatal 落在 error 日志里，没人看）。
+// 现在改成**就地重试**：失败只打印原因 + 断开半残连接 + 等 60s 重走启动流程，进程永不退出。
+// 与 backlink 两个脚本同一条「永不退出」原则（见 ea3135f）：Windows 上"退出"最贵，
+// 每次重启都要重新 attach CDP，还会给控制台程序刷窗口。
+// 注意：这里**不调用** browser.close() —— CDP 模式下那会真的关掉外部 Chrome（见 shutdown 注释）。
+const bootstrap = async () => {
+  let attempt = 0;
+  for (;;) {
+    try {
+      await main();
+      return; // main 正常返回 = 已收到停机信号，交给 pm2 收尾
+    } catch (err: any) {
+      attempt++;
+      logFatal(`[bot-real] startup failed (attempt ${attempt}); retrying in 60s:`, err?.stack || err);
+      try { if (BOT_LAUNCH_MODE === 'persistent' && context) await (context as any).close?.(); } catch {}
+      browser = null as any; context = null as any; page = null as any;
+      await sleep(60_000);
+    }
+  }
+};
+
+void bootstrap();
 
