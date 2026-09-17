@@ -185,7 +185,15 @@ const apps = [
       HUMAN_MIMICRY_ENABLED: 'true',
       BOT_LAUNCH_MODE: 'cdp', // 连外部长命 Chrome，bot 不自起浏览器（无 SingletonLock 之战）
       BOT_EXEC_MODE: 'browse_like',
-      BOT_POLL_INTERVAL_MS: '60000',
+      // ⚠️ 2026-09-17 回收：下面三项此前**只存在于 VPS 工作区、从未进 git**，
+      //    任何人 git checkout 生态文件都会把它静默改回仓库默认值（当天就踩了）。
+      //    这里把它们固化成版本化配置，杜绝再次漂移。
+      BOT_POLL_INTERVAL_MS: '25000',
+      // 一次 browse+vision 全流程实测常需 5~15 分钟，而代码默认上限只有 5 分钟
+      // （bot-worker-real.ts:4533 `process.env.BOT_TASK_TIMEOUT_MS || 5*60_000`）→
+      // 不显式调大，任务会在半途被 task_timeout 掐断。VPS 实测用 9 分钟。
+      BOT_TASK_TIMEOUT_MS: '540000',
+      BOT_SPEED_FACTOR: '0.9', // 1.0 为基线，越大越慢
       BOT_HEARTBEAT_INTERVAL_MS: '60000',
       BOT_DAILY_TASK_TARGET: '80',
       BOT_HUMAN_BREAK_MIN_MS: '300000',
@@ -204,12 +212,13 @@ const apps = [
       BOT_DAILY_LIKE_OVERRIDE: '0',
       BOT_LIKE_COOLDOWN_MIN_HOURS: '24',
       BOT_LIKE_COOLDOWN_MAX_HOURS: '72',
-      // 评论：80 条数据中生成 15-25 条待审草稿；人工审核后每天最多发布 12 条。
+      // 评论：80 条数据中生成 25-40 条待审草稿；人工审核后每天最多发布 20 条。
+      // （2026-09-17 从 VPS 回收：VPS 实测一直是 25/40/20，仓库默认 15/25/12 会把评论量砍掉约 40%）
       BOT_COMMENT_ENABLED: 'true',
       // （评论抽签率 BOT_COMMENT_CHANCE 见下方「互动优先策略」区块）
-      BOT_COMMENT_DRAFT_DAILY_MIN: '15',
-      BOT_COMMENT_DRAFT_DAILY_MAX: '25',
-      BOT_COMMENT_PUBLISH_DAILY_MAX: '12',
+      BOT_COMMENT_DRAFT_DAILY_MIN: '25',
+      BOT_COMMENT_DRAFT_DAILY_MAX: '40',
+      BOT_COMMENT_PUBLISH_DAILY_MAX: '20',
       // 人工审核通过后逐条发布，间隔随机 8-20 分钟；冷却时间写入状态文件，重启不会绕过。
       BOT_COMMENT_PUBLISH_INTERVAL_MIN_SEC: '480',
       BOT_COMMENT_PUBLISH_INTERVAL_MAX_SEC: '1200',
@@ -219,8 +228,10 @@ const apps = [
       //   （注：VPS 那份历史上写的是 'true' → 与模板漂移，已导致 9/15 仍在 follow 别人。）
       BOT_FOLLOW_ENABLED: 'false',
       BOT_FOLLOW_BACK_ENABLED: 'false',
-      BOT_FOLLOW_DAILY_MIN: '3',
-      BOT_FOLLOW_DAILY_MAX: '8',
+      // 关注量配额（2026-09-17 从 VPS 回收）。注意：上面两个开关都是 false，
+      // 所以这两项当前**不生效**，只是保持与 VPS 实际配置一致，避免再出现"仓库/VPS 漂移"。
+      BOT_FOLLOW_DAILY_MIN: '15',
+      BOT_FOLLOW_DAILY_MAX: '25',
       BOT_FOLLOW_MIN_TOUCHES: '1',
       // 关注优先级闸门：'*' = 所有任务层级都允许关注（scheduler 当前不注入 followPriority，留空即放行；
       //   '*' 为未来按优先级排程留余地，同时避免误设为仅 high 卡住关注量）。
