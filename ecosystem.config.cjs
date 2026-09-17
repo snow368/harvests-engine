@@ -50,6 +50,18 @@ const DEFAULTS = {
   log_date_format: 'YYYY-MM-DD HH:mm:ss Z',
 };
 
+// ── 哪些 app 允许跑在「这台机器」上 ──────────────
+// 🔴 2026-09-17 用户拍板：**Google Maps 抓取器只在本机跑，VPS 不跑。**
+//    两个理由：
+//      ① VPS 是机房 IP，Google Maps 对数据中心段反爬最狠；
+//      ② 在 VPS 上 spawn python 时 pm2 daemon 没有控制台 → 每个 python 子进程
+//         都会**新分配一个可见控制台窗口**，而一次抓取可跑满 6 小时
+//         ⇒ 那个窗就一直躺在桌面上（用户原话「cmd 躺窗」）。
+//    ⇒ 默认**不把这个 app 交给 pm2**。要在这台机器上跑抓取，显式设
+//      `ENABLE_VPS_SCRAPER=1`（本机想跑时加，VPS 永远不加）。
+const ENABLE_VPS_SCRAPER = process.env.ENABLE_VPS_SCRAPER === '1';
+const SCRAPER_ONLY_APPS = new Set(['maps-scrape-scheduler']);
+
 // ── 应用列表 ────────────────────────────────────
 /** @type {import('pm2').StartOptions[]} */
 const apps = [
@@ -82,6 +94,9 @@ const apps = [
   },
 
   // ── 1b. Maps Scrape Scheduler ───────────────────
+  // 🔴 2026-09-17 用户拍板：**本机跑 scraper，VPS 不跑**。本条目默认被文件末尾的
+  //    ENABLE_VPS_SCRAPER 开关**排除**（VPS 上 pm2 根本不会拉起它），
+  //    保留在这里是为了让本机需要时能 `ENABLE_VPS_SCRAPER=1 pm2 start …` 复用同一份配置。
   // 消费 Maps Scrape 页面「加入队列」产生的 maps_scrape_jobs (pending)。
   // 串行拉起 python_scraper.py（headless 自起浏览器），scraper 自己回报 running→completed。
   // 让「前端选州 → 加入队列 → 系统自动抓取」闭环。
@@ -369,4 +384,10 @@ const apps = [
   },
 ];
 
-module.exports = { apps };
+// 🔴 抓取器默认排除（见文件上方 `ENABLE_VPS_SCRAPER` 说明）：VPS 不该跑 scraper。
+//    要在这台机器上跑抓取，启动前设 ENABLE_VPS_SCRAPER=1（仅本机用）。
+const enabledApps = ENABLE_VPS_SCRAPER
+  ? apps
+  : apps.filter((app) => !SCRAPER_ONLY_APPS.has(app.name));
+
+module.exports = { apps: enabledApps };
