@@ -744,7 +744,10 @@ const callDeepSeek = async (prompt: string): Promise<string> => {
         { role: 'user', content: prompt },
       ],
       temperature: 1.0,  // max variety, avoid repetitive phrasing
-      max_tokens: 140,
+      // 2026-09-17：140 → 400。正式版 v4 带推理输出，推理 token 也吃 max_tokens 预算，
+      //   140 会把正文腰斩 → JSON 解析失败 → 旧兜底把 `{"text": "..."` 当成评论文案存进草稿
+      //   （D1 comment_drafts id 277/278/279 就是这么来的，长度恰好 48/99/100）。
+      max_tokens: 400,
       top_p: 0.98,
     }),
   });
@@ -755,7 +758,13 @@ const callDeepSeek = async (prompt: string): Promise<string> => {
   }
 
   const data: any = await resp.json();
-  return data?.choices?.[0]?.message?.content || '';
+  const choice = data?.choices?.[0];
+  const content = choice?.message?.content || '';
+  // 截断检测：宁可判失败重试，也不让半截 JSON 流进草稿。
+  if (choice?.finish_reason === 'length') {
+    throw new Error(`truncated_by_max_tokens(len=${content.length})`);
+  }
+  return content;
 };
 
 /**
@@ -803,15 +812,24 @@ export const generateComment = async (input: CommentInput): Promise<GeneratedCom
       raw = await callDeepSeek(prompt);
     } catch (e: any) {
       // 不再让异常一路冒泡成「无原因的失败」：记下真正的错误再收摊
+      // 截断是可重试的（重试时上下文会降级，输出更短），其余硬错误直接收摊。
       lastReason = `api_error:${String(e?.message || e).slice(0, 160)}`;
+      if (/truncated_by_max_tokens/.test(String(e?.message || e))) continue;
       break;
     }
-    const parsed = safeJsonParse(raw, { text: raw.slice(0, 100), style });
+    // 解析失败时的兜底（2026-09-17 收紧）：
+    //   - 模型吐的是普通散文（无花括号）→ 仍可当评论用，保留旧行为。
+    //   - raw 里带 { 或 } ⇒ JSON 被截断/写坏，绝不能把 `{"text": "...` 当评论文案存进草稿
+    //     （comment_drafts id 277/278/279 的真凶：被批准就会把 JSON 原样打进 IG 评论框）。
+    const looksLikeJson = /[{}]/.test(raw);
+    const parsed = safeJsonParse(raw, looksLikeJson ? { text: '' } : { text: raw.slice(0, 100), style });
 
     let text = String(parsed.text || '').trim();
     // 清理常见的 AI 废话
     text = text.replace(/^(here's|here is|sure|okay|of course|absolutely)[,:!. ]+/i, '');
     text = text.replace(/[""]/g, '"').replace(/['']/g, "'");
+    // 最后一道闸：正文里残留花括号 = JSON 泄漏，宁可少一条评论也不写脏数据。
+    if (/[{}]/.test(text)) { lastReason = 'json_leak_in_text'; continue; }
     if (!text || text.length < 3) { lastReason = `too_short(model=${TEXT_MODEL})`; continue; }
     // Never truncate a generated sentence: that can cut off a word or clause.
     if (!validateCommentGrounding(text, input)) { lastReason = 'grounding_fail'; continue; }
