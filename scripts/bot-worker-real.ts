@@ -104,6 +104,12 @@ const POLL_LIMIT = Math.max(1, Math.min(5, Number(process.env.BOT_POLL_LIMIT || 
 const HEARTBEAT_INTERVAL_MS = Math.max(10000, Number(process.env.BOT_HEARTBEAT_INTERVAL_MS || 60000));
 const CONTROL_PAUSE_FILE = path.resolve(process.cwd(), 'data', 'control-pause', 'bot-worker.pause');
 let controlPauseLogged = false;
+// 🔴 2026-09-18：「人工暂停」是**最危险的静默态** —— 它让主循环每轮 continue、
+// 却既不打行为事件也不触发看门狗（看门狗主动跳过暂停期），于是「进程 online、
+// 心跳新鲜、零产出」可以无限持续，且没人查得出原因。
+// 这里节流 10 分钟写一次 D1 事件，让任何长时间的暂停在数据里留痕。
+let controlPauseLoggedAt = 0;
+const CONTROL_PAUSE_LOG_EVERY_MS = 10 * 60_000;
 const IG_BASE = (process.env.INSTAGRAM_BASE || 'https://www.instagram.com').replace(/\/+$/, '');
 const PROFILE_DIR = process.env.BOT_PROFILE_DIR || `./data/bot_profiles/${BOT_ID}`;
 const HEADLESS = String(process.env.BOT_HEADLESS || 'false').toLowerCase() === 'true';
@@ -780,9 +786,28 @@ const probeCdpProtocol = async (): Promise<{ ok: boolean; reason: string }> => {
 // 只关标签、**不杀 Chrome**（9222 那个 Chrome 是三个进程共用的）。
 const healCdpTargets = async (): Promise<void> => {
   const base = BOT_CDP_URL.replace(/\/+$/, '');
+  // ⚠️ 2026-09-18：这里过去是**裸 fetch**。它正是看门狗的"自救"路径 ——
+  //   自救路径自己挂住 = 永远没人来救。所以 CDP 的 HTTP 调用也必须有本地计时。
+  const cdpJson = async (url: string, ms = 5_000): Promise<any> => {
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(new Error('cdp_http_timeout')), ms);
+    try {
+      const r = await fetch(url, { signal: ctl.signal });
+      return await r.json().catch(() => null);
+    } catch { return null; }
+    finally { clearTimeout(timer); }
+  };
+  const cdpClose = async (url: string, ms = 5_000): Promise<boolean> => {
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(new Error('cdp_close_timeout')), ms);
+    try {
+      const r = await fetch(url, { signal: ctl.signal });
+      return !!r.ok;
+    } catch { return false; }
+    finally { clearTimeout(timer); }
+  };
   try {
-    const r = await fetch(`${base}/json/list`);
-    const list = ((await r.json()) as any[]) || [];
+    const list = ((await cdpJson(`${base}/json/list`)) as any[]) || [];
     const pages = list.filter((t) => t?.type === 'page' && t?.id);
     if (pages.length <= 1) return;
     const keep = pages.find((t) => String(t.url || '').includes('instagram.com')) || pages[0];
@@ -790,8 +815,7 @@ const healCdpTargets = async (): Promise<void> => {
     let closed = 0;
     for (const t of extra.slice(0, 12)) {
       try {
-        const cr = await fetch(`${base}/json/close/${t.id}`);
-        if (cr.ok) closed++;
+        if (await cdpClose(`${base}/json/close/${t.id}`)) closed++;
       } catch {}
     }
     console.log(`[bot-real] cdp-target-heal: ${pages.length} page targets → closed ${closed}, kept "${String(keep.url || '').slice(0, 60)}"`);
@@ -1962,6 +1986,29 @@ const fetchWithTimeout = async (url: string, init: RequestInit = {}): Promise<Re
   }
 };
 
+// 🔴 2026-09-18：**Playwright 协议调用也能永久挂住**。
+// 与 fetch 不同的是，CDP 连接"半死"（端口通、WS 通、渲染进程已死）时，`await page.xxx()`
+// 既不抛错也不返回 —— `try/catch` 接不住，Playwright 自己的 default timeout 也可能不生效
+// （超时由 driver 侧计时，driver 与浏览器一起僵住时无人来计时）。
+// 2026-09-17 19:46 起静默 13 小时、心跳照旧新鲜的形态，与这条路径完全同型：
+//   卡点在 `isOnLoginPage()` 的 `locator.count()` → `waitUntilLoggedIn()` 的 for 循环
+//   永远停在同一个 await 上 → 零行为事件、零租约、零日志。
+// 这里给出**本地计时**的兜底：超时就当作失败，让调用方按既有分支重试（绝不静默无限等）。
+const withTimeout = async <T,>(p: Promise<T>, ms: number, label: string): Promise<T | null> => {
+  let timer: any;
+  try {
+    return await Promise.race([
+      p,
+      new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), ms); }),
+    ]);
+  } catch {
+    return null;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+};
+const PW_CALL_TIMEOUT_MS = Math.max(2_000, Number(process.env.BOT_PW_CALL_TIMEOUT_MS || 15_000));
+
 const postJson = async (path: string, body: Record<string, any>) => {
   const resp = await fetchWithTimeout(`${API_BASE}${path}`, {
     method: 'POST',
@@ -1986,7 +2033,8 @@ const getJson = async (path: string) => {
 
 // ── AI Core helpers (sales_chats D1 sync) ──────────────────────────────
 const aicorePost = async (path: string, body: Record<string, any>): Promise<any> => {
-  const resp = await fetch(`${AI_CORE_BASE}${path}`, {
+  // 2026-09-18：改用带硬超时的 fetch —— 聊天同步是 best-effort，绝不该因对端挂住而拖死主循环。
+  const resp = await fetchWithTimeout(`${AI_CORE_BASE}${path}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: AI_CORE_AUTH },
     body: JSON.stringify(body),
@@ -2365,6 +2413,27 @@ const isInvalidProfilePage = async () => {
 // ── 登录闸门（2026-08-08 重写）：未登录/挑战页时暂停一切任务派发，原地等用户登录，
 //    不抢任务、不标 failed；每次校验主动跳回 IG 首页强制重判会话（persistent profile 会话
 //    过期会被 IG 踢回登录页，不导航就发现不了）；并用正向"已登录"信号兜底 ──
+// 登录闸门的"为什么在等"——用于把**不可见的静默等待**变成 D1 里可见的事件。
+// 2026-09-17 那 13 小时静默里最缺的就是这一条：循环在等，但没人知道它在等什么。
+let loginGateNote = '';
+let loginGateLoggedAt = 0;
+const LOGIN_GATE_LOG_EVERY_MS = 10 * 60_000;
+// 把「循环在等」写进 D1（节流 10 分钟），这样前台/查询就能看见 bot 到底卡在哪一道闸，
+// 而不是只看到"心跳正常"和一片空白。
+const noteLoginGate = (reason: string, extra: Record<string, any> = {}) => {
+  loginGateNote = reason;
+  const now = Date.now();
+  if (now - loginGateLoggedAt < LOGIN_GATE_LOG_EVERY_MS) return;
+  loginGateLoggedAt = now;
+  console.log(`[bot-real] ⏸ login gate: ${reason} — task execution paused, heartbeat alive.`);
+  logBehavior('login_gate_waiting', { reason, ...extra });
+};
+const clearLoginGateNote = () => {
+  if (!loginGateLoggedAt) return;
+  loginGateLoggedAt = 0;
+  loginGateNote = '';
+  logBehavior('login_gate_resumed', {});
+};
 const isOnLoginPage = async (): Promise<boolean> => {
   if (!page) return true; // 没页面一律当未登录，安全等待
   try {
@@ -2374,10 +2443,14 @@ const isOnLoginPage = async (): Promise<boolean> => {
     if (url.includes('/accounts/onetap')) return true;
     if (url.includes('/accounts/emailsignup')) return true;
     // 登录页才有 username 输入框（用户正输入用户名时也算"未登录"）
-    const loginInputCount = await page.locator('input[name="username"]').count();
+    // ⚠️ 2026-09-18：count() 是协议调用，CDP 半死时会**永不返回**（catch 接不住"挂住"）
+    //    ⇒ 用本地计时兜底；超时按「无法确认 = 视为未登录」处理，宁可不干活也不瞎干。
+    const loginInputCount = await withTimeout(page.locator('input[name="username"]').count(), PW_CALL_TIMEOUT_MS, 'login_input_count');
+    if (loginInputCount === null) { loginGateNote = 'login_probe_timeout'; return true; }
     if (loginInputCount > 0) return true;
     // 部分挑战页用其他字段
-    const challengeInput = await page.locator('input[name="security_code"], input[name="email"]').count();
+    const challengeInput = await withTimeout(page.locator('input[name="security_code"], input[name="email"]').count(), PW_CALL_TIMEOUT_MS, 'challenge_input_count');
+    if (challengeInput === null) { loginGateNote = 'challenge_probe_timeout'; return true; }
     if (challengeInput > 0) return true;
   } catch {}
   return false;
@@ -2475,6 +2548,7 @@ const waitUntilLoggedIn = async (): Promise<boolean> => {
           console.log('[bot-real] ⏸  NOT logged in / challenge — pausing ALL task execution. Finish logging in on the IG window (username + password), then the bot auto-resumes. No tasks will be grabbed or marked failed while waiting.');
           printed = true;
         }
+        noteLoginGate(loginGateNote || 'on_login_or_challenge_page', { url: String(page?.url?.() || '').slice(0, 200) });
         await sleep(5000);
         continue;
       }
@@ -2487,6 +2561,7 @@ const waitUntilLoggedIn = async (): Promise<boolean> => {
           console.log('[bot-real] ⏸  session expired (redirected to login) — pausing ALL task execution, waiting for you to log in. No tasks grabbed or marked failed.');
           printed = true;
         }
+        noteLoginGate(loginGateNote || 'session_expired_redirect_to_login', { url: String(page?.url?.() || '').slice(0, 200) });
         await sleep(5000);
         continue;
       }
@@ -2498,6 +2573,7 @@ const waitUntilLoggedIn = async (): Promise<boolean> => {
           console.log('[bot-real] ⏸  page not on instagram.com yet (still loading/blank) — waiting for load.');
           printed = true;
         }
+        noteLoginGate('page_not_on_instagram', { url: String(page?.url?.() || '').slice(0, 200) });
         await sleep(5000);
         continue;
       }
@@ -2505,6 +2581,7 @@ const waitUntilLoggedIn = async (): Promise<boolean> => {
         console.log('[bot-real] ✅ login confirmed (on instagram.com, not on login/challenge) — resuming tasks.');
         printed = true;
       }
+      clearLoginGateNote();
       return true;
     } catch {}
     await sleep(5000);
@@ -4615,6 +4692,10 @@ const pollLoop = async () => {
       if (fs.existsSync(CONTROL_PAUSE_FILE)) {
         if (!controlPauseLogged) console.log(`[bot-real] control pause active: ${CONTROL_PAUSE_FILE}`);
         controlPauseLogged = true;
+        if (Date.now() - controlPauseLoggedAt >= CONTROL_PAUSE_LOG_EVERY_MS) {
+          controlPauseLoggedAt = Date.now();
+          logBehavior('bot_control_paused', { file: CONTROL_PAUSE_FILE, note: 'loop alive but intentionally idle' });
+        }
         await sleep(POLL_INTERVAL_MS);
         continue;
       }

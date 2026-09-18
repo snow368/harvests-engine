@@ -731,8 +731,19 @@ Return ONLY JSON: {"text": "your comment", "style": "tattoo_artist"}`;
  * 调用 DeepSeek API 生成评论
  */
 const callDeepSeek = async (prompt: string): Promise<string> => {
+  // 🔴 2026-09-18：这里是**曾经的无限等待点**。裸 `await fetch` 一旦对端不返回
+  // （socket 半开 / keep-alive 复用后对端静默），主循环就地冻死：不抛错、不打日志、
+  // 心跳照旧新鲜 —— 与 2026-09-17 那 13 小时静默的形态完全一致。
+  // 评论生成只是"锦上添花"，绝不值得用整个 bot 的命去等它。
+  const ctl = new AbortController();
+  const timer = setTimeout(
+    () => ctl.abort(new Error('deepseek_timeout')),
+    Math.max(10_000, Number(process.env.BOT_DEEPSEEK_TIMEOUT_MS || 90_000)),
+  );
+  try {
   const resp = await fetch(`${DEEPSEEK_BASE}/chat/completions`, {
     method: 'POST',
+    signal: ctl.signal,
     headers: {
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${DEEPSEEK_API_KEY}`,
@@ -765,6 +776,9 @@ const callDeepSeek = async (prompt: string): Promise<string> => {
     throw new Error(`truncated_by_max_tokens(len=${content.length})`);
   }
   return content;
+  } finally {
+    clearTimeout(timer);
+  }
 };
 
 /**
