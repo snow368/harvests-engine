@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     注册 Windows Task Scheduler 任务，开机自启 InkFlow Bot Workers
 .DESCRIPTION
