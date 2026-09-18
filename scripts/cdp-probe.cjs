@@ -16,7 +16,7 @@
 //      * 任何异常都把原因打到 stderr，不再吞掉
 const http = require('http');
 const PORT = 9222;
-const WS_BUDGET_MS = 5000;
+const WS_BUDGET_MS = 6000;
 
 function getVersion(timeoutMs = 3000) {
   return new Promise((resolve, reject) => {
@@ -92,31 +92,35 @@ async function main() {
     process.exit(3);
   }
 
-  // localhost may resolve to ::1 while Chrome listens on 127.0.0.1 only -> try both,
-  // and give the primary URL a second chance at the end (one dropped frame is jitter).
-  const urls = [];
+  // localhost may resolve to ::1 while Chrome listens on 127.0.0.1 only -> try both.
+  // NOTE: the host variants are deduped, so an explicit trailing copy of the primary
+  // URL is appended for the retry. (v2.0 listed a duplicate primary inside the array
+  // and the dedup swallowed it, which silently disabled the retry its commit message
+  // promised - a 1-in-N dropped frame then still reported 'frozen'.)
+  const variants = [];
   for (const u of [
     wsUrl,
     wsUrl.replace('://localhost:', '://127.0.0.1:'),
     wsUrl.replace('://127.0.0.1:', '://localhost:'),
-    wsUrl,
   ]) {
-    if (u && !urls.includes(u)) urls.push(u);
+    if (u && !variants.includes(u)) variants.push(u);
   }
+  const urls = variants.concat([wsUrl]); // trailing = deliberate second chance
 
   const attempts = [];
   let sawFrozen = false;
   for (const u of urls) {
+    const t0 = Date.now();
     const r = await probeWs(u, WS_BUDGET_MS);
-    attempts.push({ u, ...r });
+    attempts.push({ u, ms: Date.now() - t0, ...r });
     if (r.verdict === 'ok') {
-      console.log('OK ' + ver.Browser + ' | ' + u + ' | ' + r.detail);
+      console.log('OK ' + ver.Browser + ' | ' + u + ' | ' + r.detail + ' | ' + (Date.now() - t0) + 'ms');
       process.exit(0);
     }
     if (r.verdict === 'frozen') sawFrozen = true;
   }
 
-  for (const a of attempts) console.error('  ' + a.verdict + '  ' + a.u + '  (' + a.detail + ')');
+  for (const a of attempts) console.error('  ' + a.verdict + '  ' + a.u + '  ' + a.ms + 'ms  (' + a.detail + ')');
 
   if (sawFrozen) {
     console.error('FROZEN: websocket handshake succeeded but the browser never answered Browser.getVersion');
