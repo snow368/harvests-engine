@@ -1921,7 +1921,18 @@ const followAudienceLead = async (handle: string): Promise<boolean> => {
   } catch { return false; }
 };
 
+// ── 主循环停滞看门狗的状态（2026-09-18）────────────────────────────────
+// 判据说明参见下方 stallWatchdogLoop。任何"有产出"的动作都会走 logBehavior，
+// 所以在 logBehavior 里刷时间戳：**静默超过阈值 = 卡死**，比看任务量可靠得多。
+const STALL_WATCHDOG_MS = Math.max(300_000, Number(process.env.BOT_STALL_WATCHDOG_MS || 25 * 60_000));
+const STALL_RESTART_COOLDOWN_MS = Math.max(600_000, Number(process.env.BOT_STALL_RESTART_COOLDOWN_MIN || 20) * 60_000);
+const STALL_RESTART_MARKER = path.join(STATE_DIR, 'bot-worker.stall-restart.json');
+let lastProgressAt = Date.now();
+let stallHeals = 0;
+const touchProgress = () => { lastProgressAt = Date.now(); };
+
 const logBehavior = (event: string, data: Record<string, any> = {}) => {
+  touchProgress();
   try {
     behaviorBuffer.push({ ...data, ts: new Date().toISOString(), botId: BOT_ID, event });
   } catch {}
@@ -1934,8 +1945,25 @@ const buildHeaders = (): Record<string, string> => {
   return headers;
 };
 
+// 🔴 2026-09-18：所有出网请求加**硬超时**。
+// 旧实现是裸 `await fetch(...)`：socket 一旦卡住（undici keep-alive 复用 + 中转抖动）
+// 就永不返回 ⇒ pollLoop 整条主循环**静默卡死**，而 heartbeatLoop 是并发的另一条循环，
+// 照常刷新 last_heartbeat ⇒ 前台显示 online 的「假绿灯」。
+// 2026-09-17 19:46 实测就这样卡了 13 小时（零事件、零租约，但心跳一直新鲜）。
+// 宁可有超时报错让上层 catch 接管重试，也不要无限等。
+const API_FETCH_TIMEOUT_MS = Math.max(5_000, Number(process.env.BOT_API_TIMEOUT_MS || 45_000));
+const fetchWithTimeout = async (url: string, init: RequestInit = {}): Promise<Response> => {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(new Error(`fetch_timeout_${API_FETCH_TIMEOUT_MS}ms`)), API_FETCH_TIMEOUT_MS);
+  try {
+    return await fetch(url, { ...init, signal: ctl.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+};
+
 const postJson = async (path: string, body: Record<string, any>) => {
-  const resp = await fetch(`${API_BASE}${path}`, {
+  const resp = await fetchWithTimeout(`${API_BASE}${path}`, {
     method: 'POST',
     headers: buildHeaders(),
     body: JSON.stringify(body)
@@ -1948,7 +1976,7 @@ const postJson = async (path: string, body: Record<string, any>) => {
 };
 
 const getJson = async (path: string) => {
-  const resp = await fetch(`${API_BASE}${path}`, { headers: buildHeaders() });
+  const resp = await fetchWithTimeout(`${API_BASE}${path}`, { headers: buildHeaders() });
   const text = await resp.text();
   let payload: any = null;
   try { payload = text ? JSON.parse(text) : null; } catch { payload = { raw: text }; }
@@ -4579,6 +4607,9 @@ let dmReplyTick = 0;
 const pollLoop = async () => {
   while (running) {
     try {
+      // 每轮循环打点：区分「健康但空闲」（循环照转 = 有打点）和「真的卡死」
+      // （循环转不动 = 无打点）。没有这一行，队列没料时的正常空转会被看门狗误判。
+      touchProgress();
       // A warm pause keeps the browser/session and heartbeat alive but does not
       // poll or lease new tasks. The host control listener owns this flag.
       if (fs.existsSync(CONTROL_PAUSE_FILE)) {
@@ -4792,6 +4823,82 @@ const heartbeatLoop = async () => {
   }
 };
 
+// ── 停滞看门狗（2026-09-18）────────────────────────────────────────────
+// 症状（2026-09-17 19:46 实测卡死 13 小时）：pollLoop 卡在一个永不 resolve 的 await 里
+//   ⇒ 零事件、零租约（`automation_tasks` 无 leased），
+//   而 heartbeatLoop 是 `Promise.all` 里并发的另一条循环 ⇒ last_heartbeat 照常新鲜
+//   ⇒ 前台显示 online 的**假绿灯**，看数据看不出毛病。
+//   （旧兜底是 pm2 之外的 ig-watchdog.ps1，已停用 ⇒ 现在没有任何人在管这件事。）
+// 处理顺序，越往后越重；**绝不 browser.close()**（9222 被三进程共用）：
+//   ① 探活 CDP 协议，不健康就清僵尸 target
+//   ② 关掉当前 page（带 5s 竞速，因为协议假死时 close 自己也会挂）
+//      ⇒ 卡住的 await 立刻 reject，pollLoop 自己的 catch 接管，下一轮 ensureBrowser 重建
+//   ③ 连续 3 次软修复仍无进展 → 受控 exit(1)，让 pm2 拉起干净进程
+//      （pm2 托管默认 windowsHide:true，不弹窗；20 分钟冷却标记防崩溃循环）
+const stallWatchdogLoop = async () => {
+  while (running) {
+    await sleep(60_000);
+    try {
+      // 账号休息 / 人工暂停期间本来就"没动作"，不算卡死
+      if (isAccountResting()) { touchProgress(); continue; }
+      if (fs.existsSync(CONTROL_PAUSE_FILE)) { touchProgress(); continue; }
+
+      const silentMs = Date.now() - lastProgressAt;
+      if (silentMs < STALL_WATCHDOG_MS) {
+        if (stallHeals > 0) {
+          console.log(`[bot-real] ✅ progress resumed after ${stallHeals} stall heal(s).`);
+          stallHeals = 0;
+        }
+        continue;
+      }
+
+      stallHeals++;
+      const mins = Math.round(silentMs / 60_000);
+      console.error(`[bot-real] ⚠️ poll STALL: no progress for ~${mins}min (heal #${stallHeals}) — probing CDP, then breaking the hung await.`);
+      logBehavior('poll_stall_detected', { silentMs, heal: stallHeals });
+
+      const probe = await probeCdpProtocol().catch(() => ({ ok: false, reason: 'probe_threw' }));
+      if (!probe.ok) {
+        console.error(`[bot-real] ⚠️ CDP protocol unhealthy during stall (${probe.reason}) — healing targets.`);
+        await healCdpTargets().catch(() => {});
+      }
+
+      if (page) {
+        await Promise.race([
+          page.close({ runBeforeUnload: false }).catch(() => {}),
+          sleep(5_000),
+        ]);
+      }
+      try { await (browser as any)?.disconnect?.(); } catch {}
+      page = null;
+      browser = null;
+      touchProgress();
+
+      if (stallHeals >= 3) {
+        let lastRestart = 0;
+        try { lastRestart = Number(JSON.parse(fs.readFileSync(STALL_RESTART_MARKER, 'utf8'))?.at || 0); } catch {}
+        if (Date.now() - lastRestart <= STALL_RESTART_COOLDOWN_MS) {
+          console.error(`[bot-real] ⚠️ stall restart skipped (cooldown ${Math.round(STALL_RESTART_COOLDOWN_MS / 60_000)}min active) — soft heals continue.`);
+          continue;
+        }
+        try {
+          fs.writeFileSync(STALL_RESTART_MARKER, JSON.stringify({ at: Date.now(), reason: 'poll_stall', silentMs }), 'utf8');
+        } catch {}
+        console.error('[bot-real] ⚠️ poll stall not healed after soft attempts — controlled restart (exit 1) so pm2 brings up a clean process.');
+        try {
+          if (behaviorBuffer.length > 0) {
+            const batch = behaviorBuffer.splice(0);
+            await postJson('/api/automation/behavior-logs', { logs: batch });
+          }
+        } catch {}
+        process.exit(1);
+      }
+    } catch (err: any) {
+      console.error('[bot-real] stall watchdog error:', String(err?.message || err));
+    }
+  }
+};
+
 const shutdown = async (signal: string) => {
   console.log(`[bot-real] shutdown on ${signal}`);
   running = false;
@@ -4855,7 +4962,7 @@ const main = async () => {
   await fetchNoiseSites(); // load noise sites from cloud
   await registerBot();
   await ensureBrowser();
-  await Promise.all([heartbeatLoop(), pollLoop()]);
+  await Promise.all([heartbeatLoop(), pollLoop(), stallWatchdogLoop()]);
 };
 
 // 🔴 2026-09-17：启动期失败**不再** exit(1)。
