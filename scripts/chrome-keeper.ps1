@@ -18,6 +18,9 @@
     * It does NOT pm2 delete anything. pm2 owns bot-worker's lifetime.
     * After a Chrome recovery it calls `pm2 restart bot-worker --update-env` so the
       bot re-attaches cleanly to the new browser (disable with -NoBotRestart).
+    * It will NOT kill Chrome on a 'frozen' verdict alone. A restart additionally
+      requires the bot's out log to be stale by $BotLogStaleMin, because the probe
+      once reported 'frozen' while the bot was demonstrably still liking posts.
 
   USAGE (VPS, Administrator PowerShell):
     cd C:\harvests\harvests-engine
@@ -27,6 +30,13 @@
     powershell -NoProfile -ExecutionPolicy Bypass -File scripts\chrome-keeper.ps1
     # 3) resident loop, every 2 minutes
     powershell -NoProfile -ExecutionPolicy Bypass -File scripts\chrome-keeper.ps1 -Loop
+
+  What a healthy dry run looks like:
+    [DRYRUN] CDP port is up; protocol = ok; bot-worker-out.log age = 0.3 min.
+    [DRYRUN] -> nothing to do.
+  If it prints `protocol = frozen` together with a fresh log age, that is the known
+  false positive and no action is taken - run `node scripts\cdp-probe.cjs` by hand to
+  see the real reason on stderr.
 
   Register as a scheduled task (every 5 minutes, survives RDP disconnect):
     schtasks /create /tn "harvests-chrome-keeper" /sc minute /mo 5 /rl highest /f ^
@@ -52,6 +62,12 @@ $ProbeScript = Join-Path $PSScriptRoot 'cdp-probe.cjs'
 $LogDir     = 'C:\harvests\logs'
 $LogPath    = Join-Path $LogDir 'chrome-keeper.log'
 $CdpBase    = "http://localhost:$CdpPort"
+$BotOutLog  = 'C:\harvests\logs\bot-worker-out.log'
+# A "frozen" verdict alone is not enough to justify killing Chrome. The bot writes to
+# its out log every poll cycle (25s) and on every behavior event, so a log that was
+# touched within this many minutes is hard evidence the browser is fine. See the
+# false-positive incident in Test-CdpProtocol's header.
+$BotLogStaleMin = 10
 
 if (-not (Test-Path $LogDir)) { New-Item -ItemType Directory -Path $LogDir -Force | Out-Null }
 
@@ -73,22 +89,39 @@ function Test-CdpPort {
   } catch { return $false }
 }
 
-# HTTP reachable != protocol alive. See ig-watchdog.ps1 header for the full story:
+# Age in minutes of the bot's out log; -1 when the file does not exist.
+# Used as the corroborating signal for a 'frozen' verdict - never kill Chrome on the
+# probe's word alone.
+function Get-BotLogAgeMin {
+  if (-not (Test-Path $BotOutLog)) { return -1 }
+  return [math]::Round(((Get-Date) - (Get-Item $BotOutLog).LastWriteTime).TotalMinutes, 1)
+}
+
+# HTTP reachable != protocol alive. See the cdp-probe.cjs header for the full story:
 # Chrome can keep answering /json/version while its main thread is frozen, which
 # makes connectOverCDP hang until timeout.
 # Returns 'ok' | 'frozen' | 'unknown'
+#
+# Exit codes from cdp-probe.cjs v2:
+#   0 = healthy | 1 = frozen | 2 = no global WebSocket (node too old) | 3 = probe itself failed
+# 2 and 3 mean "we could not tell" - NEVER treat them as a freeze. v1 conflated
+# "handshake ok but no reply" with "ws.on('error')" under exit 1, and that false
+# 'frozen' would have made this keeper kill a perfectly healthy Chrome every pass.
 function Test-CdpProtocol {
   if (Test-Path $ProbeScript) {
     $node = Get-Command node -ErrorAction SilentlyContinue
     if ($node) {
-      & node $ProbeScript 2>$null
-      switch ($LASTEXITCODE) {
-        1 { return 'frozen' }
-        0 { return 'ok' }
-        2 { return 'unknown' }
-        default { return 'unknown' }
-      }
+      $probeOut = ''
+      try { $probeOut = (& node $ProbeScript 2>&1 | Out-String).Trim() } catch {}
+      $rc = $LASTEXITCODE
+      if ($rc -eq 0) { return 'ok' }
+      if ($rc -eq 1) { return 'frozen' }
+      if ($probeOut) { Log "  (probe rc=$rc detail: $($probeOut -replace '\s+', ' '))" }
+      return 'unknown'
     }
+    Log '  (node not on PATH - falling back to the inline websocket probe)'
+  } else {
+    Log "  (cdp-probe.cjs not found at $ProbeScript - using the inline websocket probe)"
   }
   # Fallback: inline browser-level WS probe (Browser.getVersion, 5s budget).
   try {
@@ -97,8 +130,14 @@ function Test-CdpProtocol {
     $ws  = New-Object System.Net.WebSockets.ClientWebSocket
     $cts = [System.Threading.CancellationTokenSource]::new()
     $cts.CancelAfter(5000)
-    $ws.ConnectAsync([Uri]$wsUrl, $cts.Token).Wait(6000) | Out-Null
-    if ($ws.State -ne 'Open') { try { $ws.Dispose() } catch {}; return 'frozen' }
+    # A failed/timed-out connect is "cannot tell", NOT a freeze - the old code returned
+    # 'frozen' here and that is how a healthy Chrome got killed.
+    $connected = $false
+    try { $connected = $ws.ConnectAsync([Uri]$wsUrl, $cts.Token).Wait(6000) } catch { $connected = $false }
+    if (-not $connected -or $ws.State -ne 'Open') {
+      try { $ws.Dispose() } catch {}
+      return 'unknown'
+    }
     $bytes = [System.Text.Encoding]::UTF8.GetBytes('{"id":1,"method":"Browser.getVersion"}')
     $seg   = [ArraySegment[byte]]::new($bytes)
     $ws.SendAsync($seg, 'Text', $true, $cts.Token).Wait(3000) | Out-Null
@@ -228,8 +267,18 @@ function Invoke-KeeperPass {
   $portUp = Test-CdpPort
   if ($DryRun) {
     if (-not $portUp) { Log '[DRYRUN] CDP port 9222 is DOWN - a real run would restart Chrome and restart bot-worker.'; return }
-    $p = Test-CdpProtocol
-    Log "[DRYRUN] CDP port is up; protocol = $p - no action taken."
+    $p   = Test-CdpProtocol
+    $age = Get-BotLogAgeMin
+    Log "[DRYRUN] CDP port is up; protocol = $p; bot-worker-out.log age = $age min."
+    if ($p -eq 'frozen' -and $age -ge 0 -and $age -lt $BotLogStaleMin) {
+      Log '[DRYRUN] -> a real run would NOT act: the bot log is fresh, so the freeze verdict is a FALSE POSITIVE.'
+    } elseif ($p -eq 'frozen') {
+      Log '[DRYRUN] -> a real run WOULD restart Chrome (probe says frozen AND the bot log is stale).'
+    } elseif ($p -eq 'unknown') {
+      Log '[DRYRUN] -> a real run would NOT act: the probe could not tell (rc=2/3 is not a freeze).'
+    } else {
+      Log '[DRYRUN] -> nothing to do.'
+    }
     return
   }
   if (-not $portUp) {
@@ -247,7 +296,20 @@ function Invoke-KeeperPass {
 
   $proto = Test-CdpProtocol
   if ($proto -eq 'frozen') {
-    Log '[ALERT] CDP protocol FROZEN (port answers, commands do not) -> restarting Chrome.'
+    # Corroborate before killing anything. 2026-09-18: the probe reported 'frozen' at
+    # 05:04:33 UTC while the bot logged like_post x5 at 05:04:55 - the browser was fine
+    # and acting on the probe alone would have restarted Chrome every 5 minutes.
+    $age = Get-BotLogAgeMin
+    if ($age -lt 0) {
+      Log '[WARN] probe says FROZEN but bot-worker-out.log is missing - cannot corroborate. NOT restarting.'
+      return
+    }
+    if ($age -lt $BotLogStaleMin) {
+      Log "[WARN] probe says FROZEN but bot-worker-out.log was written $age min ago -> the bot is still working, this is a FALSE POSITIVE. Not touching Chrome."
+      Log '       If this repeats every pass, the probe itself is broken: run `node scripts\cdp-probe.cjs` by hand and read stderr.'
+      return
+    }
+    Log "[ALERT] CDP protocol FROZEN (port answers, commands do not; bot log silent for $age min) -> restarting Chrome."
     Stop-AllChrome
     if (Start-CleanChrome) {
       Compress-CdpTabs
@@ -259,9 +321,9 @@ function Invoke-KeeperPass {
     return
   }
   if ($proto -eq 'unknown') {
-    Log '[WARN] protocol probe unavailable (no cdp-probe.cjs / node) - port check only.'
+    Log '[WARN] protocol probe unavailable or inconclusive (probe rc=2/3) - port check only, no action.'
   } else {
-    Log '[OK] Chrome CDP healthy (port + protocol).'
+    Log "[OK] Chrome CDP healthy (port + protocol). bot log age = $(Get-BotLogAgeMin) min."
   }
 }
 
