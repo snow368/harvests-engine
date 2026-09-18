@@ -2,22 +2,36 @@
   fix-popup-windows.ps1 - stop Task Scheduler from flashing console windows on the VPS.
 
   WHY THIS EXISTS (2026-09-18, user report: a CMD window keeps popping up):
-    A scheduled task whose action is a console program WITHOUT -WindowStyle Hidden
-    gets a brand-new *visible* console window every single time it fires, in the
-    interactive session. `harvests-bot-autosync` runs every 5 minutes = 288
-    flashes per day. That is the entire popup story.
+    A scheduled task whose action is a console program gets a brand-new *visible*
+    console window every single time it fires, in the interactive session.
+    `harvests-bot-autosync` runs every 5 minutes = 288 flashes per day. That is
+    the entire popup story.
 
     It is NOT pm2: ForkMode.js launches apps with windowsHide: true.
     It is NOT the bot's own child processes: scripts/check-windows-hide.mjs
     audits every spawn/exec in the pm2-managed scripts and they all pass
     ("9 managed scripts, 5 call points, all carry windowsHide").
 
+  TWO ROUNDS, TWO DIFFERENT FIXES - do not confuse them:
+
+    ROUND 1 (default mode): prepend -WindowStyle Hidden.
+      Removes the window for most people. Correct, cheap, behaviour-preserving
+      (PowerShell accepts named parameters in any order).
+
+    ROUND 2 (-UseWrapper): replace the whole command with wscript.exe + run-hidden.vbs.
+      Needed because -WindowStyle Hidden does NOT stop the console from being
+      CREATED - the OS creates the console host before PowerShell code runs and
+      PowerShell only hides it afterwards, which is visible as a flash. This was
+      confirmed on the VPS on 2026-09-18: after round 1 was applied to every
+      task, the flash was still there. wscript.exe is a GUI-subsystem binary, so
+      no console is ever created; WshShell.Run(..., 0, True) starts the child
+      with SW_HIDE from the first frame, and still propagates the exit code.
+      USE THIS MODE IF THE FLASH SURVIVED ROUND 1.
+
   WHAT IT DOES:
     * Enumerates every ENABLED scheduled task outside \Microsoft\ (built-ins are
       left alone). Nothing is ever deleted, nothing is ever created.
-    * powershell.exe / pwsh.exe action missing -WindowStyle Hidden -> fixed in
-      place by PREPENDING "-WindowStyle Hidden". PowerShell accepts its named
-      parameters in any order, so this is behaviour-preserving.
+    * powershell.exe / pwsh.exe action -> rewritten in place.
       Applied via Set-ScheduledTask (never schtasks /TR), so quoting cannot be
       mangled; trigger / principal / settings are preserved untouched.
     * cmd / node / python actions -> reported as MANUAL and never guessed at,
@@ -29,28 +43,28 @@
       (the VPS has the second shape: PM2Resume runs %APPDATA%\npm\pm2.cmd
       resurrect). PowerShell's call operator still runs .bat/.cmd through
       cmd.exe, and -WorkingDirectory is carried over.
-    * Idempotent: anything that already has -WindowStyle Hidden is skipped.
+    * Idempotent in both modes: anything already correct is skipped. Wrapper mode
+      also rewrites tasks that already carry -WindowStyle Hidden, on purpose,
+      because that is exactly the population that still flashed.
+    * Wrapper mode REFUSES any command line containing a double quote, because
+      the wrapper has to embed it inside quotes. Those are listed as MANUAL.
 
   USAGE (VPS, Administrator PowerShell):
     cd C:\harvests\harvests-engine
     # 0) prove the classifier itself (no scheduler access, changes nothing)
     powershell -NoProfile -ExecutionPolicy Bypass -File scripts\fix-popup-windows.ps1 -SelfTest
     # 1) see the exact plan, change nothing
-    powershell -NoProfile -ExecutionPolicy Bypass -File scripts\fix-popup-windows.ps1 -DryRun
+    powershell -NoProfile -ExecutionPolicy Bypass -File scripts\fix-popup-windows.ps1 -DryRun -UseWrapper
     # 2) apply, then read the built-in VERIFY table
-    powershell -NoProfile -ExecutionPolicy Bypass -File scripts\fix-popup-windows.ps1
-    # 3) optional: also convert cmd /c "<file>" actions
-    powershell -NoProfile -ExecutionPolicy Bypass -File scripts\fix-popup-windows.ps1 -FixCmd
-
-  Typical manual leftover:
-    Task "InkFlow Bot Workers" -> cmd /c ...\start-bots.bat  (AtStartup only, so
-    it costs one flash per boot, not 288/day). Rerun with -FixCmd, or rewrite the
-    action yourself as a hidden PowerShell launcher for that path.
+    powershell -NoProfile -ExecutionPolicy Bypass -File scripts\fix-popup-windows.ps1 -UseWrapper
+    # 3) undo is mechanical: the plan prints the original command line as "was:",
+    #    so it can be fed straight back into New-ScheduledTaskAction.
 
   ASCII-only on purpose: Windows PowerShell 5.1 reads a BOM-less .ps1 as ANSI(936),
   where a UTF-8 Chinese comment can emit a trailing 0x60 (backtick) = line
   continuation, which swallows the next brace and breaks the file with
   "MissingCatchOrFinally". Keeping this file pure ASCII makes that impossible.
+  run-hidden.vbs is ASCII-only for the same reason.
 #>
 [CmdletBinding()]
 param(
@@ -59,27 +73,39 @@ param(
   [string]$NameLike = '*',
   # Also convert `cmd /c "<one existing file>"` into a hidden launcher. Opt-in.
   [switch]$FixCmd,
+  # Round 2: route every console action through wscript.exe + run-hidden.vbs.
+  [switch]$UseWrapper,
+  # Path to the launcher. Defaults to run-hidden.vbs next to this script.
+  [string]$WrapperPath = '',
   # Run the classifier against built-in fixtures and exit. Touches nothing.
   [switch]$SelfTest
 )
 
 $ErrorActionPreference = 'Continue'
 
+if ([string]::IsNullOrEmpty($WrapperPath)) {
+  $WrapperPath = Join-Path $PSScriptRoot 'run-hidden.vbs'
+}
+
 # --- classification rules -------------------------------------------------
 # Note the `\b` instead of `$` in $otherRe: a task action is usually
 #   cmd /c "C:\...\start-bots.bat"
 # and the trailing quote made an anchored `\.bat$` test miss it, so a real
 # popup source was silently reported as "nothing to do". Match the token.
-$hideRe  = '-WindowStyle\s+Hidden'
-$psExeRe = '(?i)(powershell|pwsh)(\.exe)?$'
+$hideRe   = '-WindowStyle\s+Hidden'
+$psExeRe  = '(?i)(powershell|pwsh)(\.exe)?$'
 $cmdExeRe = '(?i)^(.*\\)?cmd(\.exe)?$'
-$otherRe = '(?i)\.(bat|cmd|ps1|vbs)\b|\b(node|python|pythonw|wscript|cscript|conhost)\b|\bpm2\b'
+$wsExeRe  = '(?i)wscript(\.exe)?$'
+$otherRe  = '(?i)\.(bat|cmd|ps1|vbs)\b|\b(node|python|pythonw|wscript|cscript|conhost)\b|\bpm2\b'
 
 function Resolve-Action {
   param(
     [string]$Exe,
     [string]$Arg,
-    [bool]$AllowCmd = $false
+    [bool]$AllowCmd = $false,
+    # Wrapper mode must revisit actions that already say -WindowStyle Hidden:
+    # those are precisely the ones that still flashed.
+    [bool]$IgnoreHidden = $false
   )
 
   # kind: skip | fix | manual | ignore
@@ -87,14 +113,24 @@ function Resolve-Action {
 
   if ([string]::IsNullOrEmpty($Exe)) { return $r }
 
-  if ($Arg -match $hideRe) {
+  # Already routed through the launcher.
+  if (($Exe -match $wsExeRe) -and ($Arg -match '(?i)run-hidden\.vbs')) {
+    $r.kind = 'skip'
+    return $r
+  }
+
+  if ((-not $IgnoreHidden) -and ($Arg -match $hideRe)) {
     $r.kind = 'skip'
     return $r
   }
 
   if ($Exe -match $psExeRe) {
     $r.kind = 'fix'
-    $r.newArgs = '-WindowStyle Hidden ' + $Arg
+    if ($Arg -match $hideRe) {
+      $r.newArgs = $Arg                      # do not stack a second Hidden
+    } else {
+      $r.newArgs = '-WindowStyle Hidden ' + $Arg
+    }
     return $r
   }
 
@@ -135,14 +171,56 @@ function Resolve-Action {
   return $r
 }
 
+# A bare `powershell` in a task action resolves through the machine PATH, which
+# a scheduled task does have. Pin the absolute path anyway: the wrapper string is
+# built once and then lives in the scheduler, where a PATH change is invisible.
+function Resolve-FullProgram {
+  param([string]$Exe)
+  if ($Exe -match '(?i)^powershell(\.exe)?$') {
+    $p = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    if (Test-Path -LiteralPath $p) { return $p }
+  }
+  return $Exe
+}
+
+function Get-WscriptPath {
+  $p = Join-Path $env:SystemRoot 'System32\wscript.exe'
+  if (Test-Path -LiteralPath $p) { return $p }
+  return 'wscript.exe'
+}
+
+# Wrap an already-resolved command so that no console is ever created.
+function Wrap-Action {
+  param(
+    [string]$Exe,
+    [string]$Arg,
+    [string]$VbsPath
+  )
+
+  $r = @{ kind = 'manual'; newExe = $Exe; newArgs = $Arg }
+
+  $inner = ((Resolve-FullProgram -Exe $Exe) + ' ' + $Arg).Trim()
+
+  # The inner command line is embedded inside a quoted argument, so a double
+  # quote in it would be re-parsed by wscript. Refuse rather than guess.
+  if ($inner -match '"') { return $r }
+
+  $r.kind = 'fix'
+  $r.newExe = Get-WscriptPath
+  $r.newArgs = '"' + $VbsPath + '" "' + $inner + '"'
+  return $r
+}
+
 if ($SelfTest) {
   $batSample = 'C:\harvests\harvests-engine\start-bots.bat'
   $fixtures = @(
     @{ n = 'autosync (real shape)';  e = 'powershell.exe'; a = '-NoProfile -ExecutionPolicy Bypass -File C:\harvests\harvests-engine\scripts\vps-bot-autosync.ps1'; want = 'fix' },
+    @{ n = 'autosync (no .exe!)';    e = 'powershell';     a = '-ExecutionPolicy Bypass -File C:\harvests\harvests-engine\scripts\vps-bot-autosync.ps1'; want = 'fix' },
     @{ n = 'b2-archive (real shape)'; e = 'powershell.exe'; a = '-NoProfile -ExecutionPolicy Bypass -File C:\harvests\harvests-engine\archive-vision-samples.ps1'; want = 'fix' },
     @{ n = 'full path to powershell'; e = 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'; a = '-File "C:\x\y.ps1"'; want = 'fix' },
     @{ n = 'pwsh 7';                 e = 'pwsh.exe';       a = '-NoProfile -File C:\x\y.ps1'; want = 'fix' },
     @{ n = 'already hidden';         e = 'powershell.exe'; a = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File C:\x\y.ps1'; want = 'skip' },
+    @{ n = 'already wrapped';        e = 'wscript.exe';    a = '"C:\h\run-hidden.vbs" "C:\x\p.exe -File C:\x\y.ps1"'; want = 'skip' },
     @{ n = 'cmd + quoted .bat';      e = 'cmd.exe';        a = ('/c "' + $batSample + '"'); want = 'manual' },
     @{ n = 'batch AS the execute';   e = 'C:\Users\Administrator\AppData\Roaming\npm\pm2.cmd'; a = 'resurrect'; want = 'manual' },
     @{ n = 'node job';               e = 'node.exe';       a = 'C:\x\bot.cjs'; want = 'manual' },
@@ -151,7 +229,7 @@ if ($SelfTest) {
   )
 
   $bad = 0
-  Write-Host '=== SELF TEST (classifier only, no scheduler access) ==='
+  Write-Host '=== SELF TEST 1/2: classifier (no scheduler access) ==='
   Write-Host ('{0,-24} {1,-9} {2,-9} {3}' -f 'case', 'got', 'want', 'rewrite')
   foreach ($f in $fixtures) {
     $got = Resolve-Action -Exe $f.e -Arg $f.a -AllowCmd $false
@@ -192,6 +270,28 @@ if ($SelfTest) {
     if ($c3.kind -ne 'fix') { $bad++; Write-Host '   ^^ MISMATCH (expected fix)' }
   }
 
+  # --- round 2: the wrapper -------------------------------------------------
+  # The autosync task is the one that runs 288 times a day, so it is the shape
+  # that matters. Assert the exact string the scheduler will receive.
+  $autosyncArg = '-ExecutionPolicy Bypass -File C:\harvests\harvests-engine\scripts\vps-bot-autosync.ps1'
+  $w1 = Wrap-Action -Exe 'powershell'      -Arg $autosyncArg -VbsPath 'C:\h\scripts\run-hidden.vbs'
+  $w2 = Wrap-Action -Exe 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' -Arg '-WindowStyle Hidden -File C:\x\y.ps1' -VbsPath 'C:\h\scripts\run-hidden.vbs'
+  $w3 = Wrap-Action -Exe 'powershell.exe'  -Arg '-Command "& ''C:\x\y.cmd'' resurrect"' -VbsPath 'C:\h\scripts\run-hidden.vbs'
+
+  Write-Host ''
+  Write-Host '=== SELF TEST 2/2: -UseWrapper (nothing touches the scheduler) ==='
+  Write-Host ('  powershell <args>        -> ' + $w1.kind)
+  Write-Host ('    ' + $w1.newExe + ' ' + $w1.newArgs)
+  if ($w1.kind -ne 'fix')       { $bad++; Write-Host '   ^^ MISMATCH (expected fix)' }
+  if ($w1.newArgs -notmatch '(?i)run-hidden\.vbs') { $bad++; Write-Host '   ^^ MISMATCH (launcher not in the command line)' }
+  if ($w1.newExe  -notmatch '(?i)wscript')         { $bad++; Write-Host '   ^^ MISMATCH (not wscript)' }
+
+  Write-Host ('  already -WindowStyle Hidden -> ' + $w2.kind + '  (wrapper mode must still rewrite it)')
+  if ($w2.kind -ne 'fix') { $bad++; Write-Host '   ^^ MISMATCH (expected fix)' }
+
+  Write-Host ('  command line has a quote  -> ' + $w3.kind + '  (correctly refused: cannot embed safely)')
+  if ($w3.kind -ne 'manual') { $bad++; Write-Host '   ^^ MISMATCH (expected manual)' }
+
   Write-Host ''
   if ($bad -eq 0) {
     Write-Host 'RESULT: classifier OK (0 mismatches).'
@@ -209,6 +309,15 @@ try {
 
 if (-not $isAdmin) {
   Write-Host 'WARN: not elevated. Set-ScheduledTask on a "run with highest privileges" task will fail.'
+}
+
+if ($UseWrapper) {
+  if (-not (Test-Path -LiteralPath $WrapperPath)) {
+    Write-Host ('ERROR: -UseWrapper needs the launcher, and it is not there: ' + $WrapperPath)
+    Write-Host '       Point -WrapperPath at run-hidden.vbs and try again. Nothing was changed.'
+    exit 3
+  }
+  Write-Host ('MODE: wrapper -> ' + $WrapperPath)
 }
 
 # --- scan -----------------------------------------------------------------
@@ -230,7 +339,13 @@ foreach ($t in (Get-ScheduledTask)) {
   $arg = [string]$a.Arguments
   $tid = $t.TaskPath + $t.TaskName
 
-  $r = Resolve-Action -Exe $exe -Arg $arg -AllowCmd ([bool]$FixCmd)
+  $r = Resolve-Action -Exe $exe -Arg $arg -AllowCmd ([bool]$FixCmd) -IgnoreHidden ([bool]$UseWrapper)
+
+  # Round 2 composes on top of round 1: whatever Resolve-Action decided, the
+  # resulting command line is what gets wrapped.
+  if ($UseWrapper -and ($r.kind -eq 'fix')) {
+    $r = Wrap-Action -Exe $r.newExe -Arg $r.newArgs -VbsPath $WrapperPath
+  }
 
   if ($r.kind -eq 'skip')    { $already += $tid; continue }
   if ($r.kind -eq 'ignore')  { continue }
@@ -254,7 +369,7 @@ foreach ($t in (Get-ScheduledTask)) {
 Write-Host ''
 Write-Host ('Scanned ' + $total + ' enabled task(s) outside \Microsoft\.')
 Write-Host ''
-Write-Host ('=== ALREADY HIDDEN (' + $already.Count + ') ===')
+Write-Host ('=== ALREADY CORRECT (' + $already.Count + ') ===')
 foreach ($s in $already) { Write-Host ('  ok   ' + $s) }
 
 Write-Host ''
@@ -317,10 +432,14 @@ foreach ($t in (Get-ScheduledTask)) {
   if ($null -eq $a) { continue }
   $mark = 'MISSING'
   if ([string]$a.Arguments -match $hideRe) { $mark = 'hidden' }
+  if (([string]$a.Execute -match $wsExeRe) -and ([string]$a.Arguments -match 'run-hidden\.vbs')) { $mark = 'wrapped' }
   $line = '  ' + $mark.PadRight(8) + ' [' + [string]$t.State + ']  ' + $t.TaskPath + $t.TaskName
   $line = $line + '  ::  ' + [string]$a.Execute + ' ' + [string]$a.Arguments
   Write-Host $line
 }
 
 Write-Host ''
-Write-Host 'Any row still marked MISSING is a cmd/node/python action - see the MANUAL list above.'
+Write-Host 'Now prove it did not break the schedule (the risk here is a lost TRIGGER,'
+Write-Host 'not the window): Get-ScheduledTaskInfo must still show a NextRunTime, and'
+Write-Host 'LastTaskResult must go back to 0 on the next fire.'
+Write-Host 'Any row still marked MISSING is a cmd/node/python action - see MANUAL above.'
