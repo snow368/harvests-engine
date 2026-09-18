@@ -71,8 +71,34 @@ $BotOutLog  = 'C:\harvests\logs\bot-worker-out.log'
 # completing, i.e. the browser is NOT frozen. See the false-positive incident in
 # Test-CdpProtocol's header.
 $BotLogStaleMin = 10
+$StatusFile = Join-Path $LogDir 'chrome-keeper-status.json'
+$script:KeeperRestartedBot = $false
 
 if (-not (Test-Path $LogDir)) { New-Item -ItemType Directory -Path $LogDir -Force | Out-Null }
+
+# Machine-readable outcome for the front-end "system health" board: bot-worker reads
+# this file on every heartbeat and ships it to /api/system/health, where a stale or
+# failed keeper turns a block red. Without it the dashboard can only guess.
+#
+# Deliberately NOT called on -DryRun: a dry run must never look like a healthy pass,
+# otherwise the panel would show green while the scheduled task sits disabled.
+#
+# Keep the notes ASCII-only - this file has no BOM and PS 5.1 would mis-decode it.
+function Set-KeeperStatus([string]$result, [string]$verdict, [string]$note, [string]$action) {
+  try {
+    $obj = [ordered]@{
+      at           = [int64](([DateTime]::UtcNow - [DateTime]'1970-01-01').TotalMilliseconds)
+      result       = $result
+      verdict      = $verdict
+      note         = $note
+      action       = $action
+      botRestarted = [bool]$script:KeeperRestartedBot
+    }
+    $json = ($obj | ConvertTo-Json -Compress)
+    # UTF8 WITHOUT BOM on purpose - the bot does JSON.parse() and a BOM would break it
+    [System.IO.File]::WriteAllText($StatusFile, $json, (New-Object System.Text.UTF8Encoding($false)))
+  } catch {}
+}
 
 function Log([string]$m) {
   $line = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') $m"
@@ -256,6 +282,7 @@ function Restart-Bot {
     & $pm2 start ecosystem.config.cjs --only bot-worker --update-env 2>&1 | Out-Null
     & $pm2 save 2>$null | Out-Null
     Pop-Location
+    $script:KeeperRestartedBot = $true
     return
   }
   # restart (not delete+start): keeps the pm2 entry and its env, and the bump in the
@@ -263,6 +290,7 @@ function Restart-Bot {
   Push-Location $EngineDir
   & $pm2 restart bot-worker --update-env 2>&1 | Out-Null
   Pop-Location
+  $script:KeeperRestartedBot = $true
   Log '  pm2 restart bot-worker --update-env done (bot re-attaches to the new browser)'
 }
 
@@ -291,8 +319,10 @@ function Invoke-KeeperPass {
       Compress-CdpTabs
       Restart-Bot
       Log '[FIXED] Chrome is back and reachable.'
+      Set-KeeperStatus 'alert_fixed' 'down' 'port 9222 had no listener; Chrome restarted' 'restart_chrome'
     } else {
       Log '[FAIL] Chrome restart did not produce a reachable CDP port - check the Chrome window manually.'
+      Set-KeeperStatus 'alert_failed' 'down' 'port 9222 down and the Chrome restart did not bring it back' 'restart_chrome'
     }
     return
   }
@@ -305,11 +335,13 @@ function Invoke-KeeperPass {
     $age = Get-BotLogAgeMin
     if ($age -lt 0) {
       Log '[WARN] probe says FROZEN but bot-worker-out.log is missing - cannot corroborate. NOT restarting.'
+      Set-KeeperStatus 'warn' 'frozen' 'probe said frozen but the bot log is missing; could not corroborate, no action' 'none'
       return
     }
     if ($age -lt $BotLogStaleMin) {
       Log "[WARN] probe says FROZEN but bot-worker-out.log was written $age min ago -> the bot is still working, this is a FALSE POSITIVE. Not touching Chrome."
       Log '       If this repeats every pass, the probe itself is broken: run `node scripts\cdp-probe.cjs` by hand and read stderr.'
+      Set-KeeperStatus 'warn' 'frozen' "false positive: probe said frozen but the bot log was written $age min ago" 'none'
       return
     }
     Log "[ALERT] CDP protocol FROZEN (port answers, commands do not; bot log silent for $age min) -> restarting Chrome."
@@ -318,15 +350,19 @@ function Invoke-KeeperPass {
       Compress-CdpTabs
       Restart-Bot
       Log '[FIXED] Chrome replaced and protocol responsive.'
+      Set-KeeperStatus 'alert_fixed' 'frozen' "protocol frozen and the bot log was silent for $age min; Chrome replaced" 'restart_chrome'
     } else {
       Log '[FAIL] Chrome restart did not clear the freeze - close the Chrome window by hand and rerun.'
+      Set-KeeperStatus 'alert_failed' 'frozen' 'Chrome restart did not clear the protocol freeze' 'restart_chrome'
     }
     return
   }
   if ($proto -eq 'unknown') {
     Log '[WARN] protocol probe unavailable or inconclusive (probe rc=2/3) - port check only, no action.'
+    Set-KeeperStatus 'warn' 'unknown' 'protocol probe inconclusive (rc=2/3); port check only' 'none'
   } else {
     Log "[OK] Chrome CDP healthy (port + protocol). bot log age = $(Get-BotLogAgeMin) min."
+    Set-KeeperStatus 'ok' 'ok' "port + protocol healthy; bot log age $(Get-BotLogAgeMin) min" 'none'
   }
 }
 

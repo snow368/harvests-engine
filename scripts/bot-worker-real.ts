@@ -2078,6 +2078,67 @@ const registerBot = async () => {
   });
 };
 
+// ---------------------------------------------------------------------------
+// 运行时自检 + 基础设施状态上报（喂给前台「系统健康」面板）
+//
+// 2026-09-18 那次 13 小时卡死的教训：**心跳是假绿灯**，它和任务主循环在
+// Promise.all 里并发跑，主循环挂住时心跳照跳、pm2 照 online。所以心跳里除了
+// 进度，还要带上「只有本进程知道的实话」：
+//   * 浏览器 CDP 是**什么时候**连上的（不是布尔值，是时间戳 —— 时间戳才能暴露陈旧）；
+//   * 两个守护脚本（chrome-keeper / vps-bot-autosync）的状态文件内容 + 新鲜度。
+// 前台按这些判据把坏掉的板块画红，而不是看 pm2 的状态灯。
+//
+// ⚠️ 这里任何一项失败都不能影响心跳本身 —— 全部包在 try/catch 里，读不到就报 null。
+// ---------------------------------------------------------------------------
+const runtimeDiag = {
+  startedAt: Date.now(),
+  // 每次 CDP 连接成功就刷新；前台据此判断「浏览器还能不能用」
+  browserConnectedAt: 0,
+  browserConnectCount: 0,
+  lastCdpFailure: '' as string,
+  lastCdpFailureAt: 0,
+};
+
+const INFRA_STATUS_FILES = {
+  autosync: 'C:\\harvests\\logs\\autosync-status.json',
+  chromeKeeper: 'C:\\harvests\\logs\\chrome-keeper-status.json',
+};
+
+type InfraProbe = {
+  at: number;
+  ageSec: number;
+  result: string;
+  note?: string;
+  head?: string;
+  remoteHead?: string;
+  restarted?: boolean;
+  verdict?: string;
+} | null;
+
+const readInfraStatus = (file: string): InfraProbe => {
+  try {
+    if (!fs.existsSync(file)) return null;
+    // 状态文件由 PowerShell 写、故意不带 BOM；这里仍容忍 BOM，免得解析莫名其妙失败。
+    const raw = fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '');
+    const j = JSON.parse(raw);
+    const at = Number(j?.at || 0);
+    if (!at) return null;
+    const clip = (v: any, n: number) => (v === undefined || v === null ? undefined : String(v).slice(0, n));
+    return {
+      at,
+      ageSec: Math.max(0, Math.round((Date.now() - at) / 1000)),
+      result: clip(j.result, 40) || 'unknown',
+      note: clip(j.note, 180),
+      head: clip(j.head, 12),
+      remoteHead: clip(j.remoteHead, 12),
+      restarted: typeof j.restarted === 'boolean' ? j.restarted : undefined,
+      verdict: clip(j.verdict, 20),
+    };
+  } catch (e: any) {
+    return { at: 0, ageSec: -1, result: 'unreadable', note: String(e?.message || e).slice(0, 120) };
+  }
+};
+
 const buildWorkerDailyMeta = () => {
   const dayKey = getTodayKey();
   return {
@@ -2103,6 +2164,27 @@ const buildWorkerDailyMeta = () => {
       commentDrafts: commentDraftsToday(),
       commentsPosted: commentsPostedToday(),
       nextCommentPublishAt: Number(likeState.comments?.nextPublishAt || 0),
+    },
+    // 前台「系统健康」面板的数据源（后端 /api/system/health 读 meta.infra）。
+    // 全部字段都是可选的：任何一项读不到就 null，绝不让心跳因为自检失败而挂掉。
+    infra: {
+      startedAt: runtimeDiag.startedAt,
+      uptimeSec: Math.round((Date.now() - runtimeDiag.startedAt) / 1000),
+      browser: {
+        // connected 由「距今多久」推导，而不是连过一次就永远 true ——
+        // 前者才能暴露「连上过但后来死了」。
+        connected: runtimeDiag.browserConnectedAt > 0
+          && (Date.now() - runtimeDiag.browserConnectedAt) < 30 * 60 * 1000,
+        lastConnectedAt: runtimeDiag.browserConnectedAt,
+        connectedAgeSec: runtimeDiag.browserConnectedAt
+          ? Math.round((Date.now() - runtimeDiag.browserConnectedAt) / 1000) : null,
+        connectCount: runtimeDiag.browserConnectCount,
+        lastFailure: runtimeDiag.lastCdpFailure || null,
+        lastFailureAgeSec: runtimeDiag.lastCdpFailureAt
+          ? Math.round((Date.now() - runtimeDiag.lastCdpFailureAt) / 1000) : null,
+      },
+      autosync: readInfraStatus(INFRA_STATUS_FILES.autosync),
+      chromeKeeper: readInfraStatus(INFRA_STATUS_FILES.chromeKeeper),
     },
   };
 };
@@ -2230,6 +2312,9 @@ const ensureBrowser = async () => {
         }
         await page.bringToFront().catch(() => {});
         console.log('[bot-real] launched persistent browser (stealth mode)');
+        runtimeDiag.browserConnectedAt = Date.now();
+        runtimeDiag.browserConnectCount += 1;
+        runtimeDiag.lastCdpFailure = '';
         return;
       }
 
@@ -2289,6 +2374,9 @@ const ensureBrowser = async () => {
     } catch (e) {
       lastErr = e;
       logFatal(`[bot-real] browser ensure attempt ${attempt}/${MAX_ATTEMPTS} failed: ${e?.message || e}`);
+      // 让心跳把「连不上 Chrome 的原因」带到前台（否则前台只能看到一段没有产出的静默）
+      runtimeDiag.lastCdpFailure = String(e?.message || e).slice(0, 180);
+      runtimeDiag.lastCdpFailureAt = Date.now();
       // 🔴 2026-09-17：CDP 模式下 **绝不** `context.close()`。
       // 那关掉的是外部 Chrome 的默认 context（= 把浏览器端所有标签一起关），
       // 关完连下一个进程都连不上 → 变成永久自锁。CDP 模式只回收本进程的半残标签。

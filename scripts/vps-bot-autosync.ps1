@@ -21,6 +21,35 @@ function Log($msg) {
   Add-Content -Path $logFile -Value $line -Encoding UTF8
 }
 
+$statusFile      = Join-Path $logDir 'autosync-status.json'
+$script:afterHead  = ''
+$script:remoteHead = ''
+
+# Machine-readable outcome, for the front-end "system health" board: bot-worker reads
+# this file on every heartbeat and ships it to /api/system/health, where a stale or
+# failed autosync turns a block red. Log-only reporting is what let a broken autosync
+# look like an idle one for weeks.
+#
+# ASCII-only notes and UTF8 WITHOUT BOM - the bot does JSON.parse() on this file.
+function Write-Status([string]$result, [string]$note, [bool]$restarted) {
+  try {
+    $h = ''
+    if ($script:afterHead)  { $h  = $script:afterHead.Substring(0, [Math]::Min(12, $script:afterHead.Length)) }
+    $rh = ''
+    if ($script:remoteHead) { $rh = $script:remoteHead.Substring(0, [Math]::Min(12, $script:remoteHead.Length)) }
+    $obj = [ordered]@{
+      at         = [int64](([DateTime]::UtcNow - [DateTime]'1970-01-01').TotalMilliseconds)
+      result     = $result
+      note       = $note
+      head       = $h
+      remoteHead = $rh
+      restarted  = $restarted
+    }
+    $json = ($obj | ConvertTo-Json -Compress)
+    [System.IO.File]::WriteAllText($statusFile, $json, (New-Object System.Text.UTF8Encoding($false)))
+  } catch {}
+}
+
 # A scheduled task starts with a minimal environment where npm's global bin dir
 # (%APPDATA%\npm) is often missing from PATH. A bare `pm2` then does nothing at all,
 # and piping it to Out-Null hides that completely. Resolve it explicitly.
@@ -44,6 +73,8 @@ try {
   $pull = git pull --ff-only origin $branch 2>&1
   $pullTxt = ($pull | Out-String).Trim()
   $after = git rev-parse HEAD 2>$null
+  $script:afterHead  = $after
+  $script:remoteHead = (git rev-parse "origin/$branch" 2>$null)
 
   # 2026-09-18: this used to Log "no-change" and return. But a FAILED pull leaves HEAD
   # unchanged too, so a permanently broken autosync was indistinguishable in the log from
@@ -55,9 +86,11 @@ try {
       Log "PULL FAILED (HEAD still $($after.Substring(0,7)))"
       Log "pull: $($pullTxt -replace '\r?\n',' | ')"
       Log "HINT: local edits on the VPS block --ff-only. Inspect with: git status --short ; git stash -- <file>"
+      Write-Status 'pull-failed' 'git pull --ff-only failed - local edits probably block it (see vps-autosync.log)' $false
       exit 1
     }
     Log "no-change HEAD=$($after.Substring(0,7))"
+    Write-Status 'no-change' 'already up to date' $false
     exit 0
   }
 
@@ -68,6 +101,7 @@ try {
   $hit = @($changed | Where-Object { $watch -contains $_ })
   if ($hit.Count -eq 0) {
     Log "no watched file changed -> skip restart ($(($changed -join ', ')))"
+    Write-Status 'updated' "pulled to $($after.Substring(0,7)); no watched file changed, no restart" $false
     exit 0
   }
   Log "watched changed: $($hit -join ', ') -> restarting bot-worker"
@@ -78,6 +112,7 @@ try {
   $pm2 = Resolve-Pm2
   if (-not $pm2) {
     Log "ERROR: pm2 not found on PATH - code was updated but bot-worker was NOT restarted"
+    Write-Status 'error' 'pm2 not found on PATH - code pulled but bot-worker NOT restarted' $false
     exit 1
   }
   & $pm2 delete bot-worker 2>&1 | Out-Null
@@ -86,6 +121,8 @@ try {
   Start-Sleep -Seconds 25
   $tail = Get-Content 'C:\harvests\logs\bot-worker-out.log' -Tail 6 -ErrorAction SilentlyContinue
   Log "restarted: $(($tail -join ' || '))"
+  Write-Status 'updated' "pulled to $($after.Substring(0,7)) and restarted bot-worker ($($hit -join ', '))" $true
 } catch {
   Log "EXCEPTION: $($_.Exception.Message)"
+  Write-Status 'error' ("exception: " + $_.Exception.Message) $false
 }
