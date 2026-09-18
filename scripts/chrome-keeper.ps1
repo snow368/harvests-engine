@@ -184,21 +184,42 @@ function Compress-CdpTabs {
   } catch {}
 }
 
+# A scheduled task starts with a minimal environment: npm's global bin dir
+# (%APPDATA%\npm) is often absent from PATH, so a bare `pm2` silently does nothing
+# and only Chrome gets fixed - the bot never re-attaches. Resolve it explicitly.
+function Resolve-Pm2 {
+  $cmd = Get-Command pm2 -ErrorAction SilentlyContinue
+  if ($cmd) { return $cmd.Source }
+  $candidates = @(
+    (Join-Path $env:APPDATA 'npm\pm2.cmd'),
+    (Join-Path $env:ProgramFiles 'nodejs\pm2.cmd'),
+    'C:\Program Files\nodejs\pm2.cmd'
+  )
+  foreach ($c in $candidates) { if ($c -and (Test-Path $c)) { return $c } }
+  return $null
+}
+
 function Restart-Bot {
   if ($NoBotRestart) { Log '  (-NoBotRestart: skipping pm2 restart)'; return }
-  $desc = (& pm2 describe bot-worker 2>&1 | Out-String)
+  $pm2 = Resolve-Pm2
+  if (-not $pm2) {
+    Log '  !! pm2 not found on PATH - Chrome is fixed but the bot was NOT restarted.'
+    Log '     Fix: run the pm2 step by hand, or add %APPDATA%\npm to the machine PATH.'
+    return
+  }
+  $desc = (& $pm2 describe bot-worker 2>&1 | Out-String)
   if ($desc -match '(?i)not found|does not exist') {
     Log '  bot-worker not in pm2 - starting it'
     Push-Location $EngineDir
-    & pm2 start ecosystem.config.cjs --only bot-worker --update-env 2>&1 | Out-Null
-    & pm2 save 2>$null | Out-Null
+    & $pm2 start ecosystem.config.cjs --only bot-worker --update-env 2>&1 | Out-Null
+    & $pm2 save 2>$null | Out-Null
     Pop-Location
     return
   }
   # restart (not delete+start): keeps the pm2 entry and its env, and the bump in the
   # restart counter is a visible signal that a real reload happened.
   Push-Location $EngineDir
-  & pm2 restart bot-worker --update-env 2>&1 | Out-Null
+  & $pm2 restart bot-worker --update-env 2>&1 | Out-Null
   Pop-Location
   Log '  pm2 restart bot-worker --update-env done (bot re-attaches to the new browser)'
 }
