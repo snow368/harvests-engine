@@ -22,9 +22,13 @@
       mangled; trigger / principal / settings are preserved untouched.
     * cmd / node / python actions -> reported as MANUAL and never guessed at,
       because rewriting the payload into another interpreter is a behaviour
-      change. Opt in with -FixCmd to also convert `cmd /c "<one existing file>"`
-      into a hidden PowerShell launcher (PowerShell's call operator still runs
-      .bat/.cmd through cmd.exe, and -WorkingDirectory is carried over).
+      change. Opt in with -FixCmd to also rewrite the two shapes that are safe
+      to rewrite because the payload is a single, existing file:
+        cmd /c "<file>"        ->  hidden launcher for <file>
+        <file>.cmd <args>      ->  hidden launcher for <file> <args>
+      (the VPS has the second shape: PM2Resume runs %APPDATA%\npm\pm2.cmd
+      resurrect). PowerShell's call operator still runs .bat/.cmd through
+      cmd.exe, and -WorkingDirectory is carried over.
     * Idempotent: anything that already has -WindowStyle Hidden is skipped.
 
   USAGE (VPS, Administrator PowerShell):
@@ -110,6 +114,23 @@ function Resolve-Action {
     }
   }
 
+  # Sometimes the action *is* a batch file, with no `cmd` in sight - the VPS has
+  # exactly this:  Execute = C:\Users\Administrator\AppData\Roaming\npm\pm2.cmd
+  #                Arguments = resurrect
+  # The scheduler still creates a console for it, so it flashes just the same.
+  # Same wrapper. Refuse when the path is missing or the arguments contain a
+  # quote, because the wrapper could then be mis-parsed.
+  if ($AllowCmd -and ($Exe -match '(?i)\.(cmd|bat)$') -and (Test-Path -LiteralPath $Exe) -and ($Arg -notmatch '"')) {
+    $r.kind = 'fix'
+    $r.newExe = 'powershell.exe'
+    if ([string]::IsNullOrEmpty($Arg)) {
+      $r.newArgs = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command "& ''' + $Exe + '''"'
+    } else {
+      $r.newArgs = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command "& ''' + $Exe + ''' ' + $Arg + '"'
+    }
+    return $r
+  }
+
   $r.kind = 'manual'
   return $r
 }
@@ -123,8 +144,10 @@ if ($SelfTest) {
     @{ n = 'pwsh 7';                 e = 'pwsh.exe';       a = '-NoProfile -File C:\x\y.ps1'; want = 'fix' },
     @{ n = 'already hidden';         e = 'powershell.exe'; a = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File C:\x\y.ps1'; want = 'skip' },
     @{ n = 'cmd + quoted .bat';      e = 'cmd.exe';        a = ('/c "' + $batSample + '"'); want = 'manual' },
+    @{ n = 'batch AS the execute';   e = 'C:\Users\Administrator\AppData\Roaming\npm\pm2.cmd'; a = 'resurrect'; want = 'manual' },
     @{ n = 'node job';               e = 'node.exe';       a = 'C:\x\bot.cjs'; want = 'manual' },
-    @{ n = 'GUI app';                e = 'C:\Program Files\Microsoft\Edge\Application\msedge.exe'; a = '--headless'; want = 'ignore' }
+    @{ n = 'GUI app';                e = 'C:\Program Files\Microsoft\Edge\Application\msedge.exe'; a = '--headless'; want = 'ignore' },
+    @{ n = 'updater task';           e = 'C:\Program Files (x86)\Microsoft\EdgeUpdate\MicrosoftEdgeUpdate.exe'; a = '/c'; want = 'ignore' }
   )
 
   $bad = 0
@@ -144,10 +167,30 @@ if ($SelfTest) {
   $real = Join-Path $PSScriptRoot 'chrome-keeper.ps1'
   $c1 = Resolve-Action -Exe 'cmd.exe' -Arg ('/c "' + $real + '"') -AllowCmd $true
   $c2 = Resolve-Action -Exe 'cmd.exe' -Arg '/c "C:\definitely\not\here.cmd"' -AllowCmd $true
+
+  # The "action IS a batch file" shape. Probe for one that exists on this box so
+  # the self test actually asserts the branch instead of silently skipping.
+  # On the VPS the first candidate exists (Administrator's npm\pm2.cmd).
+  $batchSample = $null
+  foreach ($cand in @(
+    (Join-Path $env:APPDATA 'npm\pm2.cmd'),
+    (Join-Path (Split-Path $PSScriptRoot -Parent) 'start-bots.bat')
+  )) {
+    if ($cand -and (Test-Path -LiteralPath $cand)) { $batchSample = $cand; break }
+  }
+  $c3 = $null
+  if ($batchSample) { $c3 = Resolve-Action -Exe $batchSample -Arg 'run' -AllowCmd $true }
+
   Write-Host ''
   Write-Host ('=== -FixCmd BEHAVIOUR ===')
-  Write-Host ('  existing payload  -> ' + $c1.kind + '  ' + $c1.newExe + ' ' + $c1.newArgs)
-  Write-Host ('  missing payload   -> ' + $c2.kind + '  (correctly left as manual)')
+  Write-Host ('  cmd /c <existing file>  -> ' + $c1.kind + '  ' + $c1.newExe + ' ' + $c1.newArgs)
+  Write-Host ('  cmd /c <missing file>   -> ' + $c2.kind + '  (correctly left as manual)')
+  if ($null -eq $c3) {
+    Write-Host '  <batch file> as execute -> skipped (no sample batch found on this machine)'
+  } else {
+    Write-Host ('  <batch> as execute      -> ' + $c3.kind + '  ' + $c3.newExe + ' ' + $c3.newArgs)
+    if ($c3.kind -ne 'fix') { $bad++; Write-Host '   ^^ MISMATCH (expected fix)' }
+  }
 
   Write-Host ''
   if ($bad -eq 0) {
