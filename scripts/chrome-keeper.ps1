@@ -63,10 +63,13 @@ $LogDir     = 'C:\harvests\logs'
 $LogPath    = Join-Path $LogDir 'chrome-keeper.log'
 $CdpBase    = "http://localhost:$CdpPort"
 $BotOutLog  = 'C:\harvests\logs\bot-worker-out.log'
-# A "frozen" verdict alone is not enough to justify killing Chrome. The bot writes to
-# its out log every poll cycle (25s) and on every behavior event, so a log that was
-# touched within this many minutes is hard evidence the browser is fine. See the
-# false-positive incident in Test-CdpProtocol's header.
+# A "frozen" verdict alone is not enough to justify killing Chrome.
+# Reasoning (verified against bot-worker-real.ts): neither heartbeatBot nor pollLoop
+# writes to this log on a normal cycle, so a genuinely frozen browser means the bot's
+# CDP calls hang and nothing gets written at all -> the log goes stale, which is
+# exactly when action is allowed. A log touched recently means CDP commands are still
+# completing, i.e. the browser is NOT frozen. See the false-positive incident in
+# Test-CdpProtocol's header.
 $BotLogStaleMin = 10
 
 if (-not (Test-Path $LogDir)) { New-Item -ItemType Directory -Path $LogDir -Force | Out-Null }
