@@ -2370,6 +2370,10 @@ const ensureBrowser = async () => {
       }
       await page.bringToFront().catch(() => {});
       console.log(`[bot-real] connected via CDP: ${BOT_CDP_URL}`);
+      // 时间戳（不是布尔值）：前台要能看出「连接是 3 秒前刷新的」还是「2 小时前刷新的」。
+      runtimeDiag.browserConnectedAt = Date.now();
+      runtimeDiag.browserConnectCount += 1;
+      runtimeDiag.lastCdpFailure = '';
       return;
     } catch (e) {
       lastErr = e;

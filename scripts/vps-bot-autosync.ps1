@@ -3,9 +3,16 @@
 # 注册后（每 5 分钟跑一次），本机改完 he-git 并 push 到 GitHub master，VPS 无需人工干预即生效。
 #
 # 注册（VPS 上管理员 PowerShell 执行一次）：
-#   schtasks /Create /TN "harvests-bot-autosync" /TR "powershell -ExecutionPolicy Bypass -File C:\harvests\harvests-engine\scripts\vps-bot-autosync.ps1" /SC MINUTE /MO 5 /RL HIGHEST /F
+#   schtasks /Create /TN "harvests-bot-autosync" /TR "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File C:\harvests\harvests-engine\scripts\vps-bot-autosync.ps1" /SC MINUTE /MO 5 /RL HIGHEST /F
 # 查看： schtasks /Query /TN "harvests-bot-autosync" /V /FO LIST
 # 移除： schtasks /Delete /TN "harvests-bot-autosync" /F
+#
+# -WindowStyle Hidden is NOT optional: this task runs every 5 minutes, and without it
+# a console window flashes on the desktop 288 times a day. Tasks registered before
+# 2026-09-18 lack it - repair them in place with /Change (no need to delete):
+#   schtasks /Change /TN "harvests-bot-autosync" /TR "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File C:\harvests\harvests-engine\scripts\vps-bot-autosync.ps1"
+# To find every flashing task at once:
+#   Get-ScheduledTask | Where-Object { $_.TaskName -like '*harvests*' } | ForEach-Object { $a = $_.Actions | Select-Object -First 1; [pscustomobject]@{ Name = $_.TaskName; State = $_.State; Hidden = ($a.Arguments -match 'WindowStyle\s+Hidden'); Command = "$($a.Execute) $($a.Arguments)" } } | Format-Table -AutoSize -Wrap
 
 $ErrorActionPreference = 'Continue'
 $repo     = 'C:\harvests\harvests-engine'
