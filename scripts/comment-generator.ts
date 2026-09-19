@@ -590,6 +590,26 @@ export const validateCommentGrounding = (text: string, input: Pick<CommentInput,
 };
 
 /**
+ * 2026-09-19：内容形状标记 —— 只用于**测量**，不参与任何筛选、不影响是否入队。
+ * 存在的理由：改 prompt 之后必须能回答"器材词 / verdict / 第二人称 到底涨了没有"。
+ * 实测基线（220 条评论）：第二人称 4.5%、器材规格 0 条、verdict 只是偶然产物。
+ * 没有这三个数，任何 prompt 改动都无法证伪，只能靠感觉。
+ */
+export const commentShapeFlags = (text: string): Record<string, number> => {
+  const t = String(text || '');
+  return {
+    shapeGear: /\b(\d+\s*(rl|rs|mg|m1)\b|cartridge|liner|magnum|shader|single.?pass|multi.?pass|packing|grey wash|gray wash|whip shade|stencil|freehand|needle|ink cap|transfer paper)\b/i.test(t) ? 1 : 0,
+    // shapeGearSpec = 窄口径：只有**具体规格或产品**才算。这才是"Peach 的身份词"。
+    // 2026-09-19 实测 219 条：宽口径 9%、窄口径 ~0.5%（只有 1 条带 7rl）。
+    // ⇒ 工艺词（packing/whip shade/grey wash）早就在用了，缺的是规格词 —— 上一轮我说"器材词 0"
+    //   口径不对（只查了规格），这里把两个口径都留下来，免得再自欺。
+    shapeGearSpec: /\b(\d+\s*(rl|rs|mg|m1|slant)\b|cartridge|ink cap|transfer paper|grip wrap|grip tape)\b/i.test(t) ? 1 : 0,
+    shapeVerdict: /\b(that'?s the|is the (hard|whole|real|actual|unfair)|is what (makes|keeps|sells)|is the tell|is the move|is the flex|is the reason|comes down to|reads as)\b/i.test(t) ? 1 : 0,
+    shapeYou: /\b(you|your|yours)\b/i.test(t) ? 1 : 0,
+  };
+};
+
+/**
  * 构建专业纹身师视角的 prompt
  */
 const buildPrompt = (input: CommentInput, style: string): string => {
@@ -608,6 +628,11 @@ const buildPrompt = (input: CommentInput, style: string): string => {
   //   "别人描述给你听的图内容"当作可信素材引用 —— 但绝不超出观测范围去编。
   // 风格深入(STYLE-DEEP)仍仅在 high 触发：high 来自作者自标(caption/hashtag) 或 视觉确认(模型真看了图)。
   //   medium = 仅 IG alt 图 AI 猜测（可能不准），low = 无信号 —— 二者一律不深入风格、不假装懂。
+  // 2026-09-19：内容结构配额（用户实测 220 条评论后的结论）。
+  //   - VERDICT 每条都要：它提升的是**结构**（观察 → 判断），不是分布，所以不做概率。
+  //   - 第二人称按概率注入：实测只占 4.5%。100% 会让整批评论显得刻意，≈45% 足够把占比
+  //     拉过 30% 的目标线，同时保住"不是每条都在对人说话"的自然感。
+  const wantSecondPerson = Math.random() < 0.45;
   const styleForContext = conf === 'high' ? (input.style || '') : '';
   const deepAngles = conf === 'high' && input.style ? (STYLE_DEEP_ANGLES[input.style] || []) : [];
   const tattooContext = buildTattooArtistContext(postType, styleForContext);
@@ -723,7 +748,9 @@ ${input.sensitive ? '- SENSITIVE / RESPECTFUL POST: this is personal or commemor
 - You MAY name the subject/style ONLY if the caption states it or IMAGE ANALYSIS reports it. Do NOT invent a subject.
 - Tattoo slang welcome (whip shade, packing, blowout, bold will hold) but don't force it.
 - Emoji: 0-1, usually none. No hashtags, no @mentions, no quotation marks around your comment.
-
+- GEAR IS YOUR ACCENT, NOT YOUR PITCH (2026-09-19): this account is run by a tattoo-supply maker, so naming gear is what makes you a peer instead of a fan. The ban above is about SELLING (DM / bio / link / promo / price) — naming a TOOL is welcome. Two safe shapes only: (a) repeat gear the caption or IMAGE ANALYSIS already names ("running the 7rl on this one"); (b) talk about the tool CLASS or a method choice another artist could dispute ("a magnum packs that area faster than a liner ever will", "single pass on that size is the real flex"). NEVER invent a needle or machine spec the evidence does not support, and never state what they used as a fact. Keep this about METHOD, never about quality.
+- LAND A VERDICT (2026-09-19): never stop at an observation — close on a judgment another artist could DISAGREE with. Agreement AND correction both notify everyone who liked the post, so a disputable claim is the cheapest reach you have. Shapes that work: "...is the hard part", "...is the whole piece", "that is the tell", "...is what keeps it sitting flat". Praise is NOT a verdict; a verdict is a claim about METHOD or RESULT.
+${wantSecondPerson ? `- SPEAK TO THE ARTIST DIRECTLY (this round only): address them with "you/your" about a METHOD DECISION — "smart call on the placement", "your dark packing holds at this size" — never a compliment about them as a person.\n` : ''}
 Return ONLY JSON: {"text": "your comment", "style": "tattoo_artist"}`;
 };
 

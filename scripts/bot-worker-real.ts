@@ -5,7 +5,7 @@ import { execSync } from 'node:child_process';
 import path from 'node:path';
 import os from 'node:os';
 import { createWorker } from 'tesseract.js';
-import { generateComment, clearRecentHistory, detectTattooStyle, extractTechniqueHintsFromVision } from './comment-generator';
+import { generateComment, clearRecentHistory, detectTattooStyle, extractTechniqueHintsFromVision, commentShapeFlags } from './comment-generator';
 import { analyzePostImage, isVisionEnabled, buildVisionDescription } from './vision-analyze';
 import { detectPostType, detectSubject, isPiercingHandle, detectPostIntent, reconcileIntentWithVision, intentEngagement } from './tattoo-voice';
 // 关注回收（follow churn）：清理长期未回关的号，压低 following:followers 比例。
@@ -1417,6 +1417,7 @@ const queueRapportCommentForReview = async (handle: string, _fallbackText: strin
       generationStyle: generated?.style || '',
       dayCount: commentDraftsToday(),
       dayTarget: getCommentDraftDayTarget(),
+      ...commentShapeFlags(text),
     });
     return draftId;
   } catch (error: any) {
@@ -1642,6 +1643,22 @@ const checkIncomingFollowBacks = async () => {
     if (!me || !page) return;
     await page.goto(`${IG_BASE}/${me}/`, { waitUntil: 'domcontentloaded', timeout: 45000 });
     await page.waitForTimeout(jitter(1500, 3000));
+    // 🔴 2026-09-19：涨粉仪表。这是全链路里**唯一**「我们自己的主页已经打开」的时机（约每 20 轮一次）。
+    // 导航成本早就付了，却从来不读自己的粉丝数 ⇒ 之后无论改什么策略，都没有任何办法判断有没有效果。
+    // 失败静默：读不到就跳过，绝不影响下面回关主链路。
+    try {
+      const meFacts = await captureProfileFacts();
+      const meFollowers = Number(meFacts?.followers || 0);
+      if (meFollowers > 0) {
+        logBehavior('own_followers', {
+          handle: me,
+          followers: meFollowers,
+          following: Number(meFacts?.following || 0),
+          posts: Number(meFacts?.postCount || 0),
+          tracked: Object.keys(likeState.follows?.byHandle || {}).length,
+        });
+      }
+    } catch {}
     const followersLink = page.locator('a[href*="/followers/"]').first();
     if ((await followersLink.count()) > 0) await followersLink.click({ timeout: 8000 }).catch(() => {});
     await page.waitForTimeout(jitter(2000, 4000));
@@ -1718,9 +1735,21 @@ const checkCommentEngagers = async () => {
       if (selfIds.has(n.handle.toLowerCase())) continue;
       if (/liked your comment|replied to your comment/i.test(n.text)) engagers.push(n.handle);
     }
-    if (!engagers.length) return;
+    // 🔴 2026-09-19：空结果也必须打点。不打点就无法区分「真没人互动」和「通知页正则失配」——
+    // 这两种情况的修法完全相反（等 vs 改正则）。此前这里只有一句裸 `return`，
+    // 所以 comment_engager_* 全为 0 行时，我们查不出原因。
+    logBehavior('comment_engager_scan', {
+      scanned: raw.length,
+      engagers: engagers.length,
+      tracked: Object.keys(likeState.follows?.byHandle || {}).length,
+    });
+    // 🔴 2026-09-19：`if (!engagers.length) return;` 曾是**死代码陷阱** ——
+    // 本轮没扫到新互动者就直接返回 ⇒ 下面的 Pass B（次日已到点的互动者 → 回赞/回关）
+    // **永远执行不到**，写进状态的 `commentEngagerFollowAt` 从不被消费。
+    // 实测 comment_engager_like_back / _follow_back 全部 0 行。
+    // 现在 Pass A 空转不拦 Pass B（两件事本来就没有依赖关系）。
     // 3) Pass A：当日检测新互动者，开主页读 bio 判相关性，记录次日 followAt（不立即回关）
-    for (const h of engagers.slice(0, 20)) {
+    for (const h of (engagers.length ? engagers.slice(0, 20) : ([] as string[]))) {
       const st = (likeState.follows!.byHandle![h] || (likeState.follows!.byHandle![h] = {})) as any;
       if (st.followedAt || st.commentEngagerProcessed) continue;
       try {
@@ -3624,6 +3653,7 @@ const queueCommentDraftForReview = async (
     style: extra.style || meta?.postStyle || '',
     styleConfidence: extra.styleConfidence || meta?.styleConfidence || 'low',
     vision: !!extra.visionDescription,
+    ...commentShapeFlags(text),
   });
   return draftId;
 };
@@ -5103,6 +5133,24 @@ const shutdown = async (signal: string) => {
 process.on('SIGINT', () => { void shutdown('SIGINT'); });
 process.on('SIGTERM', () => { void shutdown('SIGTERM'); });
 
+// 🔴 2026-09-19：状态自愈 —— 历史上把 IG 保留路径词当成 handle 写进了 byHandle。
+// 实测 `comment_review_queue_failed` 40 条**全部**是 handle=popular + `page.goto: Timeout 45000ms`：
+// `syncFollowBackRapport` 每轮迭代它、去开一个不存在的"主页"、白烧 45 秒，然后被 catch 吞掉（无声无息）。
+// 新写入已在 2026-09-17 过滤（见 isRealHandle），这里清掉**残留的旧键**。
+// 幂等：干净时什么都不做、不写盘。失败静默 —— 绝不因为清状态而挡住启动。
+const purgeJunkHandles = () => {
+  try {
+    const byHandle = likeState.follows?.byHandle;
+    if (!byHandle) return;
+    const junk = Object.keys(byHandle).filter((h) => !isRealHandle(h));
+    if (!junk.length) return;
+    for (const h of junk) delete byHandle[h];
+    saveLikeState(likeState);
+    console.log('[bot-real] purged junk handles from state:', junk.join(', '));
+    logBehavior('state_junk_handle_purged', { count: junk.length, handles: junk.slice(0, 20) });
+  } catch {}
+};
+
 const main = async () => {
   console.log('[bot-real] starting with config:', {
     API_BASE, BOT_ID, BOT_HOST, BOT_VERSION, ACCOUNT_IDS, POLL_INTERVAL_MS, HEARTBEAT_INTERVAL_MS, PROFILE_DIR, HEADLESS,
@@ -5132,6 +5180,7 @@ const main = async () => {
     isVisionEnabled: isVisionEnabled(),
     visionModel: (process.env.BOT_VISION_MODEL || 'deepseek-v4-flash'),
   }));
+  purgeJunkHandles(); // 清掉状态里残留的 IG 保留词键（见函数上方注释）
   await fetchNoiseSites(); // load noise sites from cloud
   await registerBot();
   await ensureBrowser();
