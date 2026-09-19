@@ -263,6 +263,24 @@ const apps = [
       // 回关 rapport 阶梯（仅对「对方已关注我们」的号）：赞帖 2 篇 → 真诚评论 → 赞对方评论 → DM。
       //   这是 DM-able 漏斗的燃料，与回赞预算解耦；30 表示每天最多推进 30 个 rapport 动作。
       BOT_RAPPORT_DAILY_MAX: '30',
+      // ── 历史评论帖回扫（2026-09-19 用户拍板）：把「我们留过评论的帖」逐帖复访 ──
+      // 动机：评论链路已跑一个月（171 篇），但「谁回复了我们 / 谁赞了我们的评论」从未被回头收割，
+      //   comment_engager_* / audience_like_back 全历史 0 行。
+      // 清单来源 = comments.postedByPostKey（shortcode -> ts，180 天 TTL），无需新表。
+      // 命中即回赞：先赞回复者评论（账 rapport，BOT_RAPPORT_DAILY_MAX），再赞回复者最新帖
+      //   （账 likeBack，AUDIENCE_LIKE_DAILY_MAX）—— 两本账与任务点赞互不通气，
+      //   这就是「评论互动优先于任务点赞」的结构性实现。
+      // ⚠️ IG 不公开「谁赞了某条评论」⇒ 回扫只能定位「回复者」；liker 身份只能靠通知页。
+      BOT_POST_BACKSCAN_ENABLED: 'true',
+      // 回溯期每轮扫几篇（清历史欠账，要快）；全扫过一轮后自动降到 STEADY
+      BOT_POST_BACKSCAN_BATCH_BACKFILL: '6',
+      BOT_POST_BACKSCAN_BATCH_STEADY: '2',
+      // 每篇帖多久重扫一次（找新增回复）
+      BOT_POST_BACKSCAN_RESCAN_DAYS: '7',
+      // 单帖一次最多回赞几个回复者
+      BOT_POST_BACKSCAN_MAX_REPLIERS: '2',
+      // 节流：每 N 轮真正扫一次，其余轮次空转（成本≈0）
+      BOT_POST_BACKSCAN_TICK: '2',
       BOT_DM_DAILY_MAX: '15',
       // 评论抽签率：每次访问目标号生成草稿的概率。
       //   0.4 → 1（2026-09-15 定）：不关注任何人之后，评论是唯一的涨粉主力动作，抽签率拉满；

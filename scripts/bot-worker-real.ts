@@ -1002,6 +1002,17 @@ type LikeState = {
   };
   // DM 去重：记录每个 handle 上次已回复的文案哈希，防止把 bot 自己的出站/上轮回复误当客户新消息反复自回复。
   dmSeen?: Record<string, number>;
+  // 2026-09-19：历史评论帖回扫（back-scan）。postsByKey 是「我们在此帖留过评论」的清单
+  // （复用 comments.postedByPostKey，180 天 TTL），回扫靠它逐帖复访、找互动。
+  //   scanned      = postKey -> 上次复访时间戳（决定旋转顺序与重扫到期）
+  //   seenLikes    = postKey -> 上次看到「我们那条评论」的赞数（赞数上涨 = 新增互动信号）
+  //   handled      = 互动者 handle -> 我们回赞 TA 的时间戳（防重复回赞）
+  postBackScan?: {
+    scanned?: Record<string, number>;
+    seenLikes?: Record<string, number>;
+    handled?: Record<string, number>;
+    backfillDoneAt?: number;
+  };
   // 🛑 账号休息（被动，IG 限制信号触发）：持久化，bot 重启也继续休息直到冷却结束
   rest?: { until: number; reason: string; severity: string; at: number; count?: number };
 };
@@ -1038,6 +1049,10 @@ if (!likeState.dm) likeState.dm = { byDay: {} };
 if (!likeState.rest) likeState.rest = { until: 0, reason: '', severity: '', at: 0 };
 if (!likeState.dm.byDay) likeState.dm.byDay = {};
 if (!likeState.dmSeen) likeState.dmSeen = {};
+if (!likeState.postBackScan) likeState.postBackScan = {};
+if (!likeState.postBackScan.scanned) likeState.postBackScan.scanned = {};
+if (!likeState.postBackScan.seenLikes) likeState.postBackScan.seenLikes = {};
+if (!likeState.postBackScan.handled) likeState.postBackScan.handled = {};
 
 const getTodayKey = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 const isSameDay = (a?: number, b?: number) => { if (!a || !b) return false; return getTodayKey(new Date(a)) === getTodayKey(new Date(b)); };
@@ -1795,6 +1810,229 @@ const checkCommentEngagers = async () => {
       }
       await sleep(jitter(3000, 6000));
     }
+  } catch {}
+};
+
+// ── 2026-09-19 用户拍板：历史评论帖回扫（retroactive back-scan）──────────────
+// 动机：评论链路已经跑了一个月（D1 `comment_posted` 实测 171 篇 / 08-22 起），但
+//   「谁回复了我们 / 谁赞了我们的评论」从来没有被回过头收割过 ——
+//   comment_engager_* / audience_like_back 全历史 0 行。
+// 已评论帖清单 = comments.postedByPostKey（shortcode -> 时间戳，180 天 TTL），天然可枚举，
+//   无需新表、无需联网拉历史。
+// 两阶段（同一引擎，只改每轮批量）：
+//   ① 回溯期：从未扫过的优先，每轮 BATCH_BACKFILL 篇，先把历史欠账补完
+//   ② 稳态：全部扫过一轮后，每轮 BATCH_STEADY 篇 + 每帖 RESCAN_DAYS 天重扫一次
+// 命中即「回赞」：先赞回复者的**评论**（账 C / rapportByDay），再赞回复者的**最新帖**
+//   （账 B / likeBackByDay）。这两本账与任务点赞账 A 互不通气 ⇒
+//   这就是「评论互动优先于任务点赞」的结构性实现，不必先合并总池。
+// 🔴 硬限制（必须知道，否则会误判功能失效）：IG 网页端**不公开「谁赞了某条评论」**，
+//   只给赞数。⇒ 帖子回扫能精确定位「回复者」，但「评论被谁赞」只能读到数量增减。
+//   要拿 liker 身份只能靠通知页（checkCommentEngagers）。两条通道互补，不可互相替代。
+const POST_BACKSCAN_ENABLED = String(process.env.BOT_POST_BACKSCAN_ENABLED ?? 'true') !== 'false';
+const POST_BACKSCAN_BATCH_BACKFILL = Math.max(1, Number(process.env.BOT_POST_BACKSCAN_BATCH_BACKFILL || 6));
+const POST_BACKSCAN_BATCH_STEADY = Math.max(1, Number(process.env.BOT_POST_BACKSCAN_BATCH_STEADY || 2));
+const POST_BACKSCAN_RESCAN_DAYS = Math.max(1, Number(process.env.BOT_POST_BACKSCAN_RESCAN_DAYS || 7));
+const POST_BACKSCAN_MAX_REPLIERS = Math.max(0, Number(process.env.BOT_POST_BACKSCAN_MAX_REPLIERS || 2));
+// 节流：每 N 轮真扫一次（其余轮次直接 return，空转成本 ≈ 0）
+const POST_BACKSCAN_TICK = Math.max(1, Number(process.env.BOT_POST_BACKSCAN_TICK || 2));
+
+// 在当前打开的帖子页面上，找到 <handle> 的评论行并点赞。
+// 选择器策略与 rapportLikeComment 完全一致（往上找祖先里含 /handle/ 链接的 Like 图标），
+// 区别是**不导航**——直接吃调用方已经打开的帖子页，省掉一次 openProfile。
+const likeHandleCommentHere = async (handle: string): Promise<boolean> => {
+  if (!page) return false;
+  try {
+    const found = await page.evaluate((h) => {
+      const svgs = Array.from(document.querySelectorAll('svg[aria-label="Like"]'));
+      for (const svg of svgs) {
+        let el = svg.parentElement;
+        while (el && el !== document.body) {
+          if (el.querySelector(`a[href^="/${h}/"]`) || el.querySelector(`a[href="/${h}/"]`)) {
+            (svg as unknown as SVGElement).setAttribute('data-bscan-clike', '1');
+            return true;
+          }
+          el = el.parentElement;
+        }
+      }
+      return false;
+    }, handle).catch(() => false);
+    if (!found) return false;
+    const btn = page.locator('svg[data-bscan-clike="1"]').first();
+    if ((await btn.count()) === 0) return false;
+    await btn.click({ timeout: 6000 }).catch(() => {});
+    await page.waitForTimeout(jitter(1200, 2200));
+    return true;
+  } catch { return false; }
+};
+
+// 抽取当前帖子页的评论列表：username / 赞数 / 缩进左偏移（用来判"谁挂在谁下面"）。
+// 结构沿用 bot-comments-scraper.ts EXTRACT_COMMENTS_FN 的既定抓法（span 'Reply' 上溯 3 层 = 评论容器）。
+const extractCommentsFlat = async (): Promise<Array<{ username: string; likes: number; left: number; text: string }>> => {
+  if (!page) return [];
+  return await page.evaluate(() => {
+    const out: Array<{ username: string; likes: number; left: number; text: string }> = [];
+    const spans = Array.from(document.querySelectorAll('span'));
+    for (const span of spans) {
+      if ((span.textContent || '').trim() !== 'Reply') continue;
+      let c: any = span;
+      for (let i = 0; i < 3 && c; i++) c = c.parentElement;
+      if (!c) continue;
+      const a = c.querySelector('a[href^="/"]') as HTMLAnchorElement | null;
+      const href = (a?.getAttribute('href') || '').replace(/[?#].*$/, '').replace(/^\/+|\/+$/g, '');
+      if (!/^[A-Za-z0-9._]{2,30}$/.test(href)) continue;
+      const text = (c.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 240);
+      // 赞数：动作行（'Reply' 上溯 2 层）去掉 "Reply" 后，整串须形如 "3 likes" / "1 like"
+      const actions = ((span.parentElement?.parentElement?.textContent || '') as string)
+        .replace(/Reply/g, ' ').replace(/\s+/g, ' ').trim();
+      const lm = actions.match(/^(\d+)\s*likes?$/i);
+      const likes = lm ? parseInt(lm[1], 10) || 0 : 0;
+      let left = 0;
+      try { left = Math.round(c.getBoundingClientRect().left); } catch {}
+      out.push({ username: href.toLowerCase(), likes, left, text });
+    }
+    return out;
+  }).catch(() => [] as Array<{ username: string; likes: number; left: number; text: string }>);
+};
+
+let postBackScanTick = 0;
+const backScanCommentedPosts = async (): Promise<void> => {
+  if (!POST_BACKSCAN_ENABLED || !page) return;
+  try {
+    postBackScanTick = (postBackScanTick + 1) % POST_BACKSCAN_TICK;
+    if (postBackScanTick !== 0) return;
+    if (Date.now() < Number(likeState.rest?.until || 0)) return; // 账号休息期不动作
+    const selfHandle = String((ACCOUNT_IDS && ACCOUNT_IDS[0]) || '').trim().toLowerCase();
+    if (!selfHandle) return;
+
+    const postedByPostKey = likeState.comments?.postedByPostKey || {};
+    const scans = likeState.postBackScan!;
+    const scanned = scans.scanned || (scans.scanned = {});
+    const seenLikes = scans.seenLikes || (scans.seenLikes = {});
+    const handled = scans.handled || (scans.handled = {});
+    const rescanMs = POST_BACKSCAN_RESCAN_DAYS * 24 * 3600_000;
+    const now = Date.now();
+
+    // 队列：从未扫过(lastScan=0)排最前；否则按最久未扫排（且须已过重扫期）
+    const queue = Object.keys(postedByPostKey)
+      .map((k) => ({ key: k, postedAt: Number(postedByPostKey[k] || 0), lastScan: Number(scanned[k] || 0) }))
+      .filter((c) => c.key && (c.lastScan === 0 || now - c.lastScan > rescanMs))
+      .sort((a, b) => (a.lastScan - b.lastScan) || (b.postedAt - a.postedAt));
+
+    if (!queue.length) return;
+    const backfilling = queue.some((c) => c.lastScan === 0);
+    const batch = queue.slice(0, backfilling ? POST_BACKSCAN_BATCH_BACKFILL : POST_BACKSCAN_BATCH_STEADY);
+
+    let postsVisited = 0;
+    let postsWithSelf = 0;
+    let repliesFound = 0;
+    let likesBacked = 0;
+    let commentLikesBacked = 0;
+
+    for (const item of batch) {
+      let navOk = true;
+      // ⚠️ 打点绝不放在裸 await goto 之后 —— 外层 try/catch 会吞掉超时导致打点永不触发。
+      // 这里用 .catch() 把超时降级成 navOk=false，让统计与打点无论如何都执行。
+      await page.goto(`${IG_BASE}/p/${item.key}/`, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => { navOk = false; });
+      await page.waitForTimeout(jitter(1800, 3200));
+      postsVisited++;
+
+      // 展开折叠评论 + 全部 "View replies"，否则回复根本不在 DOM 里
+      try {
+        for (let round = 0; round < 2; round++) {
+          const expanders = page.locator('button, div[role="button"], span[role="button"]')
+            .filter({ hasText: /view all \d+ comments|view \d+ repl|view all replies|view replies/i });
+          const cnt = await expanders.count().catch(() => 0);
+          if (!cnt) break;
+          for (let i = 0; i < Math.min(cnt, 6); i++) {
+            await expanders.nth(i).click({ timeout: 3000 }).catch(() => {});
+            await page.waitForTimeout(jitter(700, 1400));
+          }
+        }
+      } catch {}
+
+      const comments = await extractCommentsFlat();
+      const selfIdx = comments.findIndex((c) => c.username === selfHandle);
+      let replies: string[] = [];
+      let indentSpread = 0;
+      if (selfIdx >= 0) {
+        postsWithSelf++;
+        const selfLeft = comments[selfIdx].left;
+        const lefts = comments.map((c) => c.left);
+        indentSpread = Math.max(...lefts) - Math.min(...lefts);
+        // 我们那条评论之后、缩进更深（右移 >8px）且非自己 —— 即挂在我们评论下的回复
+        for (let i = selfIdx + 1; i < comments.length; i++) {
+          if (comments[i].left <= selfLeft + 8) break; // 缩进回退 = 离开我们的回复区
+          const u = comments[i].username;
+          if (u && u !== selfHandle && !replies.includes(u)) replies.push(u);
+        }
+        const prevLikes = Number(seenLikes[item.key] || 0);
+        const curLikes = comments[selfIdx].likes;
+        if (curLikes > prevLikes) {
+          logBehavior('post_backscan_self_likes_up', { postKey: item.key, from: prevLikes, to: curLikes });
+        }
+        seenLikes[item.key] = curLikes;
+      }
+
+      scans.scanned![item.key] = Date.now();
+      // 关键可观测点：每次复访都记一行。foundSelf=true 说明「认自己的评论」这条选择器活着；
+      // replies 恒 0 且 indentSpread=0 ⇒ 说明缩进判据失效（IG 改版），要换判法。
+      logBehavior('post_backscan_scanned', {
+        postKey: item.key,
+        navOk,
+        totalComments: comments.length,
+        foundSelf: selfIdx >= 0,
+        indentSpread,
+        replies: replies.length,
+      });
+
+      if (replies.length) {
+        repliesFound += replies.length;
+        for (const replier of replies.slice(0, POST_BACKSCAN_MAX_REPLIERS)) {
+          if (isOwnAccountHandle(replier)) continue;
+          if (handled[replier] && now - Number(handled[replier]) < rescanMs) continue; // 近期已回过，防重复
+          // ① 赞回复者的评论（账 C）——比赞帖更"我看了你说了什么"的私密信号
+          const likedComment = await likeHandleCommentHere(replier).catch(() => false);
+          if (likedComment) { recordRapport(); commentLikesBacked++; }
+          await sleep(jitter(2500, 5000));
+          // ② 赞回复者最新一篇帖（账 B）——对方收到 "liked your post" → 回访我们主页
+          const likedPost = await likeBackEngager(replier).catch(() => 0);
+          if (likedPost > 0) likesBacked++;
+          handled[replier] = Date.now();
+          saveLikeState(likeState);
+          logBehavior('post_backscan_reply_found', {
+            postKey: item.key,
+            replier,
+            likedComment,
+            likedPost,
+            likeBackDayCount: likeBackToday(),
+            likeBackDayCap: LIKE_BACK_DAILY_MAX,
+          });
+          await sleep(jitter(3000, 6000));
+        }
+      }
+      saveLikeState(likeState);
+      await page.keyboard.press('Escape').catch(() => {});
+      await sleep(jitter(2000, 4500)); // 复访之间留自然间隔，别连扫
+    }
+
+    const stillUnscanned = Object.keys(postedByPostKey).filter((k) => !scanned[k]).length;
+    if (backfilling && stillUnscanned === 0 && !scans.backfillDoneAt) {
+      scans.backfillDoneAt = Date.now();
+      saveLikeState(likeState);
+      logBehavior('post_backscan_backfill_done', { total: Object.keys(postedByPostKey).length });
+    }
+    // 每轮汇总一行：这是判断"回扫是否真在跑"的主判据（比任何 status 都可靠）
+    logBehavior('post_backscan_cycle', {
+      phase: backfilling ? 'backfill' : 'steady',
+      queue: queue.length,
+      batch: batch.length,
+      postsVisited,
+      postsWithSelf,
+      repliesFound,
+      likesBacked,
+      commentLikesBacked,
+      stillUnscanned,
+    });
   } catch {}
 };
 
@@ -4890,6 +5128,11 @@ const pollLoop = async () => {
       // ── 评论互动回流：每 20 轮扫通知页，tattoo 相关互动者次日回关 ──
       try {
         await checkCommentEngagers();
+      } catch {}
+      // ── 历史评论帖回扫：复访我们留过评论的帖，找「回复了我们」的人并回赞 ──
+      //    回溯期每轮多扫，清完欠账转稳态慢扫；单帖重扫周期 BOT_POST_BACKSCAN_RESCAN_DAYS 天
+      try {
+        await backScanCommentedPosts();
       } catch {}
       // ── 回关 rapport 阶梯：先点赞→(隔天)评论 建立熟悉感，再发 DM（内部已判断进度）──
       try {
