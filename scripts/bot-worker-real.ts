@@ -989,6 +989,10 @@ type LikeState = {
   firstTouchAt?: Record<string, number>;
   likes?: {
     byDay?: Record<string, number>;
+    // 🔴 2026-09-19：`byDay` 被 BOT_DAILY_LIKE_OVERRIDE 写坏（每次会话写成「本轮数」而非累计，
+    // 后一次覆盖前一次）⇒ 面板 `dailyProgress.likes` 恒 0、点赞总数无从统计。
+    // `realByDay` 是**不受 override 影响**的真累计计数器，只增不减，用来回答「今天到底点了多少赞」。
+    realByDay?: Record<string, number>;
     dayCap?: { key: string; cap: number };
   };
   follows?: {
@@ -1683,6 +1687,17 @@ const IG_RESERVED_PATHS = new Set([
 const isRealHandle = (h: string) =>
   /^[A-Za-z0-9._]{2,30}$/.test(h) && !IG_RESERVED_PATHS.has(String(h).toLowerCase());
 
+// 🔴 2026-09-19 用户明确要求：「评论点赞优先于新号点赞。每天评论点赞先动手，点过了再去点新号；
+//   前期评论的、被点赞的、被回复的都回赞完了，之后每天收到就去点，点完回到日常事务继续。」
+// 结构上顺序**本来就是对的** —— pollLoop 里互动块排在任务轮询之前，所以每轮都是「先互动后任务」。
+// 真正让「评论点赞」形同不存在的是**节流值**：四条通道（通知页互动者 / 自己帖下的暖受众 /
+//   谁赞过我们 / 完整扫 Followers）原来各自挂 `% 20` ⇒ 一轮 ≈7.3min ⇒ 每 ≈146min 才轮到一次，
+//   全天只跑 ~10 次且常被 human_break 吃掉 ⇒ audience_like_back / comment_engager_like_back
+//   全历史 0 行。
+// 现在统一走这个旋钮：默认 3（≈22min）。调小 = 反应更快，但每轮都要真开一次页面，
+//   是**导航成本**不是点赞成本；不要低于 2。
+const ENGAGEMENT_TICK = Math.max(1, Number(process.env.BOT_ENGAGEMENT_TICK || 3));
+
 let incomingFbTick = 0;
 // 2026-09-19：把「读自己粉丝数」从「完整扫粉列表」里拆出来单独高频跑。
 // 背景：两者原来都挂在 `%20` 上 ⇒ 粉丝数每 ≈146min 才可能读一次，而 `own_followers` 实测 0 行
@@ -1692,7 +1707,7 @@ const FOLLOWERS_PROBE_TICK = Math.max(1, Number(process.env.BOT_FOLLOWERS_PROBE_
 let followersProbeTick = 0;
 const checkIncomingFollowBacks = async () => {
   try {
-    incomingFbTick = (incomingFbTick + 1) % 20;                            // 重：完整扫 Followers 列表（每 ≈146min）
+    incomingFbTick = (incomingFbTick + 1) % ENGAGEMENT_TICK;                // 重：完整扫 Followers 列表（默认每 ≈22min）
     followersProbeTick = (followersProbeTick + 1) % FOLLOWERS_PROBE_TICK;  // 轻：只读自己粉丝数（默认每 ≈22min）
     const doSweep = incomingFbTick === 0;
     const doProbe = followersProbeTick === 0;
@@ -1775,14 +1790,18 @@ const checkIncomingFollowBacks = async () => {
 let commentEngagerTick = 0;
 const checkCommentEngagers = async () => {
   try {
-    commentEngagerTick = (commentEngagerTick + 1) % 20;
+    commentEngagerTick = (commentEngagerTick + 1) % ENGAGEMENT_TICK;
     if (commentEngagerTick !== 0) return;
     // 2026-09-15：不再依赖 BOT_FOLLOW_ENABLED。关掉主动关注后这条"互动者回流"通道改为
     //   回赞（对方收到通知 → 回访我们主页），关注动作单独由 BOT_FOLLOW_BACK_ENABLED 控制。
     if (!page) return;
     const selfIds = new Set([BOT_ID, ...(ACCOUNT_IDS || [])].map((x) => String(x).toLowerCase()));
     // 1) 扫通知 Others 页（含"赞了你的评论/回复了你的评论"的互动信号）
-    await page.goto(`${IG_BASE}/notifications/others/`, { waitUntil: 'domcontentloaded', timeout: 45000 });
+    // 🔴 2026-09-19：这里原来是**裸 await goto**（没有 .catch）⇒ 一旦超时，异常被外层
+    //   try/catch 吞掉，下面的 comment_engager_scan 打点**永远不触发**。这正是
+    //   「打点位置坑」的既有未修实例。改成降级 + navOk，保证统计与打点无论如何都写。
+    let navOk = true;
+    await page.goto(`${IG_BASE}/notifications/others/`, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => { navOk = false; });
     await page.waitForTimeout(jitter(2000, 3500));
     for (let s = 0; s < 3; s++) {
       await page.mouse.wheel(0, 1500).catch(() => {});
@@ -1811,6 +1830,7 @@ const checkCommentEngagers = async () => {
     // 这两种情况的修法完全相反（等 vs 改正则）。此前这里只有一句裸 `return`，
     // 所以 comment_engager_* 全为 0 行时，我们查不出原因。
     logBehavior('comment_engager_scan', {
+      navOk,
       scanned: raw.length,
       engagers: engagers.length,
       tracked: Object.keys(likeState.follows?.byHandle || {}).length,
@@ -2100,7 +2120,7 @@ const backScanCommentedPosts = async (): Promise<void> => {
 let likedUsTick = 0;
 const checkWhoLikedUs = async (): Promise<void> => {
   try {
-    likedUsTick = (likedUsTick + 1) % 20;
+    likedUsTick = (likedUsTick + 1) % ENGAGEMENT_TICK;
     if (likedUsTick !== 0) return;
     const me = (ACCOUNT_IDS && ACCOUNT_IDS[0]) || '';
     if (!me || !page) return;
@@ -2146,7 +2166,7 @@ const checkWhoLikedUs = async (): Promise<void> => {
 let audienceTick = 0;
 const checkAudienceReciprocate = async () => {
   try {
-    audienceTick = (audienceTick + 1) % 20;
+    audienceTick = (audienceTick + 1) % ENGAGEMENT_TICK;
     if (audienceTick !== 0) return;
     // 2026-09-15：不再依赖 BOT_FOLLOW_ENABLED —— 关掉主动关注后本通道降级为「回赞」模式
     //   （对方赞/评过我们的帖子 → 我们回赞 TA 一篇帖），关注动作仍只在 BOT_FOLLOW_ENABLED 开时做。
@@ -2483,7 +2503,9 @@ const buildWorkerDailyMeta = () => {
     dailyProgress: {
       day: dayKey,
       profilesVisited: Number(likeState.touchesByDay?.[dayKey] || 0),
-      likes: Number(likeState.likes?.byDay?.[dayKey] || 0),
+      // 2026-09-19：改读 realByDay。旧的 byDay 被 BOT_DAILY_LIKE_OVERRIDE 写坏（恒等于本轮赞数），
+      // 面板 likes 因此长期显示 0，让人误判「没在点赞」。
+      likes: Number(likeState.likes?.realByDay?.[dayKey] || 0),
       follows: Number(likeState.follows?.byDay?.[dayKey] || 0),
       commentDrafts: commentDraftsToday(),
       commentsPosted: commentsPostedToday(),
@@ -4633,6 +4655,12 @@ const tryLikeWithStrategy = async (handle: string, facts?: ProfileFacts, command
     nextEligibleAt: Date.now() + cooldownHours * 60 * 60 * 1000
   };
   likeState.likes!.byDay![dayKey] = dayCount + liked;
+  // 🔴 2026-09-19：`dayCount` 在 override 生效时恒为 0 ⇒ 上面这行把 byDay 写成「本轮赞数」，
+  // 下次会话又被覆盖 ⇒ 面板 likes 恒 0、「今天总共点了多少赞」永远查不到（用户两次问到这个数）。
+  // realByDay 只增不减，不受 override 影响，专门用来回答「达到总数了没有」。
+  likeState.likes!.realByDay = likeState.likes!.realByDay || {};
+  const realAfter = Number(likeState.likes!.realByDay[dayKey] || 0) + liked;
+  likeState.likes!.realByDay[dayKey] = realAfter;
   saveLikeState(likeState);
   logBehavior('like_session_done', {
     handle,
@@ -4640,6 +4668,9 @@ const tryLikeWithStrategy = async (handle: string, facts?: ProfileFacts, command
     attempted: maxLikes,
     cooldownHours,
     dayCountAfter: Number(likeState.likes!.byDay![dayKey] || 0),
+    // 真累计（A 账：任务/目标帖点赞）。回答「今天总共点了多少」只认这个字段，
+    // dayCountAfter 在 override 生效时是假的（= 本轮赞数）。
+    dayCountReal: realAfter,
     dayCap
   });
   return { attempted: maxLikes, liked, skippedCooldown: false, likedUrls };
@@ -5150,15 +5181,45 @@ const pollLoop = async () => {
           continue;
         }
       } catch {}
-      // ── 回关主动复检：每 5 轮回访一个"已关注未检测回关"的号，让回关能被发现 ──
+      // ══════════════════════════════════════════════════════════════════════════
+      // 🔴 2026-09-19 用户要求：「每天评论点赞先动手，点过了再去点新号；前期评论的、被回复的、
+      //   被点赞的都回赞完了，之后每天收到就去点，点完回到日常事务继续。」
+      // 这个块整体就在任务轮询之前 ⇒ 「互动先于任务」结构上已经成立。
+      // 现在把**评论点赞**两条通道（账 C rapport / 账 B likeBack）提到块首：它们与
+      // 暖受众/互动者回流共用 likeBack 预算（AUDIENCE_LIKE_DAILY_MAX），排在后面就会被吃光。
+      // ══════════════════════════════════════════════════════════════════════════
+
+      // ① 【最高优先】历史评论帖回扫：复访我们留过评论的 171 篇帖，找「回复了我们」的人，
+      //    先赞其评论（账 C）再赞其最新帖（账 B）。回溯期每轮多扫，清完欠账转稳态慢扫；
+      //    进度看 post_backscan_cycle 的 stillUnscanned（归 0 = 欠账清完）、phase(backfill→steady)。
+      try {
+        await backScanCommentedPosts();
+      } catch {}
+      // ② 【次高优先】回关 rapport 阶梯：赞帖 → 真诚评论 → 赞对方评论（账 C），再发 DM。
+      try {
+        await syncFollowBackRapport();
+      } catch {}
+      // ③ 评论互动回流：扫通知页找「赞了/回复了我们的评论」的人 → 回赞（账 B，默认每 ≈22min）。
+      try {
+        await checkCommentEngagers();
+      } catch {}
+      // ④ 暖受众回赞：扫我们自己帖下的点赞/评论者 → 回赞（账 B，与 ③ 共用预算，故排在 ③ 之后）。
+      try {
+        await checkAudienceReciprocate();
+      } catch {}
+      // ⑤ 检测「对方赞过我们」：查最新帖子点赞者列表，互赞则提前预热窗口。
+      try {
+        await checkWhoLikedUs();
+      } catch {}
+      // ⑥ 回关主动复检：每 5 轮回访一个"已关注未检测回关"的号，让回关能被发现。
       try {
         await maybeCheckFollowBacks();
       } catch {}
-      // ── 捕获主动关注我们的回流粉（如 tattooshops.be）：每 20 轮查一次 Followers 列表 ──
+      // ⑦ 捕获主动关注我们的回流粉：轻探针每 ≈22min 读自己粉丝数，重扫描同节流查 Followers 列表。
       try {
         await checkIncomingFollowBacks();
       } catch {}
-      // ── 关注回收：清理长期未回关的号，压低 following:followers 比例 ──
+      // ⑧ 关注回收：清理长期未回关的号，压低 following:followers 比例。
       //    内部自带节流（默认 30 分钟一轮）、日上限、宽限期与忙碌避让，空转成本极低。
       try {
         await runUnfollowMaintenance({
@@ -5173,27 +5234,6 @@ const pollLoop = async () => {
           igBase: IG_BASE,
           busy: () => false,
         });
-      } catch {}
-      // ── 检测「对方赞过我们」：每 20 轮查一次最新帖子点赞者列表，互赞则提前预热窗口 ──
-      try {
-        await checkWhoLikedUs();
-      } catch {}
-      // ── 暖受众反关注：每 20 轮扫我们自己帖子下的点赞/评论者，主动关注新暖线索（可选发DM）──
-      try {
-        await checkAudienceReciprocate();
-      } catch {}
-      // ── 评论互动回流：每 20 轮扫通知页，tattoo 相关互动者次日回关 ──
-      try {
-        await checkCommentEngagers();
-      } catch {}
-      // ── 历史评论帖回扫：复访我们留过评论的帖，找「回复了我们」的人并回赞 ──
-      //    回溯期每轮多扫，清完欠账转稳态慢扫；单帖重扫周期 BOT_POST_BACKSCAN_RESCAN_DAYS 天
-      try {
-        await backScanCommentedPosts();
-      } catch {}
-      // ── 回关 rapport 阶梯：先点赞→(隔天)评论 建立熟悉感，再发 DM（内部已判断进度）──
-      try {
-        await syncFollowBackRapport();
       } catch {}
       // ── 回关号直接发 DM：每轮扫描，受"熟悉度门槛 + 预热窗口 + 日上限"节流（内部已判断）──
       try {

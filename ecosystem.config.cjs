@@ -295,6 +295,13 @@ const apps = [
       BOT_POST_BACKSCAN_MAX_REPLIERS: '2',
       // 节流：每 N 轮真正扫一次，其余轮次空转（成本≈0）
       BOT_POST_BACKSCAN_TICK: '2',
+      // ── 互动通道统一节流（2026-09-19 用户要求「收到就去点赞」）──
+      //   原来四条通道（通知页互动者 / 自己帖下的暖受众 / 谁赞过我们 / 完整扫 Followers）
+      //   各自挂 `%20` ⇒ 一轮 ≈7.3min ⇒ 每 ≈146min 才轮到一次，全天只跑 ~10 次且常被
+      //   human_break 吃掉 ⇒ audience_like_back / comment_engager_like_back 全历史 0 行。
+      //   现在统一走这个旋钮：默认 3（≈22min）。调小 = 反应更快，但每轮都要真开页面，
+      //   是**导航成本**不是点赞成本；不要低于 2。
+      BOT_ENGAGEMENT_TICK: '3',
       // ── 涨粉仪表（2026-09-19）：读自己主页粉丝数的频率（单位=轮）──
       // 原来和「完整扫 Followers 弹出层」共用 %20（≈146min 一次），导致 own_followers 长期 0 行 ⇒
       // 改任何涨粉策略都无法判断效果。读 stats 很便宜，所以拆出来高频跑：默认每 3 轮（≈22min）。
