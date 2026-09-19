@@ -2717,12 +2717,31 @@ const clearProfileLock = () => {
   }
 };
 
+// 🔴 2026-09-19 实测：esbuild/tsx 的 keepNames 会给 `page.evaluate()` 回调里的**具名函数**
+//   （`const f = () => {}` / `function f(){}` / 对象方法）注入 `__name(fn, "f")`；
+//   而 `__name` 只定义在 Node 模块作用域 —— 回调是序列化后丢进浏览器执行的，
+//   浏览器里没有这个标识符 ⇒ `ReferenceError: __name is not defined`
+//   ⇒ 被 `.catch(() => null)` 静默吞掉 ⇒ 整段 DOM 解析返回空。**日志上看不出任何报错。**
+//   实测后果（两处都是"静默失明"）：
+//     ① own_followers.probe 恒 null ⇒ 分不清「真 0 粉」和「选择器读不到」，涨粉策略无从验收；
+//     ② extractPostComments 恒 0 条评论 ⇒ 回扫找不到回复者 ⇒ 回赞/回关的输入端整条断掉。
+//   修法：把 __name 补进页面全局。**必须用字符串形式**传入（写成函数字面量会被 esbuild 再处理一次）；
+//   `||` 保证幂等、不覆盖页面已有值；WeakSet 保证每个 page 只装一次（重新导航由 addInitScript 自动覆盖）。
+const EVAL_SHIM_SRC = 'globalThis.__name = globalThis.__name || function (t) { return t };';
+const evalShimInstalled = new WeakSet<object>();
+const installEvalShim = async (p: Page) => {
+  if (evalShimInstalled.has(p)) return;
+  evalShimInstalled.add(p);
+  try { await p.addInitScript(EVAL_SHIM_SRC); } catch {}  // 该页之后的所有导航
+  try { await p.evaluate(EVAL_SHIM_SRC); } catch {}       // 当前已加载的那个文档
+};
+
 const ensureBrowser = async () => {
   // 已有一个在 instagram.com 的页面 → 直接复用，绝不重新开浏览器（避免多标签堆积）。
   if (context && page) {
     try {
       const url = page.url();
-      if (url && url.includes('instagram.com')) return;
+      if (url && url.includes('instagram.com')) { await installEvalShim(page); return; }
     } catch {}
     // 有 context 但页面不在 IG（卡在 about:blank 等）→ 先关干净，再重建，不留孤儿。
     try { await context.close(); } catch {}
@@ -2769,6 +2788,7 @@ const ensureBrowser = async () => {
           if (p !== page) { try { await p.close(); } catch {} }
         }
         await page.bringToFront().catch(() => {});
+        if (page) await installEvalShim(page);
         console.log('[bot-real] launched persistent browser (stealth mode)');
         runtimeDiag.browserConnectedAt = Date.now();
         runtimeDiag.browserConnectCount += 1;
@@ -2827,6 +2847,7 @@ const ensureBrowser = async () => {
         await page.goto(IG_BASE, { waitUntil: 'domcontentloaded', timeout: 45000 });
       }
       await page.bringToFront().catch(() => {});
+      if (page) await installEvalShim(page);
       console.log(`[bot-real] connected via CDP: ${BOT_CDP_URL}`);
       // 时间戳（不是布尔值）：前台要能看出「连接是 3 秒前刷新的」还是「2 小时前刷新的」。
       runtimeDiag.browserConnectedAt = Date.now();
