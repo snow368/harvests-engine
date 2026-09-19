@@ -1033,6 +1033,8 @@ type LikeState = {
     seenLikes?: Record<string, number>;
     handled?: Record<string, number>;
     backfillDoneAt?: number;
+    // 上次从 API 回补「已评论帖清单」的时间（本地 state 只留近期记录，需靠 D1 补齐历史）
+    listSyncedAt?: number;
   };
   // 🛑 账号休息（被动，IG 限制信号触发）：持久化，bot 重启也继续休息直到冷却结束
   rest?: { until: number; reason: string; severity: string; at: number; count?: number };
@@ -1943,32 +1945,132 @@ const likeHandleCommentHere = async (handle: string): Promise<boolean> => {
 };
 
 // 抽取当前帖子页的评论列表：username / 赞数 / 缩进左偏移（用来判"谁挂在谁下面"）。
-// 结构沿用 bot-comments-scraper.ts EXTRACT_COMMENTS_FN 的既定抓法（span 'Reply' 上溯 3 层 = 评论容器）。
-const extractCommentsFlat = async (): Promise<Array<{ username: string; likes: number; left: number; text: string }>> => {
-  if (!page) return [];
+//
+// 🔴 2026-09-19 首轮实测教训：原实现只有**单路**判据 —— 只认「span 文本严格等于 'Reply'」。
+//   上线后第一轮 6/6 帖 `totalComments=0` + `foundSelf=false`，而这 6 篇我们**确定**都留过评论
+//   ⇒ 判据整体过时（IG 早就不用那个老结构与文案，`_ap3a` 类名更是多年前的）。**双路 + 探针**：
+//   ① 路1 = 既定判据（保留，零风险）② 路2 = **结构兜底**：不依赖任何文案，只认「含 <time> 且含作者链
+//   接的评论级容器」（IG 评论永远同时有这两样，且不受界面语言影响）。
+//   ③ `probe` = 抽不出来时的病因探针（页面到底有没有评论 / 是否掉登录 / 是否被限流 / 按钮文案语言）。
+//   这样下一轮不必再猜：探针数据直接指向是"选择器过期"还是"页面没加载"还是"掉登录"。
+const extractPostComments = async (): Promise<{
+  rows: Array<{ username: string; likes: number; left: number; text: string }>;
+  via: 'reply-span' | 'structural' | 'none';
+  probe: Record<string, unknown>;
+}> => {
+  if (!page) return { rows: [], via: 'none', probe: { noPage: true } };
   return await page.evaluate(() => {
-    const out: Array<{ username: string; likes: number; left: number; text: string }> = [];
-    const spans = Array.from(document.querySelectorAll('span'));
-    for (const span of spans) {
+    const rows: Array<{ username: string; likes: number; left: number; text: string }> = [];
+    const seen = new Set<string>();
+    const addRow = (username: string, likes: number, left: number, text: string) => {
+      if (!username) return;
+      const k = username + '\u0000' + text.slice(0, 60);
+      if (seen.has(k)) return;
+      seen.add(k);
+      rows.push({ username, likes, left, text });
+    };
+    const leftOf = (el: Element) => { try { return Math.round(el.getBoundingClientRect().left); } catch { return 0; } };
+    const handleOf = (el: Element | null): string => {
+      if (!el) return '';
+      const a = el.querySelector('a[href^="/"]') as HTMLAnchorElement | null;
+      const href = (a?.getAttribute('href') || '').replace(/[?#].*$/, '').replace(/^\/+|\/+$/g, '');
+      return /^[A-Za-z0-9._]{2,30}$/.test(href) ? href.toLowerCase() : '';
+    };
+
+    // ── 路 1：既定判据（span 'Reply' 上溯 3 层）──
+    for (const span of Array.from(document.querySelectorAll('span'))) {
       if ((span.textContent || '').trim() !== 'Reply') continue;
-      let c: any = span;
+      let c: Element | null = span;
       for (let i = 0; i < 3 && c; i++) c = c.parentElement;
       if (!c) continue;
-      const a = c.querySelector('a[href^="/"]') as HTMLAnchorElement | null;
-      const href = (a?.getAttribute('href') || '').replace(/[?#].*$/, '').replace(/^\/+|\/+$/g, '');
-      if (!/^[A-Za-z0-9._]{2,30}$/.test(href)) continue;
-      const text = (c.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 240);
+      const u = handleOf(c);
+      if (!u) continue;
       // 赞数：动作行（'Reply' 上溯 2 层）去掉 "Reply" 后，整串须形如 "3 likes" / "1 like"
       const actions = ((span.parentElement?.parentElement?.textContent || '') as string)
         .replace(/Reply/g, ' ').replace(/\s+/g, ' ').trim();
       const lm = actions.match(/^(\d+)\s*likes?$/i);
-      const likes = lm ? parseInt(lm[1], 10) || 0 : 0;
-      let left = 0;
-      try { left = Math.round(c.getBoundingClientRect().left); } catch {}
-      out.push({ username: href.toLowerCase(), likes, left, text });
+      addRow(u, lm ? parseInt(lm[1], 10) || 0 : 0, leftOf(c), (c.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 240));
     }
-    return out;
-  }).catch(() => [] as Array<{ username: string; likes: number; left: number; text: string }>);
+    const viaReplySpan = rows.length;
+
+    // ── 路 2：结构兜底（不依赖 'Reply' 文案，也不受界面语言影响）──
+    if (rows.length === 0) {
+      for (const t of Array.from(document.querySelectorAll('time'))) {
+        let c: Element | null = t;
+        for (let i = 0; i < 6 && c && c !== document.body; i++) {
+          const up = c.parentElement;
+          if (!up) break;
+          c = up;
+          if (c.querySelector('time') && c.querySelector('a[href^="/"]')) break;
+        }
+        if (!c) continue;
+        const u = handleOf(c);
+        if (!u) continue;
+        const txt = (c.textContent || '').replace(/\s+/g, ' ').trim();
+        const lm = txt.match(/(\d+)\s*likes?/i);
+        addRow(u, lm ? parseInt(lm[1], 10) || 0 : 0, leftOf(c), txt.slice(0, 240));
+      }
+    }
+
+    // ── 探针：抽不出来时定位病因，避免下一轮再靠猜 ──
+    const body = (document.body?.innerText || '');
+    const probe = {
+      path: location.pathname,
+      article: document.querySelectorAll('article').length,
+      timeEls: document.querySelectorAll('time').length,
+      replySpans: viaReplySpan,
+      hasReplyWord: /\brepl(y|ies)\b/i.test(body),
+      hasViewAll: /view all \d+ comments|view \d+ comments|查看全部|Ver los/i.test(body),
+      likeAriaEn: document.querySelectorAll('svg[aria-label="Like"]').length,
+      likeAriaAny: Array.from(document.querySelectorAll('svg[aria-label]')).map((s) => s.getAttribute('aria-label')).filter((v, i, arr) => !!v && arr.indexOf(v) === i).slice(0, 8),
+      loginWall: !!document.querySelector('input[name="username"]') || /\/accounts\/login/.test(location.pathname),
+      rateLimited: /try again later|temporarily blocked|操作过于频繁|Please wait/i.test(body),
+      bodyLen: body.length,
+    };
+    const via: 'reply-span' | 'structural' | 'none' = rows.length === 0 ? 'none' : (viaReplySpan > 0 ? 'reply-span' : 'structural');
+    return { rows, via, probe };
+  }).catch(() => ({
+    rows: [] as Array<{ username: string; likes: number; left: number; text: string }>,
+    via: 'none' as const,
+    probe: { evalFailed: true } as Record<string, unknown>,
+  }));
+};
+
+// 清单回补（2026-09-19 首轮实测后新增）：本地 state 的 postedByPostKey 只留了近期记录
+// （首轮 queue=44），而 D1 `comment_posted` 实测有 171 篇 —— 不回补的话，「把之前评论过的帖
+// 都扫一遍」实际只覆盖最近三天，收割面小 4 倍。
+// 纯读接口、每天最多一次；只补 shape 合法的 shortcode，绝不猜。
+const syncPostedListFromApi = async (): Promise<number> => {
+  const scans = likeState.postBackScan!;
+  const last = Number(scans.listSyncedAt || 0);
+  if (last && Date.now() - last < 24 * 3600_000) return 0;
+  const map = likeState.comments?.postedByPostKey || (likeState.comments!.postedByPostKey = {});
+  let added = 0;
+  let fetched = 0;
+  try {
+    for (const off of [0, 200, 400, 600]) {
+      const r: any = await getJson(`/api/automation/behavior-logs?event=comment_posted&limit=200&offset=${off}&botId=${encodeURIComponent(BOT_ID)}`);
+      const logs: any[] = Array.isArray(r?.logs) ? r.logs : [];
+      fetched += logs.length;
+      if (!logs.length) break;
+      for (const row of logs) {
+        const raw = String(row.postUrl || row.post_url || row.url || '');
+        const key = extractPostKey(raw);
+        if (!key || !/^[A-Za-z0-9_-]{5,20}$/.test(key)) continue;
+        if (map[key]) continue;
+        map[key] = Number(Date.parse(String(row.ts || ''))) || Date.now();
+        added++;
+      }
+      if (logs.length < 200) break;
+    }
+    scans.listSyncedAt = Date.now();
+    if (added) saveLikeState(likeState);
+    // 无条件打点：added=0 也要能区分「接口没数据」和「已经补过」。
+    logBehavior('post_backscan_list_synced', { fetched, added, total: Object.keys(map).length });
+  } catch (e: any) {
+    logBehavior('post_backscan_list_sync_failed', { err: String(e?.message || e).slice(0, 160) });
+  }
+  return added;
 };
 
 let postBackScanTick = 0;
@@ -1980,6 +2082,9 @@ const backScanCommentedPosts = async (): Promise<void> => {
     if (Date.now() < Number(likeState.rest?.until || 0)) return; // 账号休息期不动作
     const selfHandle = String((ACCOUNT_IDS && ACCOUNT_IDS[0]) || '').trim().toLowerCase();
     if (!selfHandle) return;
+
+    // 先把历史清单补齐（每天最多一次、纯读接口、失败静默），否则只能扫到最近几天。
+    await syncPostedListFromApi();
 
     const postedByPostKey = likeState.comments?.postedByPostKey || {};
     const scans = likeState.postBackScan!;
@@ -2027,7 +2132,12 @@ const backScanCommentedPosts = async (): Promise<void> => {
         }
       } catch {}
 
-      const comments = await extractCommentsFlat();
+      // 等评论区真正渲染出来再抽（IG 是 SPA，domcontentloaded 后评论仍是异步来的；
+      // 首轮 6/6 全 0 的另一种可能就是这个）。等不到也不报错，交给探针记录。
+      await page.waitForSelector('article time, article ul, time', { timeout: 8000 }).catch(() => {});
+
+      const extracted = await extractPostComments();
+      const comments = extracted.rows;
       const selfIdx = comments.findIndex((c) => c.username === selfHandle);
       let replies: string[] = [];
       let indentSpread = 0;
@@ -2057,9 +2167,11 @@ const backScanCommentedPosts = async (): Promise<void> => {
         postKey: item.key,
         navOk,
         totalComments: comments.length,
+        via: extracted.via,
         foundSelf: selfIdx >= 0,
         indentSpread,
         replies: replies.length,
+        probe: extracted.probe,
       });
 
       if (replies.length) {
