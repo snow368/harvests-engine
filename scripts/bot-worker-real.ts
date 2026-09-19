@@ -147,6 +147,19 @@ const BOT_COMMENT_DRAFT_DAILY_MAX = Math.max(
   Math.min(50, Number(process.env.BOT_COMMENT_DRAFT_DAILY_MAX || process.env.BOT_COMMENT_DAILY_MAX || 25)),
 );
 const BOT_COMMENT_PUBLISH_DAILY_MAX = Math.max(0, Math.min(50, Number(process.env.BOT_COMMENT_PUBLISH_DAILY_MAX || 12)));
+
+// ── 2026-09-19 用户拍板：草稿额度**按来源拆分**（「让 bot 每天评论几十个新人」）────────
+// 旧行为：task_review（陌生目标帖）与 follow_back_ladder（已关注我们的号）**共用**同一个
+//   comments.draftsByDay 额度 ⇒ 实测 `comment_skip_draft_daily_target` 是全链路最高频事件，
+//   而 40min 窗口内 7 次 skip 的 source 全是 ladder ⇒ 真正带来新曝光的陌生目标帖被挤掉。
+//   这就是「新人评论量上不去」的根因，不是总量不够。
+// 新行为：两路各有独立日额度，陌生人占大头（默认 30–40 vs 6–10），互不挤占。
+// 注意：两段上界仍受 Math.min(50) 硬顶（总草稿 ≤50/天，按 IG 行为安全线定）。
+const clampCmt = (n: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, n));
+const BOT_COMMENT_DRAFT_STRANGER_MIN = clampCmt(Number(process.env.BOT_COMMENT_DRAFT_STRANGER_MIN || 30), 0, 50);
+const BOT_COMMENT_DRAFT_STRANGER_MAX = clampCmt(Number(process.env.BOT_COMMENT_DRAFT_STRANGER_MAX || 40), BOT_COMMENT_DRAFT_STRANGER_MIN, 50);
+const BOT_COMMENT_DRAFT_LADDER_MIN = clampCmt(Number(process.env.BOT_COMMENT_DRAFT_LADDER_MIN || 6), 0, 50);
+const BOT_COMMENT_DRAFT_LADDER_MAX = clampCmt(Number(process.env.BOT_COMMENT_DRAFT_LADDER_MAX || 10), BOT_COMMENT_DRAFT_LADDER_MIN, 50);
 const BOT_COMMENT_PUBLISH_INTERVAL_MIN_SEC = Math.max(60, Number(process.env.BOT_COMMENT_PUBLISH_INTERVAL_MIN_SEC || 8 * 60));
 const BOT_COMMENT_PUBLISH_INTERVAL_MAX_SEC = Math.max(
   BOT_COMMENT_PUBLISH_INTERVAL_MIN_SEC,
@@ -988,6 +1001,10 @@ type LikeState = {
     // and published comments were incorrectly mixed in the same counter.
     byDay?: Record<string, number>;
     draftsByDay?: Record<string, number>;
+    // 2026-09-19：草稿额度按来源分账（task_review=陌生目标帖 / follow_back_ladder=已关注号）。
+    // 旧字段 draftsByDay 保留为**总量**（兼容旧 telemetry），拆分后两路互不挤占。
+    draftsByDayBySource?: Record<string, Record<string, number>>;
+    draftDayTargetBySource?: Record<string, { key: string; target: number }>;
     postedByDay?: Record<string, number>;
     draftDayTarget?: { key: string; target: number };
     byHandle?: Record<string, { lastCommentAt?: number }>;
@@ -1056,23 +1073,40 @@ if (!likeState.postBackScan.handled) likeState.postBackScan.handled = {};
 
 const getTodayKey = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 const isSameDay = (a?: number, b?: number) => { if (!a || !b) return false; return getTodayKey(new Date(a)) === getTodayKey(new Date(b)); };
-const getCommentDraftDayTarget = () => {
+// 草稿来源：陌生目标帖（task_review）vs 已关注我们的号（follow_back_ladder）。
+// 两路额度独立 —— 详见文件头 `BOT_COMMENT_DRAFT_STRANGER_*` 注释。
+type CommentDraftSource = 'task_review' | 'follow_back_ladder';
+const draftSourceRange = (source: CommentDraftSource): [number, number] =>
+  source === 'follow_back_ladder'
+    ? [BOT_COMMENT_DRAFT_LADDER_MIN, BOT_COMMENT_DRAFT_LADDER_MAX]
+    : [BOT_COMMENT_DRAFT_STRANGER_MIN, BOT_COMMENT_DRAFT_STRANGER_MAX];
+const getCommentDraftDayTarget = (source: CommentDraftSource = 'task_review') => {
   const key = getTodayKey();
-  if (!likeState.comments!.draftDayTarget || likeState.comments!.draftDayTarget.key !== key) {
-    const span = BOT_COMMENT_DRAFT_DAILY_MAX - BOT_COMMENT_DRAFT_DAILY_MIN + 1;
-    const target = BOT_COMMENT_DRAFT_DAILY_MIN + Math.floor(Math.random() * Math.max(1, span));
-    likeState.comments!.draftDayTarget = { key, target };
+  if (!likeState.comments!.draftDayTargetBySource) likeState.comments!.draftDayTargetBySource = {};
+  const bag = likeState.comments!.draftDayTargetBySource;
+  const cur = bag[source];
+  if (!cur || cur.key !== key) {
+    const [lo, hi] = draftSourceRange(source);
+    const span = hi - lo + 1;
+    const target = lo + Math.floor(Math.random() * Math.max(1, span));
+    bag[source] = { key, target };
     saveLikeState(likeState);
   }
-  return likeState.comments!.draftDayTarget.target;
+  return bag[source].target;
 };
 const commentDraftsToday = () => Number(likeState.comments!.draftsByDay?.[getTodayKey()] || 0);
+const commentDraftsTodayFor = (source: CommentDraftSource) =>
+  Number(likeState.comments!.draftsByDayBySource?.[source]?.[getTodayKey()] || 0);
 const commentsPostedToday = () => Number(likeState.comments!.postedByDay?.[getTodayKey()] || 0);
-const canQueueCommentDraft = () => commentDraftsToday() < getCommentDraftDayTarget();
-const recordCommentDraftQueued = () => {
+const canQueueCommentDraft = (source: CommentDraftSource = 'task_review') =>
+  commentDraftsTodayFor(source) < getCommentDraftDayTarget(source);
+const recordCommentDraftQueued = (source: CommentDraftSource = 'task_review') => {
   const key = getTodayKey();
+  if (!likeState.comments!.draftsByDayBySource) likeState.comments!.draftsByDayBySource = {};
+  const bag = likeState.comments!.draftsByDayBySource[source] || (likeState.comments!.draftsByDayBySource[source] = {});
+  bag[key] = Number(bag[key] || 0) + 1;
+  // 总量计数保留（兼容旧 telemetry 读者）；拆分后它 = 两路之和。
   likeState.comments!.draftsByDay![key] = commentDraftsToday() + 1;
-  // Keep the legacy field aligned with draft count for older telemetry readers.
   likeState.comments!.byDay![key] = likeState.comments!.draftsByDay![key];
   saveLikeState(likeState);
 };
@@ -1264,12 +1298,12 @@ const queueRapportCommentForReview = async (handle: string, _fallbackText: strin
     return null;
   }
   if (!page) return null;
-  if (!canQueueCommentDraft()) {
+  if (!canQueueCommentDraft('follow_back_ladder')) {
     logBehavior('comment_skip_draft_daily_target', {
       handle,
       source: 'follow_back_ladder',
-      dayCount: commentDraftsToday(),
-      dayTarget: getCommentDraftDayTarget(),
+      dayCount: commentDraftsTodayFor('follow_back_ladder'),
+      dayTarget: getCommentDraftDayTarget('follow_back_ladder'),
     });
     return null;
   }
@@ -1420,7 +1454,7 @@ const queueRapportCommentForReview = async (handle: string, _fallbackText: strin
       }],
     });
     markPostDedup('queuedByPostKey', postKey);
-    recordCommentDraftQueued();
+    recordCommentDraftQueued('follow_back_ladder');
     logBehavior('comment_review_queued', {
       handle,
       postUrl,
@@ -1430,8 +1464,8 @@ const queueRapportCommentForReview = async (handle: string, _fallbackText: strin
       caption: caption.slice(0, 260),
       visionDescription: visionDescription.slice(0, 300),
       generationStyle: generated?.style || '',
-      dayCount: commentDraftsToday(),
-      dayTarget: getCommentDraftDayTarget(),
+      dayCount: commentDraftsTodayFor('follow_back_ladder'),
+      dayTarget: getCommentDraftDayTarget('follow_back_ladder'),
       ...commentShapeFlags(text),
     });
     return draftId;
@@ -1650,30 +1684,53 @@ const isRealHandle = (h: string) =>
   /^[A-Za-z0-9._]{2,30}$/.test(h) && !IG_RESERVED_PATHS.has(String(h).toLowerCase());
 
 let incomingFbTick = 0;
+// 2026-09-19：把「读自己粉丝数」从「完整扫粉列表」里拆出来单独高频跑。
+// 背景：两者原来都挂在 `%20` 上 ⇒ 粉丝数每 ≈146min 才可能读一次，而 `own_followers` 实测 0 行
+//   ⇒ 改任何涨粉策略都无法判断效果（这正是「要不要多搞几个号」这个决策缺的那个数字）。
+//   读主页 stats 是**便宜**动作（一次 goto + DOM 读），扫 Followers 弹窗才是**重**动作。
+const FOLLOWERS_PROBE_TICK = Math.max(1, Number(process.env.BOT_FOLLOWERS_PROBE_TICK || 3));
+let followersProbeTick = 0;
 const checkIncomingFollowBacks = async () => {
   try {
-    incomingFbTick = (incomingFbTick + 1) % 20; // 约每 20 轮查一次，避免频繁打扰
-    if (incomingFbTick !== 0) return;
+    incomingFbTick = (incomingFbTick + 1) % 20;                            // 重：完整扫 Followers 列表（每 ≈146min）
+    followersProbeTick = (followersProbeTick + 1) % FOLLOWERS_PROBE_TICK;  // 轻：只读自己粉丝数（默认每 ≈22min）
+    const doSweep = incomingFbTick === 0;
+    const doProbe = followersProbeTick === 0;
+    if (!doSweep && !doProbe) return;
     const me = (ACCOUNT_IDS && ACCOUNT_IDS[0]) || '';
     if (!me || !page) return;
-    await page.goto(`${IG_BASE}/${me}/`, { waitUntil: 'domcontentloaded', timeout: 45000 });
+    // ⚠️ goto 必须带 .catch()：裸 await 超时会抛进外层 catch ⇒ 下面的打点永不执行（本文件最贵的一课）
+    await page.goto(`${IG_BASE}/${me}/`, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
     await page.waitForTimeout(jitter(1500, 3000));
-    // 🔴 2026-09-19：涨粉仪表。这是全链路里**唯一**「我们自己的主页已经打开」的时机（约每 20 轮一次）。
-    // 导航成本早就付了，却从来不读自己的粉丝数 ⇒ 之后无论改什么策略，都没有任何办法判断有没有效果。
-    // 失败静默：读不到就跳过，绝不影响下面回关主链路。
+    // 🔴 涨粉仪表：**读不到也要打点**。旧写法只在 `meFollowers > 0` 时打点，导致
+    //   「真的是 0 粉丝」和「选择器失效读不到」两种情况在数据上完全同形，无法区分。
+    //   现在永远记一行，并带上 DOM 原始探测（anchor 存在与否 / 原文 / title）供定位。
     try {
-      const meFacts = await captureProfileFacts();
+      const meFacts = await captureProfileFacts().catch(() => null);
       const meFollowers = Number(meFacts?.followers || 0);
-      if (meFollowers > 0) {
-        logBehavior('own_followers', {
-          handle: me,
-          followers: meFollowers,
-          following: Number(meFacts?.following || 0),
-          posts: Number(meFacts?.postCount || 0),
-          tracked: Object.keys(likeState.follows?.byHandle || {}).length,
-        });
-      }
+      const probe = await page.evaluate(() => {
+        const fA = document.querySelector('a[href*="/followers/"]');
+        const gA = document.querySelector('a[href*="/following/"]');
+        const clean = (s: string | null | undefined) => String(s || '').replace(/\s+/g, ' ').trim().slice(0, 60);
+        return {
+          hasFollowersAnchor: !!fA,
+          followersText: clean(fA?.textContent),
+          followersTitle: clean(fA?.querySelector('span[title]')?.getAttribute('title')),
+          followingText: clean(gA?.textContent),
+          // 页面是否是登录态（掉登录页时这里会是 false，与「选择器失效」又能区分开）
+          loggedIn: !/\/accounts\/login/.test(location.pathname),
+        };
+      }).catch(() => null);
+      logBehavior('own_followers', {
+        handle: me,
+        followers: meFollowers,
+        following: Number(meFacts?.following || 0),
+        posts: Number(meFacts?.postCount || 0),
+        tracked: Object.keys(likeState.follows?.byHandle || {}).length,
+        probe,
+      });
     } catch {}
+    if (!doSweep) return; // 仅轻探针：读完粉丝数就收工，不开 Followers 弹窗
     const followersLink = page.locator('a[href*="/followers/"]').first();
     if ((await followersLink.count()) > 0) await followersLink.click({ timeout: 8000 }).catch(() => {});
     await page.waitForTimeout(jitter(2000, 4000));
@@ -3546,7 +3603,7 @@ const pruneRecentCommentHashes = () => {
 const shouldTryComment = (handle: string, likeSummary?: LikeActionSummary) => {
   if (!BOT_COMMENT_ENABLED) return { ok: false, reason: 'comment_disabled' };
 
-  if (!canQueueCommentDraft()) return { ok: false, reason: 'comment_draft_daily_target' };
+  if (!canQueueCommentDraft('task_review')) return { ok: false, reason: 'comment_draft_daily_target' };
 
   // No more "like first" or "first touch window" — comment when a good post is found.
   // Chance roll keeps volume human-scale.
@@ -4219,7 +4276,7 @@ const tryCommentWithStrategy = async (handle: string, facts?: ProfileFacts, like
       styleConfidence: tempConf,
       visionDescription,
     });
-    recordCommentDraftQueued();
+    recordCommentDraftQueued('task_review');
     likeState.comments!.byHandle![handle] = { lastCommentAt: Date.now() };
     likeState.comments!.recentText!.push({ ts: Date.now(), hash: textHash });
     pruneRecentCommentHashes();

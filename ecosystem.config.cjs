@@ -231,9 +231,23 @@ const apps = [
       // （2026-09-17 从 VPS 回收：VPS 实测一直是 25/40/20，仓库默认 15/25/12 会把评论量砍掉约 40%）
       BOT_COMMENT_ENABLED: 'true',
       // （评论抽签率 BOT_COMMENT_CHANCE 见下方「互动优先策略」区块）
+      // ⚠️ 以下 MIN/MAX 自 2026-09-19 起只作**总量参考**（状态面板用）；真正生效的是下面的分额键。
       BOT_COMMENT_DRAFT_DAILY_MIN: '25',
       BOT_COMMENT_DRAFT_DAILY_MAX: '40',
-      BOT_COMMENT_PUBLISH_DAILY_MAX: '20',
+      // ── 草稿额度按来源分账（2026-09-19 用户拍板「让 bot 每天评论几十个新人」）──
+      // 旧行为：陌生目标帖(task_review) 与 已关注我们的号(follow_back_ladder) **共用**一个额度，
+      //   实测 comment_skip_draft_daily_target 是全链路最高频事件且 source 全是 ladder
+      //   ⇒ 真正带来新曝光的陌生目标帖被挤掉。这才是「新人量上不去」的根因。
+      // 新行为：两路独立额度，陌生人占大头（默认 30–40 vs 6–10）；代码内两段上界硬顶 50。
+      BOT_COMMENT_DRAFT_STRANGER_MIN: '30',
+      BOT_COMMENT_DRAFT_STRANGER_MAX: '40',
+      BOT_COMMENT_DRAFT_LADDER_MIN: '6',
+      BOT_COMMENT_DRAFT_LADDER_MAX: '10',
+      // ⚠️ 发布上限是**人工审核吞吐**的天花板，不是 bot 产能。当前实测只跑到 6–16/天。
+      //    2026-09-19 从 20 提到 30（「几十个」的第一档）。再往上加请**分档**：
+      //    30 → 观察 2–3 天（看 like/评论/涨粉三条曲线 + 有无 account_rest_triggered）→ 40。
+      //    一次性拉满 = 账号行为突变，是 IG 风控最认的异常特征。
+      BOT_COMMENT_PUBLISH_DAILY_MAX: '30',
       // 人工审核通过后逐条发布，间隔随机 8-20 分钟；冷却时间写入状态文件，重启不会绕过。
       BOT_COMMENT_PUBLISH_INTERVAL_MIN_SEC: '480',
       BOT_COMMENT_PUBLISH_INTERVAL_MAX_SEC: '1200',
@@ -281,6 +295,12 @@ const apps = [
       BOT_POST_BACKSCAN_MAX_REPLIERS: '2',
       // 节流：每 N 轮真正扫一次，其余轮次空转（成本≈0）
       BOT_POST_BACKSCAN_TICK: '2',
+      // ── 涨粉仪表（2026-09-19）：读自己主页粉丝数的频率（单位=轮）──
+      // 原来和「完整扫 Followers 弹出层」共用 %20（≈146min 一次），导致 own_followers 长期 0 行 ⇒
+      // 改任何涨粉策略都无法判断效果。读 stats 很便宜，所以拆出来高频跑：默认每 3 轮（≈22min）。
+      // 完整扫粉列表仍是每 20 轮。无论读没读到都会打点（0 粉丝 vs 选择器失效必须可区分）。
+      // ⚠️ 不要把 BOT_OCR_ENABLED 打开：tesseract.js 在沙箱会永久挂起，曾把每个任务卡满看门狗。
+      BOT_FOLLOWERS_PROBE_TICK: '3',
       BOT_DM_DAILY_MAX: '15',
       // 评论抽签率：每次访问目标号生成草稿的概率。
       //   0.4 → 1（2026-09-15 定）：不关注任何人之后，评论是唯一的涨粉主力动作，抽签率拉满；
