@@ -604,7 +604,11 @@ export const commentShapeFlags = (text: string): Record<string, number> => {
     // ⇒ 工艺词（packing/whip shade/grey wash）早就在用了，缺的是规格词 —— 上一轮我说"器材词 0"
     //   口径不对（只查了规格），这里把两个口径都留下来，免得再自欺。
     shapeGearSpec: /\b(\d+\s*(rl|rs|mg|m1|slant)\b|cartridge|ink cap|transfer paper|grip wrap|grip tape)\b/i.test(t) ? 1 : 0,
-    shapeVerdict: /\b(that'?s the|is the (hard|whole|real|actual|unfair)|is what (makes|keeps|sells)|is the tell|is the move|is the flex|is the reason|comes down to|reads as)\b/i.test(t) ? 1 : 0,
+    // 2026-09-19 二修：放宽口径。首版正则只认固定短语（is the tell / is the whole piece），
+    //   而 prompt 里的示范短语被模型直接抄用，去模板化后模型会自创说法 ⇒ 旧正则会漏测、
+    //   把"写法变多样"误判成"规则失效"。故扩到更通用的判断句式。
+    //   ⚠️ 口径已变，不可与 2026-09-19 首版基线（verdict 10%）直接比。
+    shapeVerdict: /\b(that'?s the|that is the|is the (hard|whole|real|actual|unfair|smart|right|tough|tricky|easy) (part|piece|call|read|move|play|thing|step|bit)|is what (makes|keeps|sells|holds|carries)|is why|is where|comes down to|boils down to|reads as|reads like|holds up|does the work|carries the|makes or breaks|separates)\b/i.test(t) ? 1 : 0,
     shapeYou: /\b(you|your|yours)\b/i.test(t) ? 1 : 0,
   };
 };
@@ -749,7 +753,7 @@ ${input.sensitive ? '- SENSITIVE / RESPECTFUL POST: this is personal or commemor
 - Tattoo slang welcome (whip shade, packing, blowout, bold will hold) but don't force it.
 - Emoji: 0-1, usually none. No hashtags, no @mentions, no quotation marks around your comment.
 - GEAR IS YOUR ACCENT, NOT YOUR PITCH (2026-09-19): this account is run by a tattoo-supply maker, so naming gear is what makes you a peer instead of a fan. The ban above is about SELLING (DM / bio / link / promo / price) — naming a TOOL is welcome. Two safe shapes only: (a) repeat gear the caption or IMAGE ANALYSIS already names ("running the 7rl on this one"); (b) talk about the tool CLASS or a method choice another artist could dispute ("a magnum packs that area faster than a liner ever will", "single pass on that size is the real flex"). NEVER invent a needle or machine spec the evidence does not support, and never state what they used as a fact. Keep this about METHOD, never about quality.
-- LAND A VERDICT (2026-09-19): never stop at an observation — close on a judgment another artist could DISAGREE with. Agreement AND correction both notify everyone who liked the post, so a disputable claim is the cheapest reach you have. Shapes that work: "...is the hard part", "...is the whole piece", "that is the tell", "...is what keeps it sitting flat". Praise is NOT a verdict; a verdict is a claim about METHOD or RESULT.
+- LAND A VERDICT (2026-09-19): never stop at an observation — close on a judgment another artist could DISAGREE with. Agreement AND correction both notify everyone who liked the post, so a disputable claim is the cheapest reach you have. Praise is NOT a verdict; a verdict is a claim about METHOD or RESULT. DO NOT quote or paraphrase the wording of this rule — that produces identical-sounding comments across posts, which is exactly what gets an account flagged as a bot. Your closing claim must be written from scratch, in the register of the rest of your comment (slang, fragments, lowercase — whatever fits). Pick ONE angle per comment, at random, and say it your own way: (a) which step carries the difficulty; (b) which decision makes the piece read as one thing instead of parts; (c) which detail separates a clean result from a botched one; (d) what the result depends on holding up over time. TEST: if your closing line would still make sense pasted under a completely different tattoo photo, it is NOT a verdict — it is filler.
 ${wantSecondPerson ? `- SPEAK TO THE ARTIST DIRECTLY (this round only): address them with "you/your" about a METHOD DECISION — "smart call on the placement", "your dark packing holds at this size" — never a compliment about them as a person.\n` : ''}
 Return ONLY JSON: {"text": "your comment", "style": "tattoo_artist"}`;
 };
