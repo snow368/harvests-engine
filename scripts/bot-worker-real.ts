@@ -1707,6 +1707,19 @@ let incomingFbTick = 0;
 //   读主页 stats 是**便宜**动作（一次 goto + DOM 读），扫 Followers 弹窗才是**重**动作。
 const FOLLOWERS_PROBE_TICK = Math.max(1, Number(process.env.BOT_FOLLOWERS_PROBE_TICK || 3));
 let followersProbeTick = 0;
+
+// 2026-09-20: IG is an SPA. `domcontentloaded` fires before the profile shell renders, so any
+//   caller that reads the DOM immediately after goto() sees an empty page. Measured today:
+//   own_followers.probe returned hasFollowersAnchor=false while the anchor does exist a moment
+//   later (profile_facts read a real follower count on 37/200 samples with the same selector).
+//   Wait for the shell, then for the element the caller actually needs. Bounded; never throws.
+const gotoOwnProfile = async (me: string, expect = 'a[href*="/followers/"], a[href*="/p/"]') => {
+  if (!page) return;
+  await page.goto(`${IG_BASE}/${me}/`, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
+  await page.waitForSelector('main', { state: 'visible', timeout: 20000 }).catch(() => {});
+  await page.waitForSelector(expect, { timeout: 15000 }).catch(() => {});
+  await page.waitForTimeout(jitter(800, 1600));
+};
 const checkIncomingFollowBacks = async () => {
   try {
     incomingFbTick = (incomingFbTick + 1) % ENGAGEMENT_TICK;                // 重：完整扫 Followers 列表（默认每 ≈22min）
@@ -1717,8 +1730,7 @@ const checkIncomingFollowBacks = async () => {
     const me = (ACCOUNT_IDS && ACCOUNT_IDS[0]) || '';
     if (!me || !page) return;
     // ⚠️ goto 必须带 .catch()：裸 await 超时会抛进外层 catch ⇒ 下面的打点永不执行（本文件最贵的一课）
-    await page.goto(`${IG_BASE}/${me}/`, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
-    await page.waitForTimeout(jitter(1500, 3000));
+    await gotoOwnProfile(me);
     // 🔴 涨粉仪表：**读不到也要打点**。旧写法只在 `meFollowers > 0` 时打点，导致
     //   「真的是 0 粉丝」和「选择器失效读不到」两种情况在数据上完全同形，无法区分。
     //   现在永远记一行，并带上 DOM 原始探测（anchor 存在与否 / 原文 / title）供定位。
@@ -2238,8 +2250,7 @@ const checkWhoLikedUs = async (): Promise<void> => {
     if (!me || !page) return;
     const known = new Set(Object.keys(likeState.follows?.byHandle || {}));
     if (!known.size) return;
-    await page.goto(`${IG_BASE}/${me}/`, { waitUntil: 'domcontentloaded', timeout: 45000 });
-    await page.waitForTimeout(jitter(1500, 3000));
+    await gotoOwnProfile(me, 'a[href*="/p/"]');
     const firstPost = page.locator('a[href*="/p/"]').first();
     if ((await firstPost.count()) === 0) return;
     await firstPost.click({ timeout: 8000 });
@@ -2296,8 +2307,7 @@ const checkAudienceReciprocate = async () => {
     const seen = new Set<string>();
     const isHandle = (h: string) => /^[A-Za-z0-9._]{2,30}$/.test(h) && !['p','reel','explore','accounts','direct','tv','stories','saved','reels'].includes(h);
 
-    await page.goto(`${IG_BASE}/${me}/`, { waitUntil: 'domcontentloaded', timeout: 45000 });
-    await page.waitForTimeout(jitter(1500, 3000));
+    await gotoOwnProfile(me, 'a[href*="/p/"]');
     const postLinks = await page.locator('a[href*="/p/"]').evaluateAll((els: any[]) =>
       Array.from(new Set(els.map((e: any) => (e.getAttribute('href') || '').split('?')[0]).filter((h: string) => h.includes('/p/')).slice(0, postsScan)))
     ).catch(() => [] as string[]);
