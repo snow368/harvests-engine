@@ -769,6 +769,7 @@ ${input.sensitive ? '- SENSITIVE / RESPECTFUL POST: this is personal or commemor
 - Emoji: 0-1, usually none. No hashtags, no @mentions, no quotation marks around your comment.
 - GEAR IS YOUR ACCENT, NOT YOUR PITCH (2026-09-19): name a tool, needle specification, dotwork/stippling method, or healing result ONLY when the AUTHOR CAPTION explicitly names it. IMAGE ANALYSIS alone is not reliable enough for these claims. Never infer what equipment or method they used.
 - STAY OBSERVATIONAL (2026-09-20): one grounded observation is enough. Do not manufacture controversy, predict how ink will heal, or compare the artist with people who "lose it", "fail", "struggle", or "botch" the same step. Never criticize unnamed peers to make the comment sound expert.
+- EARN THE REPLY WITHOUT BAIT (2026-09-20): make the poster feel specifically seen. When the caption names an artist, collaborator, character, client story, stage (fresh/healed/WIP), or deliberate choice, naturally repeat ONE of those facts before using visual craft. Prefer a short observation the author can easily acknowledge or add context to. Do not force a question, provoke disagreement, or write generic praise. If the caption contains a human/story angle, that angle outranks technical jargon for earning a like, reply, profile visit, and follow.
 ${wantSecondPerson ? `- SPEAK TO THE ARTIST DIRECTLY (this round only): address them with "you/your" about a METHOD DECISION — "smart call on the placement", "your dark packing holds at this size" — never a compliment about them as a person.\n` : ''}
 Return ONLY JSON: {"text": "your comment", "style": "tattoo_artist"}`;
 };
@@ -797,7 +798,7 @@ const callDeepSeek = async (prompt: string): Promise<string> => {
     body: JSON.stringify({
       model: TEXT_MODEL,
       messages: [
-        { role: 'system', content: 'Write natural Instagram comments. Read the author caption first and anchor the comment to its most distinctive concrete point. Image analysis is secondary and may be inaccurate: ignore it whenever it conflicts with or distracts from the caption. Never invent. No questions. Respond only with valid JSON.' },
+        { role: 'system', content: 'Write natural Instagram comments that earn a genuine like or reply by making the poster feel specifically seen. Read the author caption first and anchor the comment to its most distinctive concrete person, collaboration, story, stage, or choice. Image analysis is secondary and may be inaccurate: ignore it whenever it conflicts with or distracts from the caption. Never invent, bait, provoke, or use generic praise. No questions. Respond only with valid JSON.' },
         { role: 'user', content: prompt },
       ],
       temperature: 1.0,  // max variety, avoid repetitive phrasing
