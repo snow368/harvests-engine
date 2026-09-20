@@ -34,3 +34,24 @@ check('real first tattoo remains a milestone',
   detectPostIntent('Her first tattoo today and she sat like a champ.').intent === 'first_tattoo',
   true,
 );
+check('rejects vision-only dotwork and healing hallucination', validateCommentGrounding(
+  'dot work density on the snake scales still reads tight through inner thigh healing',
+  {
+    caption: '',
+    visionDescription: 'hook: the dot-work on the snake scales shows good density | motif: traditional geisha with dragon and samurai with snake (high) | placement: inner thighs | stage: healed',
+  },
+), false);
+check('accepts dotwork when artist caption explicitly names it', validateCommentGrounding(
+  'the dotwork density stays even across the snake scales',
+  {
+    caption: 'Week healed snake, built with dotwork shading through the scales.',
+    visionDescription: 'motif: snake (high) | placement: inner thigh',
+  },
+), true);
+check('rejects peer putdown verdicts', validateCommentGrounding(
+  'keeping that density even is where most people lose it',
+  {
+    caption: 'Week healed dotwork snake.',
+    visionDescription: 'motif: snake (high) | placement: inner thigh',
+  },
+), false);

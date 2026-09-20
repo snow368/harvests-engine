@@ -113,7 +113,7 @@ Strict evidence rules:
 
 // 空腔调/纯赞美 hook 闸门：命中即判定"这条 hook 没有信息量"，下游当作没有 hook 处理。
 // 同时要求至少 3 个词 —— 单词/双词 hook 基本都是空赞美（"clean lines"）。
-const HOOK_FLAVOR_RE = /\b(clean|crispy|crisp|fire|sick|dope|insane|amazing|gorgeous|flawless|perfect|beautiful|gorgeous|slaps|beast|hits? different|great work|nice piece|love this|solid work|well done|killing it|fine shyt|insane detail)\b/i;
+const HOOK_FLAVOR_RE = /\b(clean|crispy|crisp|fire|sick|dope|insane|amazing|gorgeous|flawless|perfect|beautiful|gorgeous|good|tight|slaps|beast|hits? different|great work|nice piece|love this|solid work|well done|killing it|fine shyt|insane detail)\b/i;
 export const usableHook = (hook?: string): string => {
   const h = String(hook || '').trim();
   if (h.length < 8) return '';
