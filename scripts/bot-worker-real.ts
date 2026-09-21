@@ -1984,6 +1984,10 @@ const checkCommentEngagers = async () => {
         let node: any = link;
         for (let i = 0; i < 4 && node; i++) node = node.parentElement;
         const text = (node ? node.innerText : (link as any).innerText || '').replace(/\s+/g, ' ').trim();
+        // 🔴 2026-09-21：往上找 4 层有时会抓到**跨多条通知的容器**，其文本里同时含
+        //   「liked your comment」和别人的 handle ⇒ 一个容器伪造出一堆假互动者。
+        //   单条 IG 通知文案远短于 400 字符，超长的一律当容器丢掉。
+        if (text.length > 400) continue;
         out.push({ handle: href, text });
       }
       const body = document.body ? (document.body.innerText || '') : '';
@@ -2017,6 +2021,8 @@ const checkCommentEngagers = async () => {
       navOk,
       scanned: raw.length,
       engagers: engagers.length,
+      // 命中样本：一次就能看出正则是不是把「跨条容器文本」也算成了互动者（假阳性）
+      samples: raw.slice(0, 4).map((r) => `${r.handle}|${r.text.slice(0, 90)}`),
       tracked: Object.keys(likeState.follows?.byHandle || {}).length,
       probe: {
         ...(scannedPage.probe as Record<string, unknown>),
@@ -2033,7 +2039,15 @@ const checkCommentEngagers = async () => {
     // 实测 comment_engager_like_back / _follow_back 全部 0 行。
     // 现在 Pass A 空转不拦 Pass B（两件事本来就没有依赖关系）。
     // 3) Pass A：当日检测新互动者，开主页读 bio 判相关性，记录次日 followAt（不立即回关）
-    for (const h of (engagers.length ? engagers.slice(0, 20) : ([] as string[]))) {
+    // 🔴 2026-09-21：原来在**去重之前**就 `slice(0,20)` ⇒ 通知页修好后候选从 4 涨到 145，
+    //   却永远只看前 20 个：那 20 个标完 `commentEngagerProcessed` 后，每轮还是取同一批前 20
+    //   全部 `continue` ⇒ 第 21..145 个**永远轮不到**（静默饥饿）。改为**先过滤已处理、再截断**。
+    const engagerPending = engagers.filter((h) => {
+      const st = likeState.follows?.byHandle?.[h] as any;
+      return !(st && (st.followedAt || st.commentEngagerProcessed));
+    });
+    if (engagers.length) logBehavior('comment_engager_pass_a', { engagers: engagers.length, pending: engagerPending.length, slice: 20 });
+    for (const h of engagerPending.slice(0, 20)) {
       const st = (likeState.follows!.byHandle![h] || (likeState.follows!.byHandle![h] = {})) as any;
       if (st.followedAt || st.commentEngagerProcessed) continue;
       try {
