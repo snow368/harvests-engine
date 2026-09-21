@@ -2169,22 +2169,34 @@ const likeHandleCommentHere = async (handle: string): Promise<boolean> => {
 //   ③ `probe` = 抽不出来时的病因探针（页面到底有没有评论 / 是否掉登录 / 是否被限流 / 按钮文案语言）。
 //   这样下一轮不必再猜：探针数据直接指向是"选择器过期"还是"页面没加载"还是"掉登录"。
 const extractPostComments = async (): Promise<{
-  rows: Array<{ username: string; likes: number; left: number; text: string }>;
+  rows: Array<{ username: string; likes: number; left: number; nested: boolean; text: string }>;
   via: 'reply-span' | 'structural' | 'none';
   probe: Record<string, unknown>;
 }> => {
   if (!page) return { rows: [], via: 'none', probe: { noPage: true } };
   return await page.evaluate(() => {
-    const rows: Array<{ username: string; likes: number; left: number; text: string }> = [];
+    const rows: Array<{ username: string; likes: number; left: number; nested: boolean; text: string }> = [];
     const seen = new Set<string>();
-    const addRow = (username: string, likes: number, left: number, text: string) => {
+    const addRow = (username: string, likes: number, left: number, nested: boolean, text: string) => {
       if (!username) return;
       const k = username + '\u0000' + text.slice(0, 60);
       if (seen.has(k)) return;
       seen.add(k);
-      rows.push({ username, likes, left, text });
+      rows.push({ username, likes, left, nested, text });
     };
     const leftOf = (el: Element) => { try { return Math.round(el.getBoundingClientRect().left); } catch { return 0; } };
+    // 🔴 2026-09-21：缩进判据（left）在 IG 现行结构下**恒等**（每条评论容器都是整宽行）⇒
+    //   `indentSpread` 恒 0，**不能**据此断定"没有回复"。改用与几何无关的结构判据：
+    //   若某条评论的**祖先**里存在只含 1 个 `<time>` 的盒子，那它本身就是"别人的单条评论容器"
+    //   ⇒ 我们这条是被嵌在它里面的（即回复）。走 8 层足够覆盖 IG 的 li/div 包装。
+    const nestedOf = (el: Element): boolean => {
+      let n: Element | null = el.parentElement;
+      for (let i = 0; i < 8 && n && n !== document.body; i++) {
+        if (n.querySelectorAll('time').length === 1) return true;
+        n = n.parentElement;
+      }
+      return false;
+    };
     const handleOf = (el: Element | null): string => {
       if (!el) return '';
       const a = el.querySelector('a[href^="/"]') as HTMLAnchorElement | null;
@@ -2204,7 +2216,7 @@ const extractPostComments = async (): Promise<{
       const actions = ((span.parentElement?.parentElement?.textContent || '') as string)
         .replace(/Reply/g, ' ').replace(/\s+/g, ' ').trim();
       const lm = actions.match(/^(\d+)\s*likes?$/i);
-      addRow(u, lm ? parseInt(lm[1], 10) || 0 : 0, leftOf(c), (c.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 240));
+      addRow(u, lm ? parseInt(lm[1], 10) || 0 : 0, leftOf(c), nestedOf(c), (c.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 240));
     }
     const viaReplySpan = rows.length;
 
@@ -2223,7 +2235,7 @@ const extractPostComments = async (): Promise<{
         if (!u) continue;
         const txt = (c.textContent || '').replace(/\s+/g, ' ').trim();
         const lm = txt.match(/(\d+)\s*likes?/i);
-        addRow(u, lm ? parseInt(lm[1], 10) || 0 : 0, leftOf(c), txt.slice(0, 240));
+        addRow(u, lm ? parseInt(lm[1], 10) || 0 : 0, leftOf(c), nestedOf(c), txt.slice(0, 240));
       }
     }
 
@@ -2234,6 +2246,11 @@ const extractPostComments = async (): Promise<{
       article: document.querySelectorAll('article').length,
       timeEls: document.querySelectorAll('time').length,
       replySpans: viaReplySpan,
+      // 两种回复判据并排打点：`lefts` 只有 1 个值 ⇒ 缩进判据失效（几何不可用），
+      //   `nestedRows` 才是有效的那个。两者一起看才能判「真没回复」还是「判据认不出」。
+      totalRows: rows.length,
+      nestedRows: rows.filter((r) => r.nested).length,
+      lefts: Array.from(new Set(rows.map((r) => r.left))).slice(0, 5),
       hasReplyWord: /\brepl(y|ies)\b/i.test(body),
       hasViewAll: /view all \d+ comments|view \d+ comments|查看全部|Ver los/i.test(body),
       likeAriaEn: document.querySelectorAll('svg[aria-label="Like"]').length,
@@ -2245,7 +2262,7 @@ const extractPostComments = async (): Promise<{
     const via: 'reply-span' | 'structural' | 'none' = rows.length === 0 ? 'none' : (viaReplySpan > 0 ? 'reply-span' : 'structural');
     return { rows, via, probe };
   }).catch(() => ({
-    rows: [] as Array<{ username: string; likes: number; left: number; text: string }>,
+    rows: [] as Array<{ username: string; likes: number; left: number; nested: boolean; text: string }>,
     via: 'none' as const,
     probe: { evalFailed: true } as Record<string, unknown>,
   }));
@@ -2408,15 +2425,25 @@ const backScanCommentedPosts = async (): Promise<void> => {
       const selfIdx = comments.findIndex((c) => c.username === selfHandle);
       let replies: string[] = [];
       let indentSpread = 0;
+      let repliesByNest = 0;
+      let repliesByIdent = 0;
       if (selfIdx >= 0) {
         postsWithSelf++;
         const selfLeft = comments[selfIdx].left;
         const lefts = comments.map((c) => c.left);
         indentSpread = Math.max(...lefts) - Math.min(...lefts);
-        // 我们那条评论之后、缩进更深（右移 >8px）且非自己 —— 即挂在我们评论下的回复
+        // 🔴 2026-09-21：原来只用缩进（`left > selfLeft+8`）判「挂在我们评论下的回复」，
+        //   而 `lefts` 实测**只有 1 个值**（每条评论容器都是整宽行）⇒ 缩进判据恒不成立
+        //   ⇒ `replies` 恒空 ⇒ **从不回赞**。所以「回扫没有回复」的老结论**作废**。
+        //   改为：结构判据 `nested`（DOM 嵌套，与几何无关）为主，缩进仅作兜底；
+        //   并且不再 `break` —— 结构判据不保证单调递增，`break` 会漏掉后面的真回复。
         for (let i = selfIdx + 1; i < comments.length; i++) {
-          if (comments[i].left <= selfLeft + 8) break; // 缩进回退 = 离开我们的回复区
-          const u = comments[i].username;
+          const c = comments[i] as { username: string; left: number; nested?: boolean };
+          const deeper = c.left > selfLeft + 8;
+          const nested = c.nested === true;
+          if (!deeper && !nested) continue;
+          if (nested) repliesByNest++; else repliesByIdent++;
+          const u = c.username;
           if (u && u !== selfHandle && !replies.includes(u)) replies.push(u);
         }
         const prevLikes = Number(seenLikes[item.key] || 0);
@@ -2440,6 +2467,8 @@ const backScanCommentedPosts = async (): Promise<void> => {
         foundSelf: selfIdx >= 0,
         indentSpread,
         replies: replies.length,
+        repliesByNest,
+        repliesByIdent,
         probe: extracted.probe,
       });
 
