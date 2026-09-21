@@ -679,6 +679,15 @@ const extractPostKey = (urlOrHref: string) => {
   const m = String(urlOrHref || '').match(/\/(?:p|reel)\/([^\/\?\#]+)/i);
   return m?.[1] ? String(m[1]).toLowerCase() : '';
 };
+// 2026-09-21 🔴 严重：IG shortcode 是 base64 变体、**区分大小写**（`DdMBdW7Ru2Z` ≠ `ddmbdw7ru2z`）。
+// extractPostKey 统一小写对「去重键」是对的，但**绝不能拿它拼导航 URL** —— 实测 186 条真实
+// postUrl **100% 含大写、0 条全小写**，而回扫一直在用 `ddgvh9ov8hy` 这种小写 key 访问
+// ⇒ IG 只回空壳（probe: bodyLen 777 / article 0 / 只剩导航栏）⇒ postsWithSelf 恒 0、
+// comment_engager_* 全历史 0 行。「能访问到」的场合一律用这个保留原始大小写的版本。
+const extractPostShortcode = (urlOrHref: string) => {
+  const m = String(urlOrHref || '').match(/\/(?:p|reel)\/([^\/\?\#]+)/i);
+  return m?.[1] ? String(m[1]).trim() : '';
+};
 const normalizeHandle = (v: string) => String(v || '').replace(/^@/, '').trim().toLowerCase();
 const profileHandleFromUrl = (u: string) => {
   try {
@@ -1035,6 +1044,9 @@ type LikeState = {
     backfillDoneAt?: number;
     // 上次从 API 回补「已评论帖清单」的时间（本地 state 只留近期记录，需靠 D1 补齐历史）
     listSyncedAt?: number;
+    // postKey(小写去重键) -> **真实大小写** shortcode。导航必须用它，否则访问不到帖子（见 extractPostShortcode）
+    shortByKey?: Record<string, string>;
+    shortSyncedAt?: number;
   };
   // 🛑 账号休息（被动，IG 限制信号触发）：持久化，bot 重启也继续休息直到冷却结束
   rest?: { until: number; reason: string; severity: string; at: number; count?: number };
@@ -1076,6 +1088,7 @@ if (!likeState.postBackScan) likeState.postBackScan = {};
 if (!likeState.postBackScan.scanned) likeState.postBackScan.scanned = {};
 if (!likeState.postBackScan.seenLikes) likeState.postBackScan.seenLikes = {};
 if (!likeState.postBackScan.handled) likeState.postBackScan.handled = {};
+if (!likeState.postBackScan.shortByKey) likeState.postBackScan.shortByKey = {};
 
 const getTodayKey = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 const isSameDay = (a?: number, b?: number) => { if (!a || !b) return false; return getTodayKey(new Date(a)) === getTodayKey(new Date(b)); };
@@ -2092,9 +2105,13 @@ const extractPostComments = async (): Promise<{
 // 纯读接口、每天最多一次；只补 shape 合法的 shortcode，绝不猜。
 const syncPostedListFromApi = async (): Promise<number> => {
   const scans = likeState.postBackScan!;
-  const last = Number(scans.listSyncedAt || 0);
-  if (last && Date.now() - last < 24 * 3600_000) return 0;
   const map = likeState.comments?.postedByPostKey || (likeState.comments!.postedByPostKey = {});
+  const short = scans.shortByKey || (scans.shortByKey = {});
+  const last = Number(scans.listSyncedAt || 0);
+  // 🔴 shortByKey 是 2026-09-21 新增的「真实大小写」。历史 key 全是小写 ⇒ 首次必须**绕过**
+  // 24h 闸补一轮，否则要白等一天才修好导航。补满（覆盖全部 key）后才重新受 24h 闸约束。
+  const shortMissing = Object.keys(map).filter((k) => !short[k]).length;
+  if (last && Date.now() - last < 24 * 3600_000 && shortMissing === 0) return 0;
   let added = 0;
   let fetched = 0;
   try {
@@ -2106,17 +2123,19 @@ const syncPostedListFromApi = async (): Promise<number> => {
       for (const row of logs) {
         const raw = String(row.postUrl || row.post_url || row.url || '');
         const key = extractPostKey(raw);
+        const code = extractPostShortcode(raw);
         if (!key || !/^[A-Za-z0-9_-]{5,20}$/.test(key)) continue;
-        if (map[key]) continue;
-        map[key] = Number(Date.parse(String(row.ts || ''))) || Date.now();
-        added++;
+        if (!code || !/^[A-Za-z0-9_-]{5,20}$/.test(code)) continue;
+        if (!map[key]) { map[key] = Number(Date.parse(String(row.ts || ''))) || Date.now(); added++; }
+        if (short[key] !== code) short[key] = code; // 回填/修正真实大小写（含历史小写污染）
       }
       if (logs.length < 200) break;
     }
     scans.listSyncedAt = Date.now();
-    if (added) saveLikeState(likeState);
+    scans.shortSyncedAt = Date.now();
+    saveLikeState(likeState); // 无条件存：即使 added=0，shortByKey 也可能被回填
     // 无条件打点：added=0 也要能区分「接口没数据」和「已经补过」。
-    logBehavior('post_backscan_list_synced', { fetched, added, total: Object.keys(map).length });
+    logBehavior('post_backscan_list_synced', { fetched, added, total: Object.keys(map).length, shortTotal: Object.keys(short).length });
   } catch (e: any) {
     logBehavior('post_backscan_list_sync_failed', { err: String(e?.message || e).slice(0, 160) });
   }
@@ -2138,6 +2157,7 @@ const backScanCommentedPosts = async (): Promise<void> => {
 
     const postedByPostKey = likeState.comments?.postedByPostKey || {};
     const scans = likeState.postBackScan!;
+    const short = scans.shortByKey || (scans.shortByKey = {});
     const scanned = scans.scanned || (scans.scanned = {});
     const seenLikes = scans.seenLikes || (scans.seenLikes = {});
     const handled = scans.handled || (scans.handled = {});
@@ -2162,9 +2182,13 @@ const backScanCommentedPosts = async (): Promise<void> => {
 
     for (const item of batch) {
       let navOk = true;
+      // 🔴 必须用**保留原始大小写**的 shortcode 导航。item.key 是小写去重键，拿去拼 URL 会
+      // 访问到不存在的帖子（IG 只回空壳）—— 这正是 postsWithSelf 恒 0 的根因。
+      const postCode = short[item.key] || item.key;
+      const codeResolved = !!short[item.key];
       // ⚠️ 打点绝不放在裸 await goto 之后 —— 外层 try/catch 会吞掉超时导致打点永不触发。
       // 这里用 .catch() 把超时降级成 navOk=false，让统计与打点无论如何都执行。
-      await page.goto(`${IG_BASE}/p/${item.key}/`, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => { navOk = false; });
+      await page.goto(`${IG_BASE}/p/${postCode}/`, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => { navOk = false; });
       await page.waitForTimeout(jitter(1800, 3200));
       postsVisited++;
 
@@ -2215,6 +2239,8 @@ const backScanCommentedPosts = async (): Promise<void> => {
       // replies 恒 0 且 indentSpread=0 ⇒ 说明缩进判据失效（IG 改版），要换判法。
       logBehavior('post_backscan_scanned', {
         postKey: item.key,
+        postCode,
+        codeResolved,
         navOk,
         totalComments: comments.length,
         via: extracted.via,
@@ -2255,6 +2281,8 @@ const backScanCommentedPosts = async (): Promise<void> => {
     }
 
     const stillUnscanned = Object.keys(postedByPostKey).filter((k) => !scanned[k]).length;
+    // 诊断：还剩多少 postKey 没拿到真实大小写（>0 ⇒ 那次 sync 没覆盖到，导航会退化成小写）
+    const codeMissing = Object.keys(postedByPostKey).filter((k) => !short[k]).length;
     if (backfilling && stillUnscanned === 0 && !scans.backfillDoneAt) {
       scans.backfillDoneAt = Date.now();
       saveLikeState(likeState);
@@ -2271,6 +2299,8 @@ const backScanCommentedPosts = async (): Promise<void> => {
       likesBacked,
       commentLikesBacked,
       stillUnscanned,
+      codeMissing,
+      shortTotal: Object.keys(short).length,
     });
   } catch {}
 };
