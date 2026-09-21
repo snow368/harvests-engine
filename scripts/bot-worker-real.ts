@@ -1875,19 +1875,43 @@ const checkCommentEngagers = async () => {
       await page.waitForTimeout(jitter(1200, 2200));
     }
     // 2) 抽取互动者：通知项含 actor 链接 + 描述文案（liked your comment / replied to your comment）
-    const raw = await page.evaluate(() => {
+    // 🔴 2026-09-21：本通道长期 `scanned` 恒 4 / `engagers` 恒 0、下游全历史 0 行，而**没有任何 probe**
+    //   ⇒ 病因完全不可见（`navOk:true` 只说明 goto 没超时，302 到别处同样通过）。照抄回扫的成功配方，
+    //   把「页面到底渲染了什么」一并带回来：path 用于判断 `/notifications/others/` 是否被重定向，
+    //   aHrefs 给真实链接样本，hasEngagerWord 区分「页面有文案但抽不到」vs「页面压根没内容」。
+    const scannedPage = await page.evaluate(() => {
       const out: { handle: string; text: string }[] = [];
       const links = Array.from(document.querySelectorAll('a[href^="/"]')) as any[];
+      const hrefSamples: string[] = [];
       for (const link of links) {
-        const href = (link.getAttribute('href') || '').replace(/[?#].*$/, '').replace(/^\/+|\/+$/g, '');
+        const rawHref = (link.getAttribute('href') || '').replace(/[?#].*$/, '');
+        if (hrefSamples.length < 8) hrefSamples.push(rawHref);
+        const href = rawHref.replace(/^\/+|\/+$/g, '');
         if (!/^[A-Za-z0-9._]{2,30}$/.test(href)) continue;
         let node: any = link;
         for (let i = 0; i < 4 && node; i++) node = node.parentElement;
         const text = (node ? node.innerText : (link as any).innerText || '').replace(/\s+/g, ' ').trim();
         out.push({ handle: href, text });
       }
-      return out;
-    }).catch(() => [] as { handle: string; text: string }[]);
+      const body = document.body ? (document.body.innerText || '') : '';
+      return {
+        rows: out,
+        probe: {
+          path: location.pathname,
+          title: (document.title || '').slice(0, 80),
+          bodyLen: body.length,
+          article: document.querySelectorAll('article').length,
+          aHrefCount: links.length,
+          aHrefs: hrefSamples,
+          loginWall: !!document.querySelector('input[name="username"]') || /\/accounts\/login/.test(location.pathname),
+          hasEngagerWord: /liked your comment|replied to your comment/i.test(body),
+        } as Record<string, unknown>,
+      };
+    }).catch(() => ({
+      rows: [] as { handle: string; text: string }[],
+      probe: { evalFailed: true } as Record<string, unknown>,
+    }));
+    const raw = scannedPage.rows;
     const engagers: string[] = [];
     for (const n of raw) {
       if (selfIds.has(n.handle.toLowerCase())) continue;
@@ -1901,6 +1925,7 @@ const checkCommentEngagers = async () => {
       scanned: raw.length,
       engagers: engagers.length,
       tracked: Object.keys(likeState.follows?.byHandle || {}).length,
+      probe: scannedPage.probe,
     });
     // 🔴 2026-09-19：`if (!engagers.length) return;` 曾是**死代码陷阱** ——
     // 本轮没扫到新互动者就直接返回 ⇒ 下面的 Pass B（次日已到点的互动者 → 回赞/回关）
