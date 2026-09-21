@@ -2133,30 +2133,40 @@ const POST_BACKSCAN_TICK = Math.max(1, Number(process.env.BOT_POST_BACKSCAN_TICK
 // 在当前打开的帖子页面上，找到 <handle> 的评论行并点赞。
 // 选择器策略与 rapportLikeComment 完全一致（往上找祖先里含 /handle/ 链接的 Like 图标），
 // 区别是**不导航**——直接吃调用方已经打开的帖子页，省掉一次 openProfile。
-const likeHandleCommentHere = async (handle: string): Promise<boolean> => {
-  if (!page) return false;
+// 返回三态：`liked` 新赞成功 / `already` 早就赞过（= 目的已达成）/ `miss` 找不到那条评论。
+// 🔴 2026-09-21：原来只认 `svg[aria-label="Like"]` —— 评论**已赞**时按钮是 `Unlike`
+//   ⇒ 永远走 `return false` ⇒ 调用方不记状态 ⇒ 每轮对同一条回复重试（与 `rapportLikePosts`
+//   同一个 bug 家族；实测 `likedComment:false` 里有相当比例属于这类）。
+const likeHandleCommentHere = async (handle: string): Promise<'liked' | 'already' | 'miss'> => {
+  if (!page) return 'miss';
   try {
     const found = await page.evaluate((h) => {
-      const svgs = Array.from(document.querySelectorAll('svg[aria-label="Like"]'));
-      for (const svg of svgs) {
-        let el = svg.parentElement;
-        while (el && el !== document.body) {
-          if (el.querySelector(`a[href^="/${h}/"]`) || el.querySelector(`a[href="/${h}/"]`)) {
-            (svg as unknown as SVGElement).setAttribute('data-bscan-clike', '1');
-            return true;
+      const mark = (sel: string, already: boolean) => {
+        for (const el of Array.from(document.querySelectorAll(sel))) {
+          if (el.getAttribute('data-bscan-clike')) continue;
+          let up = el.parentElement;
+          while (up && up !== document.body) {
+            if (up.querySelector(`a[href^="/${h}/"]`) || up.querySelector(`a[href="/${h}/"]`)) {
+              el.setAttribute('data-bscan-clike', already ? '2' : '1');
+              return true;
+            }
+            up = up.parentElement;
           }
-          el = el.parentElement;
         }
-      }
-      return false;
-    }, handle).catch(() => false);
-    if (!found) return false;
+        return false;
+      };
+      const likeFound = mark('svg[aria-label="Like"]', false);
+      const unlikeFound = mark('svg[aria-label="Unlike"]', true);
+      return { likeFound, unlikeFound };
+    }, handle).catch(() => ({ likeFound: false, unlikeFound: false }));
+    if (found.unlikeFound && !found.likeFound) return 'already'; // 已赞 ⇒ 达成，别当失败
+    if (!found.likeFound) return 'miss';
     const btn = page.locator('svg[data-bscan-clike="1"]').first();
-    if ((await btn.count()) === 0) return false;
+    if ((await btn.count()) === 0) return 'miss';
     await btn.click({ timeout: 6000 }).catch(() => {});
     await page.waitForTimeout(jitter(1200, 2200));
-    return true;
-  } catch { return false; }
+    return 'liked';
+  } catch { return 'miss'; }
 };
 
 // 抽取当前帖子页的评论列表：username / 赞数 / 缩进左偏移（用来判"谁挂在谁下面"）。
@@ -2478,7 +2488,10 @@ const backScanCommentedPosts = async (): Promise<void> => {
           if (isOwnAccountHandle(replier)) continue;
           if (handled[replier] && now - Number(handled[replier]) < rescanMs) continue; // 近期已回过，防重复
           // ① 赞回复者的评论（账 C）——比赞帖更"我看了你说了什么"的私密信号
-          const likedComment = await likeHandleCommentHere(replier).catch(() => false);
+          //   2026-09-21：返回值细分 liked/already/miss。「早就赞过」也算达成（让状态推进，
+          //   不再每轮重试），但**不**记 C 账预算 —— 没真消耗一次点赞额度。
+          const clr = await likeHandleCommentHere(replier).catch(() => 'miss' as const);
+          const likedComment = clr === 'liked';
           if (likedComment) { recordRapport(); commentLikesBacked++; }
           await sleep(jitter(2500, 5000));
           // ② 赞回复者最新一篇帖（账 B）——对方收到 "liked your post" → 回访我们主页
@@ -2490,6 +2503,7 @@ const backScanCommentedPosts = async (): Promise<void> => {
             postKey: item.key,
             replier,
             likedComment,
+            commentLikeResult: clr,
             likedPost,
             likeBackDayCount: likeBackToday(),
             likeBackDayCap: LIKE_BACK_DAILY_MAX,
