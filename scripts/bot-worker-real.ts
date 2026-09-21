@@ -1711,10 +1711,14 @@ const reciprocalFollowBack = async (handle: string): Promise<boolean> => {
     if (BOT_FOLLOW_BACK_REQUIRE_TATTOO) {
       try {
         const facts = await captureProfileFacts().catch(() => null);
+        // 🔴 2026-09-21：与 `checkCommentEngagers` 同一个 bug —— IG 现行 bio 选择器全部失配
+        //   ⇒ `bio=''` ⇒ subject 恒 `'unknown'` ⇒ 这里 `return false` ⇒ **回关被整片拦掉**
+        //   （对得上 §8「回关有对象但执行量 ≪ 预算」）。改用 bio+categoryLabel+category+title。
         const bio = (facts && String(facts.bio || '')) || '';
-        const subject = bio ? detectSubject(bio, [], handle).subject : 'unknown';
+        const subjectText = `${bio} ${facts?.categoryLabel || ''} ${facts?.category || ''} ${facts?.title || ''}`.trim();
+        const subject = subjectText ? detectSubject(subjectText, [], handle).subject : 'unknown';
         if (subject !== 'tattoo') {
-          logBehavior('reciprocal_follow_skipped_not_tattoo', { handle, subject, bio: bio.slice(0, 120) });
+          logBehavior('reciprocal_follow_skipped_not_tattoo', { handle, subject, srcLen: subjectText.length, src: subjectText.slice(0, 120) });
           return false;
         }
       } catch { return false; }
@@ -2054,13 +2058,20 @@ const checkCommentEngagers = async () => {
         await openProfile(h);
         await page.waitForTimeout(jitter(1000, 2000));
         const facts = await captureProfileFacts().catch(() => null);
-        const subject = facts ? detectSubject(facts.bio, [], h).subject : 'unknown';
+        // 🔴 2026-09-21：原来只喂 `facts.bio`，而 IG 现行 bio 选择器**全部失配**（`bio=''`）
+        //   ⇒ subject 恒 `'unknown'` ⇒ Pass B 的 `subject !== 'tattoo'` 把**每一个**互动者都拦掉
+        //   （实测 8/8 `comment_engager_detected` 全是 `subject:"unknown"`，白检）。
+        //   取证：同一批 `profile_facts` 里 `categoryLabel` 完好且整段是纹身语料
+        //   （`textPositiveHits:["tattoo","ink"]`）⇒ 把 bio / categoryLabel / title 拼起来一起判，
+        //   不再依赖那个失配的 bio 选择器。`detectSubject` 仍自带穿孔优先判定，不会误收穿孔号。
+        const subjectText = `${facts?.bio || ''} ${facts?.categoryLabel || ''} ${facts?.category || ''} ${facts?.title || ''}`.trim();
+        const subject = subjectText ? detectSubject(subjectText, [], h).subject : 'unknown';
         st.commentEngagerProcessed = true;
         st.commentEngagerDetectedAt = Date.now();
         st.commentEngagerSubject = subject;
         st.commentEngagerFollowAt = Date.now() + jitter(20 * 3600_000, 28 * 3600_000); // 次日回关
         saveLikeState(likeState);
-        logBehavior('comment_engager_detected', { handle: h, subject });
+        logBehavior('comment_engager_detected', { handle: h, subject, srcLen: subjectText.length, srcHits: (facts?.categorySignals?.textPositiveHits || []).slice(0, 3) });
         if (subject !== 'tattoo') logBehavior('comment_engager_skip', { handle: h, subject });
       } catch {}
       await sleep(jitter(2500, 5000));
@@ -3729,6 +3740,20 @@ const captureProfileFacts = async () => {
       }
     }
   } catch {}
+
+  // 🔴 2026-09-21：上面三个选择器是 IG 旧版类名，**今天基本全部失配** ⇒ `bio` 恒空，
+  //   而 `detectSubject(facts.bio, …)` 就靠它 ⇒ 所有行业判定恒 `unknown`
+  //   ⇒ 回关审核 `/notifications/` 互动者 Pass B 双双被 `subject!=='tattoo'` 拦死。
+  //   兜底：整块 `header section` 的 innerText（昵称 + 分类词 + bio）是 IG 上最稳的一处；
+  //   只在上面全部落空时启用，不影响既有命中。
+  if (!bio) {
+    bio = await page
+      .evaluate(() => {
+        const el = document.querySelector('header section');
+        return el ? ((el as HTMLElement).innerText || '').replace(/\s+/g, ' ').trim().slice(0, 600) : '';
+      })
+      .catch(() => '');
+  }
 
   const facts: ProfileFacts = {
     url,
