@@ -2109,11 +2109,16 @@ const syncPostedListFromApi = async (): Promise<number> => {
   const scans = likeState.postBackScan!;
   const map = likeState.comments?.postedByPostKey || (likeState.comments!.postedByPostKey = {});
   const short = scans.shortByKey || (scans.shortByKey = {});
-  const last = Number(scans.listSyncedAt || 0);
-  // 🔴 shortByKey 是 2026-09-21 新增的「真实大小写」。历史 key 全是小写 ⇒ 首次必须**绕过**
-  // 24h 闸补一轮，否则要白等一天才修好导航。补满（覆盖全部 key）后才重新受 24h 闸约束。
-  const shortMissing = Object.keys(map).filter((k) => !short[k]).length;
-  if (last && Date.now() - last < 24 * 3600_000 && shortMissing === 0) return 0;
+  const lastList = Number(scans.listSyncedAt || 0);
+  // 🔴 shortByKey 是 2026-09-21 新增的「真实大小写」。历史 state 里没有它 ⇒ 首次必须补一轮，
+  // 不能受 listSyncedAt 的 24h 闸限制（否则修好也要白等一天）。
+  // ⚠️ 用**独立的 shortSyncedAt**做闸，不要用「shortByKey 是否覆盖全部 key」当条件 ——
+  // 实测 state 里有 6 个历史脏 key 在 API 查无对应行、永远补不上，那样会让本轮 sync 每个 tick
+  // 都重跑一遍（每轮多拉 186 行）。
+  const lastShort = Number(scans.shortSyncedAt || 0);
+  const needList = !lastList || Date.now() - lastList >= 24 * 3600_000;
+  const needShort = !lastShort || Date.now() - lastShort >= 24 * 3600_000;
+  if (!needList && !needShort) return 0;
   let added = 0;
   let fetched = 0;
   try {
@@ -2160,7 +2165,12 @@ const backScanCommentedPosts = async (): Promise<void> => {
     const postedByPostKey = likeState.comments?.postedByPostKey || {};
     const scans = likeState.postBackScan!;
     const short = scans.shortByKey || (scans.shortByKey = {});
-    const codeMissingNow = Object.keys(postedByPostKey).filter((k) => !short[k]).length;
+    const allKeys = Object.keys(postedByPostKey);
+    // 只有「能解析出真实 shortcode」的帖才可复访。实测总有少量历史脏 key 在 API 里查无对应行、
+    // 永远补不上 shortcode（本次 190 里 6 个）⇒ 必须把它们排除在队列**和欠账统计**之外，
+    // 否则 stillUnscanned 永远归不了零、phase 永远停在 backfill。
+    const usableKeys = allKeys.filter((k) => !!short[k]);
+    const codeMissingNow = allKeys.length - usableKeys.length;
     // 🔴 2026-09-21 一次性清账（关键，漏了则修复被"重扫期 7 天"挡住）：
     // 9-21 之前所有复访都在用**小写 shortcode**（根本访问不到帖子），但那批无效复访照样写了
     // scanned[key]=时间戳 ⇒ queue 判据 `now-lastScan > RESCAN_DAYS` 全部不成立 ⇒ queue 空 ⇒
@@ -2170,8 +2180,10 @@ const backScanCommentedPosts = async (): Promise<void> => {
     const SCAN_EPOCH = 2;
     if (
       Number(scans.scanEpoch || 1) < SCAN_EPOCH &&
-      Object.keys(postedByPostKey).length > 0 &&
-      codeMissingNow === 0
+      // ⚠️ 不要求 100% 可解析（那 6 个脏 key 永远补不上，会把清账卡死 —— 第一版就踩了这个坑）。
+      // 判据改为「绝大多数可解析」= 证明本轮 sync 真的成功且数据可用。
+      usableKeys.length >= 20 &&
+      usableKeys.length * 5 >= allKeys.length * 4
     ) {
       const wiped = Object.keys(scans.scanned || {}).length;
       scans.scanned = {};
@@ -2191,7 +2203,8 @@ const backScanCommentedPosts = async (): Promise<void> => {
     const now = Date.now();
 
     // 队列：从未扫过(lastScan=0)排最前；否则按最久未扫排（且须已过重扫期）
-    const queue = Object.keys(postedByPostKey)
+    // 只排 usableKeys（拿到真实 shortcode 的）—— 脏 key 访问不到，排进来纯浪费额度。
+    const queue = usableKeys
       .map((k) => ({ key: k, postedAt: Number(postedByPostKey[k] || 0), lastScan: Number(scanned[k] || 0) }))
       .filter((c) => c.key && (c.lastScan === 0 || now - c.lastScan > rescanMs))
       .sort((a, b) => (a.lastScan - b.lastScan) || (b.postedAt - a.postedAt));
@@ -2306,7 +2319,8 @@ const backScanCommentedPosts = async (): Promise<void> => {
       await sleep(jitter(2000, 4500)); // 复访之间留自然间隔，别连扫
     }
 
-    const stillUnscanned = Object.keys(postedByPostKey).filter((k) => !scanned[k]).length;
+    // 欠账只看 usableKeys（脏 key 永远扫不了，算进来会让 phase 永远停在 backfill）
+    const stillUnscanned = usableKeys.filter((k) => !scanned[k]).length;
     if (backfilling && stillUnscanned === 0 && !scans.backfillDoneAt) {
       scans.backfillDoneAt = Date.now();
       saveLikeState(likeState);
