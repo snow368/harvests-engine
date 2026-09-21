@@ -1907,6 +1907,21 @@ const checkIncomingFollowBacks = async () => {
 // 检测与关注分离：检测到即开主页读 bio 判相关性并记录 followAt(≈次日)，次日 sweep 才真正回关，
 // 避免"人家一赞你立刻回关"的 bot 信号，也更自然。
 let commentEngagerTick = 0;
+// 通知页「列表已挂载」的判定 —— 不赌标签名，直接用 probe 给出的可判定指纹：
+//   空壳时 `body.innerText` 恒 **777**（只剩左右导航），挂载后必然远超之。
+//   ⚠️ 别改成赌 `article`：回扫（帖子页）有 `<article>` 不代表**通知页**也有，
+//   IG 的通知条目结构不稳定，赌标签名会得到一个「永远等不到」的假等待。
+const ENGAGER_SHELL_LEN = 1200;
+let engagerRenderFails = 0; // 连续未挂载次数：≥3 后不再重载/试备用路由，避免每轮白烧 1 分钟
+const waitEngagerList = (): Promise<boolean> =>
+  page!
+    .waitForFunction(
+      (min: number) => (document.body ? (document.body.innerText || '').length : 0) > min,
+      ENGAGER_SHELL_LEN,
+      { timeout: 15000 },
+    )
+    .then(() => true)
+    .catch(() => false);
 const checkCommentEngagers = async () => {
   try {
     commentEngagerTick = (commentEngagerTick + 1) % ENGAGEMENT_TICK;
@@ -1920,12 +1935,32 @@ const checkCommentEngagers = async () => {
     //   try/catch 吞掉，下面的 comment_engager_scan 打点**永远不触发**。这正是
     //   「打点位置坑」的既有未修实例。改成降级 + navOk，保证统计与打点无论如何都写。
     let navOk = true;
-    await page.goto(`${IG_BASE}/notifications/others/`, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => { navOk = false; });
+    let usedPath = '/notifications/others/';
+    await page.goto(`${IG_BASE}${usedPath}`, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => { navOk = false; });
     // 🔴 2026-09-21：probe 定案 —— goto 之后 `path` 正确、`loginWall false`、`navOk true`，但
     //   `bodyLen 777 / article 0 / title "Instagram"` ⇒ **通知列表压根没渲染**（SPA 首屏空壳），
     //   不是正则失配。旧码 goto 完只等 2–3.5s 就抓 DOM ⇒ 永远抓到空壳 ⇒ `engagers` 恒 0。
-    //   修法 = 显式等列表出现（等不到也不抛，任何情况都要把打点写出去）。
-    const articleWaited = await page.waitForSelector('article', { timeout: 20000 }).then(() => true).catch(() => false);
+    //   修法 = 显式等列表挂载（按 body 文本长度判定，见 waitEngagerList）；仍不挂载则依次试
+    //   ① 备用路由 `/notifications/`（覆盖「路由已改」）② 整页重载一次（覆盖「首屏偶发不挂载」）。
+    //   次数封顶，避免真·零通知的号每轮白烧一分钟。**任何分支都不许中途 return**，
+    //   否则又回到「打点永远不触发」的老坑。
+    let renderWaited = await waitEngagerList();
+    let fallbackPath = false;
+    let reloaded = false;
+    if (!renderWaited && engagerRenderFails < 3) {
+      fallbackPath = true;
+      usedPath = '/notifications/';
+      await page.goto(`${IG_BASE}${usedPath}`, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => { navOk = false; });
+      renderWaited = await waitEngagerList();
+      if (!renderWaited) {
+        reloaded = true;
+        await page.reload({ waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
+        renderWaited = await waitEngagerList();
+      }
+    }
+    engagerRenderFails = renderWaited ? 0 : engagerRenderFails + 1;
+    // 等完之后**实测**一次（「修好了没有」的硬判据，不是「有没有超时」）
+    const bodyLenAfter = await page.evaluate(() => (document.body ? (document.body.innerText || '').length : -1)).catch(() => -1);
     await page.waitForSelector('main', { state: 'visible', timeout: 8000 }).catch(() => {});
     await page.waitForTimeout(jitter(2000, 3500));
     for (let s = 0; s < 3; s++) {
@@ -1983,7 +2018,14 @@ const checkCommentEngagers = async () => {
       scanned: raw.length,
       engagers: engagers.length,
       tracked: Object.keys(likeState.follows?.byHandle || {}).length,
-      probe: { ...(scannedPage.probe as Record<string, unknown>), articleWaited },
+      probe: {
+        ...(scannedPage.probe as Record<string, unknown>),
+        renderWaited,
+        fallbackPath,
+        reloaded,
+        bodyLenAfter,
+        usedPath,
+      },
     });
     // 🔴 2026-09-19：`if (!engagers.length) return;` 曾是**死代码陷阱** ——
     // 本轮没扫到新互动者就直接返回 ⇒ 下面的 Pass B（次日已到点的互动者 → 回赞/回关）
