@@ -1047,6 +1047,8 @@ type LikeState = {
     // postKey(小写去重键) -> **真实大小写** shortcode。导航必须用它，否则访问不到帖子（见 extractPostShortcode）
     shortByKey?: Record<string, string>;
     shortSyncedAt?: number;
+    // 复访记账格式版本。1/缺省 = 9-21 小写 shortcode 时期（那批 scanned 全是无效复访，必须清账）。
+    scanEpoch?: number;
   };
   // 🛑 账号休息（被动，IG 限制信号触发）：持久化，bot 重启也继续休息直到冷却结束
   rest?: { until: number; reason: string; severity: string; at: number; count?: number };
@@ -2158,6 +2160,30 @@ const backScanCommentedPosts = async (): Promise<void> => {
     const postedByPostKey = likeState.comments?.postedByPostKey || {};
     const scans = likeState.postBackScan!;
     const short = scans.shortByKey || (scans.shortByKey = {});
+    const codeMissingNow = Object.keys(postedByPostKey).filter((k) => !short[k]).length;
+    // 🔴 2026-09-21 一次性清账（关键，漏了则修复被"重扫期 7 天"挡住）：
+    // 9-21 之前所有复访都在用**小写 shortcode**（根本访问不到帖子），但那批无效复访照样写了
+    // scanned[key]=时间戳 ⇒ queue 判据 `now-lastScan > RESCAN_DAYS` 全部不成立 ⇒ queue 空 ⇒
+    // 直接 return，新代码要白等一周才轮到这些帖。这里把记账清空、让全部帖子重新排队。
+    // 前置条件 = 全部 postKey 都已拿到真实 shortcode（codeMissingNow===0，证明本轮 sync 真成功），
+    // 否则清账后仍会用小写 fallback 复访，等于换个姿势再污染一遍。
+    const SCAN_EPOCH = 2;
+    if (
+      Number(scans.scanEpoch || 1) < SCAN_EPOCH &&
+      Object.keys(postedByPostKey).length > 0 &&
+      codeMissingNow === 0
+    ) {
+      const wiped = Object.keys(scans.scanned || {}).length;
+      scans.scanned = {};
+      scans.seenLikes = {}; // 一并清掉：无效复访期间记的"我们那条评论的赞数"也不可信
+      scans.scanEpoch = SCAN_EPOCH;
+      saveLikeState(likeState);
+      logBehavior('post_backscan_epoch_reset', {
+        wiped,
+        total: Object.keys(postedByPostKey).length,
+        reason: 'lowercase_shortcode_made_all_prior_visits_invalid',
+      });
+    }
     const scanned = scans.scanned || (scans.scanned = {});
     const seenLikes = scans.seenLikes || (scans.seenLikes = {});
     const handled = scans.handled || (scans.handled = {});
@@ -2281,8 +2307,6 @@ const backScanCommentedPosts = async (): Promise<void> => {
     }
 
     const stillUnscanned = Object.keys(postedByPostKey).filter((k) => !scanned[k]).length;
-    // 诊断：还剩多少 postKey 没拿到真实大小写（>0 ⇒ 那次 sync 没覆盖到，导航会退化成小写）
-    const codeMissing = Object.keys(postedByPostKey).filter((k) => !short[k]).length;
     if (backfilling && stillUnscanned === 0 && !scans.backfillDoneAt) {
       scans.backfillDoneAt = Date.now();
       saveLikeState(likeState);
@@ -2299,8 +2323,9 @@ const backScanCommentedPosts = async (): Promise<void> => {
       likesBacked,
       commentLikesBacked,
       stillUnscanned,
-      codeMissing,
+      codeMissing: codeMissingNow,
       shortTotal: Object.keys(short).length,
+      scannedTotal: Object.keys(scanned).length,
     });
   } catch {}
 };
