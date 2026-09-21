@@ -1741,6 +1741,28 @@ const checkIncomingFollowBacks = async () => {
         const fA = document.querySelector('a[href*="/followers/"]');
         const gA = document.querySelector('a[href*="/following/"]');
         const clean = (s: string | null | undefined) => String(s || '').replace(/\s+/g, ' ').trim().slice(0, 60);
+        // 2026-09-21：锚点选择器线上 109/109 全 false。布尔值本身分不清「IG 把粉丝数
+        //   从 <a> 换成别的元素」还是「读的页面根本不是主页」，补自证字段。全部用 for 循环，
+        //   不在 evaluate 里写任何具名函数（见上面 EVAL_SHIM_SRC 的教训）。
+        const headerEl: any = document.querySelector('header');
+        const headerText = String(headerEl?.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 240);
+        const liTexts: string[] = [];
+        const liEls = document.querySelectorAll('header ul li');
+        for (let i = 0; i < liEls.length && liTexts.length < 8; i++) {
+          const t = String((liEls[i] as any)?.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 30);
+          if (t) liTexts.push(t);
+        }
+        const followerHrefs: string[] = [];
+        const aEls = document.querySelectorAll('a[href]');
+        for (let i = 0; i < aEls.length && followerHrefs.length < 6; i++) {
+          const h = String((aEls[i] as any)?.getAttribute('href') || '');
+          if (/followers|following/i.test(h)) followerHrefs.push(h.slice(0, 40));
+        }
+        let embedJoint = '';
+        const jEls = document.querySelectorAll('script[type="application/json"]');
+        for (let i = 0; i < jEls.length && embedJoint.length < 2000000; i++) embedJoint += String((jEls[i] as any)?.textContent || '');
+        const embedMatch = embedJoint.match(/"edge_followed_by":\{"count":(\d+)\}/) || embedJoint.match(/"follower_count":(\d+)/);
+        const embedded = embedMatch ? embedMatch[1] : '';
         return {
           hasFollowersAnchor: !!fA,
           followersText: clean(fA?.textContent),
@@ -1748,6 +1770,12 @@ const checkIncomingFollowBacks = async () => {
           followingText: clean(gA?.textContent),
           // 页面是否是登录态（掉登录页时这里会是 false，与「选择器失效」又能区分开）
           loggedIn: !/\/accounts\/login/.test(location.pathname),
+          href: location.href,
+          title: document.title,
+          headerText,
+          liTexts,
+          followerHrefs,
+          embedded,
         };
       }).catch(() => null);
       logBehavior('own_followers', {
@@ -1761,8 +1789,18 @@ const checkIncomingFollowBacks = async () => {
     } catch {}
     if (!doSweep) return; // 仅轻探针：读完粉丝数就收工，不开 Followers 弹窗
     const followersLink = page.locator('a[href*="/followers/"]').first();
-    if ((await followersLink.count()) > 0) await followersLink.click({ timeout: 8000 }).catch(() => {});
+    // 入口：优先点锚点；线上实测该锚点不存在 ⇒ 退回直接开 /followers/ 路由（IG web 支持深链开弹窗）。
+    const hadAnchor = (await followersLink.count()) > 0;
+    if (hadAnchor) await followersLink.click({ timeout: 8000 }).catch(() => {});
+    else await page.goto(`${IG_BASE}/${me}/followers/`, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
     await page.waitForTimeout(jitter(2000, 4000));
+    // 🔴 必须确认弹窗真的开了才枚举：没开还去枚举 = 把主页上的杂链接当成「新粉」
+    //   ⇒ 误判 + 乱回关（外部动作，代价最高）。没开就记一条并收工。
+    const dialogOpen = (await page.locator('div[role="dialog"]').count().catch(() => 0)) > 0;
+    if (!dialogOpen) {
+      logBehavior('own_followers_sweep_no_dialog', { handle: me, via: hadAnchor ? 'anchor' : 'route', href: page.url().slice(0, 120) });
+      return;
+    }
     const handles = await page.locator('a[href^="/"]').evaluateAll((els: any[]) =>
       els.map((e) => (e.getAttribute('href') || '').replace(/[?#].*$/, '').replace(/^\/+|\/+$/g, ''))
         .filter((h: string) => /^[A-Za-z0-9._]{2,30}$/.test(h) && !['p', 'reel', 'explore', 'accounts', 'direct', 'tv', 'stories', 'saved', 'reels', 'popular'].includes(h))
@@ -3520,6 +3558,22 @@ const captureProfileFacts = async () => {
       }
     } catch {}
 
+    // Strategy D (2026-09-21): 直接解析 <header> 文本，不依赖锚点 / ul>li 结构。
+    //   Why：线上实测 —— 主页上 `a[href*="/followers/"]` 不存在（垫片生效后 109/109 全 false），
+    //   而 `header ul li span` 抓到的其实是精选故事托盘（"Healed"/"Cover-ups"/"Hiring"，
+    //   自己主页上是 "New" 按钮）⇒ Strategy A/B 在当前版式上读的是垃圾。stats 行仍是纯文本，直接读。
+    if (!facts.followers || !facts.following || !facts.postCount) {
+      try {
+        const headerRaw = (await page.locator('header').first().innerText({ timeout: 4000 }).catch(() => '')) || '';
+        const flat = String(headerRaw).replace(/\s+/g, ' ').trim();
+        const mPost = flat.match(/([\d][\d,.\s]*[kKmM]?)\s*(?:posts?|帖子|帖)/i);
+        const mFoll = flat.match(/([\d][\d,.\s]*[kKmM]?)\s*(?:followers?|粉丝|粉絲|seguidores|abonnes)/i);
+        const mFollg = flat.match(/([\d][\d,.\s]*[kKmM]?)\s*(?:following|关注|關注|seguidos|abonnements)/i);
+        if (!facts.postCount && mPost) facts.postCount = parseCompactNumber(mPost[1]);
+        if (!facts.followers && mFoll) facts.followers = parseCompactNumber(mFoll[1]);
+        if (!facts.following && mFollg) facts.following = parseCompactNumber(mFollg[1]);
+      } catch {}
+    }
     // Strategy C: screenshot the stats row via OCR (layout-independent).
     // Stats appear as 3 numbers (posts / followers / following) in a horizontal row.
     if (BOT_OCR_ENABLED && (!facts.followers || !facts.following || !facts.postCount)) {
