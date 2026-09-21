@@ -1259,17 +1259,29 @@ const rapportLikePosts = async (handle: string, n: number, countRapport = true):
     const posts = page.locator('a[href*="/p/"]');
     const total = await posts.count();
     let liked = 0;
+    // 2026-09-21：已赞（弹窗里只有 Unlike）算「目的已达成」，与 liked 一并计入返回值，
+    //   让调用方写状态、停止重试。**不**记 rapport 预算，因为没真的消耗一次点赞额度。
+    let already = 0;
     for (let i = 0; i < Math.min(n, total); i++) {
       try {
         await posts.nth(i).click({ timeout: 8000 });
         await page.waitForTimeout(jitter(1500, 3000));
-        const likeBtn = page.locator('svg[aria-label="Like"]').first();
-        const likeSvgCount = await page.locator('svg[aria-label="Like"]').count().catch(() => 0);
+        // 选择器放宽到 `[aria-label="Like"]`（不再只认 svg 子标签，IG 换形状也能命中）
+        const likeBtn = page.locator('[aria-label="Like"]').first();
+        const likeSvgCount = await page.locator('[aria-label="Like"]').count().catch(() => 0);
+        const unlikeCount = await page.locator('[aria-label="Unlike"]').count().catch(() => 0);
         if (likeSvgCount > 0) {
           await likeBtn.click({ timeout: 6000 }).catch(() => {});
           liked++;
           if (countRapport) recordRapport();
           recordInteraction(handle, 'like', { rapport: true, reason: 'follow_back_ladder' }).catch(() => {});
+        } else if (unlikeCount > 0) {
+          // 🔴 2026-09-21 定案：probe 8/8 次全是 `likeSvg 0 / unlikeSvg ≥1 / article 1 / dialog 1`
+          //   ⇒ 帖子**早就赞过**（弹窗正常打开了），不是选择器失配、也不是没开弹窗。
+          //   旧码把这种情形归到「找不到 Like 按钮」⇒ 返回 0 ⇒ 调用方不写 `commentEngagerLikedAt`
+          //   ⇒ 天天每轮重试同一个号，而日上限按**成功数**计 ⇒ **永不触发**。这是「空转」的根因之一。
+          already++;
+          logBehavior('rapport_like_already', { handle, clickedIdx: i });
         } else if (Date.now() - Number(rapportLikeMissAt[handle] || 0) > 3600_000) {
           // 🔴 诊断（2026-09-21）：本函数历史上「打开主页很多次、点赞 0 次」却完全不留痕
           //   （只在 got>0 时才写状态/打点）⇒ 病因不可见。这里带回"Like 按钮为什么不存在"的直接证据：
@@ -1295,7 +1307,8 @@ const rapportLikePosts = async (handle: string, n: number, countRapport = true):
         }
       }
     }
-    return liked;
+    if (already > 0) logBehavior('rapport_like_summary', { handle, postsFound: total, liked, already });
+    return liked + already;
   } catch { return 0; }
 };
 
@@ -1908,6 +1921,12 @@ const checkCommentEngagers = async () => {
     //   「打点位置坑」的既有未修实例。改成降级 + navOk，保证统计与打点无论如何都写。
     let navOk = true;
     await page.goto(`${IG_BASE}/notifications/others/`, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => { navOk = false; });
+    // 🔴 2026-09-21：probe 定案 —— goto 之后 `path` 正确、`loginWall false`、`navOk true`，但
+    //   `bodyLen 777 / article 0 / title "Instagram"` ⇒ **通知列表压根没渲染**（SPA 首屏空壳），
+    //   不是正则失配。旧码 goto 完只等 2–3.5s 就抓 DOM ⇒ 永远抓到空壳 ⇒ `engagers` 恒 0。
+    //   修法 = 显式等列表出现（等不到也不抛，任何情况都要把打点写出去）。
+    const articleWaited = await page.waitForSelector('article', { timeout: 20000 }).then(() => true).catch(() => false);
+    await page.waitForSelector('main', { state: 'visible', timeout: 8000 }).catch(() => {});
     await page.waitForTimeout(jitter(2000, 3500));
     for (let s = 0; s < 3; s++) {
       await page.mouse.wheel(0, 1500).catch(() => {});
@@ -1964,7 +1983,7 @@ const checkCommentEngagers = async () => {
       scanned: raw.length,
       engagers: engagers.length,
       tracked: Object.keys(likeState.follows?.byHandle || {}).length,
-      probe: scannedPage.probe,
+      probe: { ...(scannedPage.probe as Record<string, unknown>), articleWaited },
     });
     // 🔴 2026-09-19：`if (!engagers.length) return;` 曾是**死代码陷阱** ——
     // 本轮没扫到新互动者就直接返回 ⇒ 下面的 Pass B（次日已到点的互动者 → 回赞/回关）
