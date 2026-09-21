@@ -2175,8 +2175,12 @@ const backScanCommentedPosts = async (): Promise<void> => {
     // 9-21 之前所有复访都在用**小写 shortcode**（根本访问不到帖子），但那批无效复访照样写了
     // scanned[key]=时间戳 ⇒ queue 判据 `now-lastScan > RESCAN_DAYS` 全部不成立 ⇒ queue 空 ⇒
     // 直接 return，新代码要白等一周才轮到这些帖。这里把记账清空、让全部帖子重新排队。
-    // 前置条件 = 全部 postKey 都已拿到真实 shortcode（codeMissingNow===0，证明本轮 sync 真成功），
+    // 前置条件 = **绝大多数** postKey 已拿到真实 shortcode（见下方判据），证明本轮 sync 真成功；
     // 否则清账后仍会用小写 fallback 复访，等于换个姿势再污染一遍。
+    // ✅ 2026-09-21 04:1x 首次实际触发：scanned 由 182 条清到 1，queue 1→183，
+    //    下一轮 6/6 帖 foundSelf=true。（注意：它的 post_backscan_epoch_reset 打点被 autosync
+    //    重启吞掉了 —— logBehavior 攒够 FLUSH_AT=20 才发、无定时器，而 saveLikeState 已即时落盘。
+    //    ⇒ 判"动作是否发生"别只认打点，状态变化同样是证据。）
     const SCAN_EPOCH = 2;
     if (
       Number(scans.scanEpoch || 1) < SCAN_EPOCH &&
