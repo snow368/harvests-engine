@@ -611,6 +611,14 @@ const BOT_RAPPORT_DAILY_MAX = Math.max(0, Number(process.env.BOT_RAPPORT_DAILY_M
 const RAPPORT_LIKE_TARGET = Math.max(2, Number(process.env.RAPPORT_LIKE_TARGET || 3));
 const RAPPORT_LIKE_GAP_HOURS = Math.max(1, Number(process.env.RAPPORT_LIKE_GAP_HOURS || 24));
 const RAPPORT_COMMENT_AFTER_HOURS = Math.max(1, Number(process.env.RAPPORT_COMMENT_AFTER_HOURS || 18));
+// 🔴 2026-09-21 失败退避：这两个阶梯原本**只在成功时**写状态 ⇒ 失败者 next loop 立刻重试。
+// 而 BOT_RAPPORT_DAILY_MAX 是按"成功数"计的，失败永不累加 ⇒ 日上限形同虚设。
+// 实测后果：3 小时内 241 次主页访问里 13 个号占了 191 次（kamuink / inkedbeautymark 各 26 次），
+// 互动块的时间被吃光，后面的通知页扫描被饿死。改成「无论成败都记一次尝试时间」。
+const RAPPORT_RETRY_BACKOFF_MS = Math.max(5, Number(process.env.BOT_RAPPORT_RETRY_BACKOFF_MIN || 180)) * 60_000;
+const AUDIENCE_RETRY_BACKOFF_MS = Math.max(5, Number(process.env.BOT_AUDIENCE_RETRY_BACKOFF_MIN || 180)) * 60_000;
+// rapport_like_miss 诊断按 handle 每小时最多 1 条，避免把日志缓冲刷爆
+const rapportLikeMissAt: Record<string, number> = {};
 const pickRapportComment = (handle: string, lang: string) => pickFromPool(RAPPORT_COMMENTS_BY_LANG[lang] || RAPPORT_COMMENTS_BY_LANG.en, handle);
 
 // ── AI Core (sales_chats D1 sync for triangulation) ───────────────────
@@ -1256,15 +1264,36 @@ const rapportLikePosts = async (handle: string, n: number, countRapport = true):
         await posts.nth(i).click({ timeout: 8000 });
         await page.waitForTimeout(jitter(1500, 3000));
         const likeBtn = page.locator('svg[aria-label="Like"]').first();
-        if ((await likeBtn.count()) > 0) {
+        const likeSvgCount = await page.locator('svg[aria-label="Like"]').count().catch(() => 0);
+        if (likeSvgCount > 0) {
           await likeBtn.click({ timeout: 6000 }).catch(() => {});
           liked++;
           if (countRapport) recordRapport();
           recordInteraction(handle, 'like', { rapport: true, reason: 'follow_back_ladder' }).catch(() => {});
+        } else if (Date.now() - Number(rapportLikeMissAt[handle] || 0) > 3600_000) {
+          // 🔴 诊断（2026-09-21）：本函数历史上「打开主页很多次、点赞 0 次」却完全不留痕
+          //   （只在 got>0 时才写状态/打点）⇒ 病因不可见。这里带回"Like 按钮为什么不存在"的直接证据：
+          //   是已赞（Unlike）？还是选择器形状变了（likeAny 有值但 likeSvg 为 0）？还是压根没开弹窗？
+          rapportLikeMissAt[handle] = Date.now();
+          const diag = await page.evaluate(() => ({
+            likeSvg: document.querySelectorAll('svg[aria-label="Like"]').length,
+            likeAny: document.querySelectorAll('[aria-label="Like"]').length,
+            unlikeSvg: document.querySelectorAll('svg[aria-label="Unlike"]').length,
+            unlikeAny: document.querySelectorAll('[aria-label="Unlike"]').length,
+            article: document.querySelectorAll('article').length,
+            dialog: document.querySelectorAll('[role="dialog"]').length,
+            path: location.pathname,
+          })).catch(() => null);
+          logBehavior('rapport_like_miss', { handle, postsFound: total, clickedIdx: i, probe: diag });
         }
         await page.keyboard.press('Escape').catch(() => {});
         await page.waitForTimeout(jitter(800, 1800));
-      } catch {}
+      } catch (e: any) {
+        if (Date.now() - Number(rapportLikeMissAt[handle] || 0) > 3600_000) {
+          rapportLikeMissAt[handle] = Date.now();
+          logBehavior('rapport_like_miss', { handle, postsFound: total, clickedIdx: i, error: String(e?.message || 'click_failed').slice(0, 140) });
+        }
+      }
     }
     return liked;
   } catch { return 0; }
@@ -1558,6 +1587,11 @@ const syncFollowBackRapport = async (): Promise<void> => {
       // 阶段1：点赞帖子。目标 RAPPORT_LIKE_TARGET(默认3) 篇；仅按时间间隔(RAPPORT_LIKE_GAP_HOURS)节流，
       // 不再强制"每天 1 篇"——放宽后回关号可在 ~1 天内攒够 ≥2 赞，更快跨过 DM-able 门槛。
       if (rp.likedPosts < RAPPORT_LIKE_TARGET && now - (rp.lastLikeAt || 0) > RAPPORT_LIKE_GAP_HOURS * 3600_000) {
+        // 失败退避：先记尝试时间再动手 ⇒ 失败者也要等 RAPPORT_RETRY_BACKOFF_MS 才轮到，
+        // 不再每轮重走（否则整份 byHandle 名单每轮被扫一遍）。
+        if (now - Number(rp.lastLikeTryAt || 0) < RAPPORT_RETRY_BACKOFF_MS) continue;
+        rp.lastLikeTryAt = now;
+        saveLikeState(likeState);
         const got = await rapportLikePosts(handle, 1);
         if (got > 0) {
           rp.likedPosts += got;
@@ -1570,6 +1604,11 @@ const syncFollowBackRapport = async (): Promise<void> => {
       }
       // 阶段2：已点赞 ≥2 篇且隔 ≥18h，留 1 条真诚评论（用对方语言）
       if (rp.likedPosts >= 2 && !rp.commentQueuedAt && !rp.commentedAt && now - (rp.firstLikeAt || now) > RAPPORT_COMMENT_AFTER_HOURS * 3600_000) {
+        // 失败退避：queueRapportCommentForReview 生成失败时不写 commentQueuedAt ⇒ 原本每轮重跑
+        // 整条「抓图 + vision + 生成」管线（实测 vegas_tattoo.ir 每 ~12min 重跑一次）。
+        if (now - Number(rp.lastCommentTryAt || 0) < RAPPORT_RETRY_BACKOFF_MS) continue;
+        rp.lastCommentTryAt = now;
+        saveLikeState(likeState);
         const cc = countryCache[handle] || {};
         const lang = langFor(handle, cc.country || st.country, cc.city || st.city, st.detectedLang);
         const draftId = await queueRapportCommentForReview(handle, pickRapportComment(handle, lang));
@@ -2481,7 +2520,12 @@ const checkAudienceReciprocate = async () => {
       //    回赞 TA 一篇帖 = 对方收到通知 → 回访我们主页，零关注成本的增长动作。──
       if (!BOT_FOLLOW_ENABLED) {
         if (st.audienceLikedAt) continue;
+        // 失败退避：回赞失败原本不留痕 ⇒ 每轮把同一批 likers/commenters 全部重试一遍
+        // （这是「打开主页几百次、audience_like_back 全历史 0 行」的另一半来源）。
+        if (st.audienceLikeTriedAt && Date.now() - Number(st.audienceLikeTriedAt) < AUDIENCE_RETRY_BACKOFF_MS) continue;
         if (LIKE_BACK_DAILY_MAX > 0 && likeBackToday() >= LIKE_BACK_DAILY_MAX) break;
+        st.audienceLikeTriedAt = Date.now();
+        saveLikeState(likeState);
         const got = await likeBackEngager(h).catch(() => 0);
         if (got > 0) {
           st.audienceLikedAt = Date.now();
@@ -3088,16 +3132,25 @@ const openProfile = async (handle: string) => {
             await firstPost.click({ timeout: 8000 });
             await page.waitForTimeout(jitter(1500, 3000));
             const likeBtn = page.locator('svg[aria-label="Like"]').first();
-            if ((await likeBtn.count()) > 0) await likeBtn.click({ timeout: 6000 }).catch(() => {});
+            // 🔴 2026-09-21：原来这里**无论是否真的点到赞都** likedPosts++ ⇒ rapport 阶梯的
+            //   「已点赞 ≥2」被灌水，直接触发阶段2（评论）并在生成失败后每轮重跑。改成只在
+            //   真的点到 Like 时才计数（未点到 = 对方帖已被我们赞过，本就该算作已赞，但要走
+            //   真实取证而不是默认加一）。
+            const hadLikeBtn = (await likeBtn.count()) > 0;
+            if (hadLikeBtn) await likeBtn.click({ timeout: 6000 }).catch(() => {});
             await page.waitForTimeout(jitter(1000, 2000));
             await page.keyboard.press('Escape').catch(() => {});
             await page.waitForTimeout(jitter(500, 1200));
             recordInteraction(handle, 'like', { rapport: true, reason: 'follow_back' }).catch(() => {});
             // 同步计入 rapport 阶梯，使 syncFollowBackDmQueue 的"熟悉度门槛"能识别到已点赞
             if (!st.rapport) st.rapport = { likedPosts: 0, lastLikeAt: 0, firstLikeAt: 0, commentedAt: 0, commentLikedAt: 0 };
-            st.rapport.likedPosts = (st.rapport.likedPosts || 0) + 1;
-            st.rapport.lastLikeAt = Date.now();
-            if (!st.rapport.firstLikeAt) st.rapport.firstLikeAt = Date.now();
+            if (hadLikeBtn) {
+              st.rapport.likedPosts = (st.rapport.likedPosts || 0) + 1;
+              st.rapport.lastLikeAt = Date.now();
+              if (!st.rapport.firstLikeAt) st.rapport.firstLikeAt = Date.now();
+            } else {
+              logBehavior('follow_back_like_miss', { handle, reason: 'no_like_button_on_first_post' });
+            }
             saveLikeState(likeState);
           }
         } catch {}
