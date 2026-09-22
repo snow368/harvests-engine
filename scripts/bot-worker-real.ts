@@ -1323,6 +1323,18 @@ const recordLikeBack = () => {
   if (!(likeState as any).likeBackByDay) (likeState as any).likeBackByDay = {};
   (likeState as any).likeBackByDay[k] = ((likeState as any).likeBackByDay[k] || 0) + 1;
 };
+// ── 账 D（2026-09-22 新增）：给「回复了我们评论的人」的那条回复点赞 ──
+// 为什么要独立一本账：用户口径是「赞我们评论的人 → 回赞 / 回复我们评论的人 → 赞那条回复」，
+// 这是两个不同动作。若共用账 B（`likeBackByDay`，日上限 20），会被 ①回扫 先吃满
+// ⇒ 本通道永远 `quota_out` ⇒ 又是「看着在跑、实际 0」（09-22 实测 B 账 20/20）。
+// 单条回复点赞成本极低、且是对我们评论的直接回应，故独立计量、独立上限。
+const REPLY_LIKE_DAILY_MAX = Math.max(0, Number(process.env.BOT_ENGAGER_REPLY_LIKE_MAX || 20));
+const replyLikeToday = () => Number((likeState as any).replyLikeByDay?.[getTodayKey()] || 0);
+const recordReplyLike = () => {
+  const k = getTodayKey();
+  if (!(likeState as any).replyLikeByDay) (likeState as any).replyLikeByDay = {};
+  (likeState as any).replyLikeByDay[k] = ((likeState as any).replyLikeByDay[k] || 0) + 1;
+};
 const likeBackEngager = async (handle: string): Promise<number> => {
   if (!page) return 0;
   if (LIKE_BACK_DAILY_MAX > 0 && likeBackToday() >= LIKE_BACK_DAILY_MAX) return 0;
@@ -2264,7 +2276,7 @@ const checkCommentEngagers = async () => {
     //   把「页面到底渲染了什么」一并带回来：path 用于判断 `/notifications/others/` 是否被重定向，
     //   aHrefs 给真实链接样本，hasEngagerWord 区分「页面有文案但抽不到」vs「页面压根没内容」。
     const scannedPage = await page.evaluate(() => {
-      const out: { handle: string; text: string }[] = [];
+      const out: { handle: string; text: string; postCode: string }[] = [];
       const links = Array.from(document.querySelectorAll('a[href^="/"]')) as any[];
       const hrefSamples: string[] = [];
       for (const link of links) {
@@ -2272,6 +2284,24 @@ const checkCommentEngagers = async () => {
         if (hrefSamples.length < 8) hrefSamples.push(rawHref);
         const href = rawHref.replace(/^\/+|\/+$/g, '');
         if (!/^[A-Za-z0-9._]{2,30}$/.test(href)) continue;
+        // 🔴 2026-09-22：同一趟上溯里顺手取「这条通知指向的帖子短码」——
+        //   用户要的「回复我们评论的人 → 赞那条回复」必须知道是哪条帖才能定位那条回复。
+        //   用独立游标 `probeNode`，**不改** text 的固定 4 层语义（避免副作用）。
+        //   通知项里 `/p/<code>/` 链接与 actor 同属一个容器，最多上溯 5 层取首个。
+        let probeNode: any = link;
+        let postCode = '';
+        for (let i = 0; i < 5 && probeNode; i++) {
+          probeNode = probeNode.parentElement;
+          if (!probeNode) break;
+          const pa = probeNode.querySelector ? probeNode.querySelector('a[href*="/p/"]') : null;
+          if (pa) {
+            const m = String(pa.getAttribute('href') || '').match(/\/p\/([A-Za-z0-9_-]{5,20})\//);
+            if (m) {
+              postCode = m[1];
+              break;
+            }
+          }
+        }
         let node: any = link;
         for (let i = 0; i < 4 && node; i++) node = node.parentElement;
         const text = (node ? node.innerText : (link as any).innerText || '').replace(/\s+/g, ' ').trim();
@@ -2279,7 +2309,7 @@ const checkCommentEngagers = async () => {
         //   「liked your comment」和别人的 handle ⇒ 一个容器伪造出一堆假互动者。
         //   单条 IG 通知文案远短于 400 字符，超长的一律当容器丢掉。
         if (text.length > 400) continue;
-        out.push({ handle: href, text });
+        out.push({ handle: href, text, postCode });
       }
       const body = document.body ? (document.body.innerText || '') : '';
       // 🔴 2026-09-22：旧 probe 只带 `raw.slice(0,4)` 当样本 —— 而通知页最前面几个 `a[href^="/"]`
@@ -2325,14 +2355,31 @@ const checkCommentEngagers = async () => {
         } as Record<string, unknown>,
       };
     }).catch(() => ({
-      rows: [] as { handle: string; text: string }[],
+      rows: [] as { handle: string; text: string; postCode: string }[],
       probe: { evalFailed: true } as Record<string, unknown>,
     }));
     const raw = scannedPage.rows;
+    // 🔴 2026-09-22（用户口径：「就是要把这 2 个需要回赞/点赞的地方找到，notification 这里都有通知的」）：
+    //   通知页上确实是**两类**互动通知，必须分别落成两个动作：
+    //     ① `X liked your comment`   → 回赞（赞 TA 的东西）
+    //     ② `X replied to your comment` → 给那条回复点赞
+    //   旧码把两类混成一个 `engagers`（只存 handle）⇒ 「回复类」拿不到帖子短码，
+    //   于是永远定位不到那条回复，只能退化成「赞 TA 的帖子」（还是 20~28h 后）。
+    //   现在拆开：liked 走 Pass A/B（原有节奏）；replied 另存 (handle, postCode) 给 Pass C。
     const engagers: string[] = [];
+    const repliedEngagers: Array<{ handle: string; postCode: string }> = [];
+    const seenReplied = new Set<string>();
     for (const n of raw) {
       if (selfIds.has(n.handle.toLowerCase())) continue;
-      if (/liked your comment|replied to your comment/i.test(n.text)) engagers.push(n.handle);
+      if (/liked your (comment|reply)/i.test(n.text)) {
+        engagers.push(n.handle);
+      } else if (/replied to your (comment|reply)/i.test(n.text)) {
+        engagers.push(n.handle);
+        if (!seenReplied.has(n.handle)) {
+          seenReplied.add(n.handle);
+          repliedEngagers.push({ handle: n.handle, postCode: n.postCode || '' });
+        }
+      }
     }
     // 🔴 2026-09-19：空结果也必须打点。不打点就无法区分「真没人互动」和「通知页正则失配」——
     // 这两种情况的修法完全相反（等 vs 改正则）。此前这里只有一句裸 `return`，
@@ -2421,7 +2468,11 @@ const checkCommentEngagers = async () => {
           logBehavior('comment_engager_like_back', { handle: h, liked: got, dayCount: likeBackToday(), dayCap: LIKE_BACK_DAILY_MAX });
           await sleep(jitter(3000, 6000));
         } else if (LIKE_BACK_DAILY_MAX > 0 && likeBackToday() >= LIKE_BACK_DAILY_MAX) {
-          break; // 今日回赞预算用尽：不标记已完成，下一轮/明天继续
+          // 🔴 2026-09-22：原来是 `break` —— 位置在「回赞」之后、「回关」之前 ⇒
+          //   回赞额度一满，**回关也被一起跳过**（`comment_engager_follow` 全史 0 行的直接原因）。
+          //   改为「只放弃本轮回赞、不退出循环」：仍不打 `commentEngagerLikedAt`（欠账可补），
+          //   但下面的 ② 回关照走。超支风险 = 0 —— likeBackEngager 第一行就是同一额度检查。
+          logBehavior('comment_engager_like_quota_out', { handle: h, dayCount: likeBackToday(), dayCap: LIKE_BACK_DAILY_MAX });
         }
       }
       // ② 回关（可选，默认关）
@@ -2431,6 +2482,44 @@ const checkCommentEngagers = async () => {
         logBehavior('comment_engager_follow', { handle: h });
         recordInteraction(h, 'follow', { reason: 'comment_engager', subject: st.commentEngagerSubject || 'tattoo' }).catch(() => {});
       }
+      await sleep(jitter(3000, 6000));
+    }
+    // 5) Pass C（2026-09-22 用户口径：「给我们在别人作品下面发评论回评论的这个点赞」）
+    //   replied 类通知 = 有人**回复了我们的评论** ⇒ 动作是「给那条回复点赞」。
+    //   与 Pass A/B 的关键差别：Pass A/B 只拿到身份（handle），只能赞 TA 的帖 / 回关；
+    //   这里拿到了通知项里的**帖子短码**（evaluate 的 postCode）⇒ 能回到那条帖，
+    //   用 likeHandleCommentHere 精确点赞**那一条回复**（三态 liked/already/miss）。
+    //   不加 20~28h 延迟：对方回复我们的评论本身就是直接对话，当轮点赞最自然。
+    //   日上限走独立账 D（不占账 B —— 账 B 已被 ①回扫 吃满，共用就恒 0）。
+    for (const rp of repliedEngagers) {
+      const st = (likeState.follows!.byHandle![rp.handle] || (likeState.follows!.byHandle![rp.handle] = {})) as any;
+      if (st.replyLikedAt) continue;
+      // 失败退避：找不到那条回复（被删/被折叠）时 1h 内不重试，别回到「每轮重试」的老坑
+      if (Number(st.replyLikeMissAt || 0) && Date.now() - Number(st.replyLikeMissAt) < 3600_000) continue;
+      if (!rp.postCode) {
+        logBehavior('comment_engager_reply_no_post', { handle: rp.handle });
+        continue;
+      }
+      if (REPLY_LIKE_DAILY_MAX > 0 && replyLikeToday() >= REPLY_LIKE_DAILY_MAX) {
+        logBehavior('comment_engager_reply_quota_out', { handle: rp.handle, dayCount: replyLikeToday(), dayCap: REPLY_LIKE_DAILY_MAX });
+        break;
+      }
+      try {
+        await page.goto(`${IG_BASE}/p/${rp.postCode}/`, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
+        await page.waitForTimeout(jitter(2000, 3500));
+        const res = await likeHandleCommentHere(rp.handle);
+        if (res === 'miss') {
+          st.replyLikeMissAt = Date.now();
+          saveLikeState(likeState);
+          logBehavior('comment_engager_reply_miss', { handle: rp.handle, postCode: rp.postCode });
+        } else {
+          st.replyLikedAt = Date.now();
+          st.replyLikedResult = res;
+          saveLikeState(likeState);
+          if (res === 'liked') recordReplyLike();
+          logBehavior('comment_engager_reply_like', { handle: rp.handle, postCode: rp.postCode, result: res, dayCount: replyLikeToday(), dayCap: REPLY_LIKE_DAILY_MAX });
+        }
+      } catch {}
       await sleep(jitter(3000, 6000));
     }
   } catch {}
