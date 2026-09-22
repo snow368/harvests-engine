@@ -1335,6 +1335,27 @@ const recordReplyLike = () => {
   if (!(likeState as any).replyLikeByDay) (likeState as any).replyLikeByDay = {};
   (likeState as any).replyLikeByDay[k] = ((likeState as any).replyLikeByDay[k] || 0) + 1;
 };
+// ── 账 E（2026-09-22 新增）：通知页互动者的**回赞**专用账 ──
+// 🔴 用户口径：「回赞，不是回关啊，bot worker 在回关」。
+//   实测根因：Pass B 的回赞共用账 B（`likeBackByDay`），而账 B 被 ①回扫 每轮自耗到
+//   20/20 ⇒ `comment_engager_like_quota_out` 8 条/轮、`comment_engager_follow` 5 条/轮
+//   ⇒ **回赞全被拒、只剩回关在跑**（正是用户看到的现象）。
+//   ⇒ 回赞改走独立账 E，不再与 ①回扫 争 B 账。
+const ENGAGER_LIKE_DAILY_MAX = Math.max(0, Number(process.env.BOT_ENGAGER_LIKE_MAX || 20));
+const engagerLikeToday = () => Number((likeState as any).engagerLikeByDay?.[getTodayKey()] || 0);
+const recordEngagerLike = () => {
+  const k = getTodayKey();
+  if (!(likeState as any).engagerLikeByDay) (likeState as any).engagerLikeByDay = {};
+  (likeState as any).engagerLikeByDay[k] = ((likeState as any).engagerLikeByDay[k] || 0) + 1;
+};
+// 与 likeBackEngager 同形，只换账本（B → E）
+const likeBackEngagerIndependent = async (handle: string): Promise<number> => {
+  if (!page) return 0;
+  if (ENGAGER_LIKE_DAILY_MAX > 0 && engagerLikeToday() >= ENGAGER_LIKE_DAILY_MAX) return 0;
+  const got = await rapportLikePosts(handle, 1, false).catch(() => 0);
+  if (got > 0) recordEngagerLike();
+  return got;
+};
 const likeBackEngager = async (handle: string): Promise<number> => {
   if (!page) return 0;
   if (LIKE_BACK_DAILY_MAX > 0 && likeBackToday() >= LIKE_BACK_DAILY_MAX) return 0;
@@ -2459,24 +2480,26 @@ const checkCommentEngagers = async () => {
       if (!st || !st.commentEngagerFollowAt) continue;
       if (Date.now() < st.commentEngagerFollowAt) continue;
       if (st.commentEngagerSubject && st.commentEngagerSubject !== 'tattoo') continue; // 仅 tattoo 相关
-      // ① 回赞对方最新一篇帖（对方收到 "liked your post" 通知 → 回访/关注我们的主力信号）
+      // ① 回赞对方最新一篇帖 —— **这是本通道的主动作**（用户口径：「回赞，不是回关」）
+      //   🔴 2026-09-22：原来走 `likeBackEngager`（账 B），而账 B 被 ①回扫 自耗到 20/20
+      //   ⇒ 每轮 8 条 `*_like_quota_out` + 5 条 `comment_engager_follow` = **回赞全被拒、只剩回关**。
+      //   改用**独立账 E**，不再与 ①回扫 争额度。
       if (!st.commentEngagerLikedAt) {
-        const got = await likeBackEngager(h).catch(() => 0);
+        const got = await likeBackEngagerIndependent(h).catch(() => 0);
         if (got > 0) {
           st.commentEngagerLikedAt = Date.now();
           saveLikeState(likeState);
-          logBehavior('comment_engager_like_back', { handle: h, liked: got, dayCount: likeBackToday(), dayCap: LIKE_BACK_DAILY_MAX });
+          logBehavior('comment_engager_like_back', { handle: h, liked: got, dayCount: engagerLikeToday(), dayCap: ENGAGER_LIKE_DAILY_MAX, account: 'E' });
           await sleep(jitter(3000, 6000));
-        } else if (LIKE_BACK_DAILY_MAX > 0 && likeBackToday() >= LIKE_BACK_DAILY_MAX) {
-          // 🔴 2026-09-22：原来是 `break` —— 位置在「回赞」之后、「回关」之前 ⇒
-          //   回赞额度一满，**回关也被一起跳过**（`comment_engager_follow` 全史 0 行的直接原因）。
-          //   改为「只放弃本轮回赞、不退出循环」：仍不打 `commentEngagerLikedAt`（欠账可补），
-          //   但下面的 ② 回关照走。超支风险 = 0 —— likeBackEngager 第一行就是同一额度检查。
-          logBehavior('comment_engager_like_quota_out', { handle: h, dayCount: likeBackToday(), dayCap: LIKE_BACK_DAILY_MAX });
+        } else if (ENGAGER_LIKE_DAILY_MAX > 0 && engagerLikeToday() >= ENGAGER_LIKE_DAILY_MAX) {
+          // 账 E 用尽：只放弃本轮回赞，**不**标记完成（欠账可补），也不退出循环。
+          logBehavior('comment_engager_like_quota_out', { handle: h, dayCount: engagerLikeToday(), dayCap: ENGAGER_LIKE_DAILY_MAX, account: 'E' });
         }
       }
-      // ② 回关（可选，默认关）
-      if (!BOT_FOLLOW_BACK_ENABLED || st.followedAt) continue;
+      // ② 回关 = **回赞的从属动作**（2026-09-22 用户口径：「回赞，不是回关啊」）
+      //   只有在「本通道已成功回赞过 TA」之后才回关；回赞没做成 ⇒ 不回关。
+      //   这保证额度/失败时优先保回赞——正是用户要的方向（原实现恰好相反）。
+      if (!BOT_FOLLOW_BACK_ENABLED || st.followedAt || !st.commentEngagerLikedAt) continue;
       const followed = await reciprocalFollowBack(h);
       if (followed) {
         logBehavior('comment_engager_follow', { handle: h });
