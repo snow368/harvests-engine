@@ -1364,11 +1364,33 @@ const rapportLikePosts = async (handle: string, n: number, countRapport = true):
               : (((mark.getAttribute('aria-label') || '').toLowerCase() === 'unlike') ? 'unliked' : 'still_like');
             return {
               state: st,
+              // 🔴 2026-09-22：回读时把**作用域身份**一起带回来。作用域退化的顺序是
+              //   `dialog article → article → dialog → document`，一旦弹窗被关，
+              //   点击前后的 scope 就**不是同一个元素** ⇒ 计数差分无意义（会误判成功）。
+              //   带上 tag 后可以强制「前后同作用域」才采信差分。
+              scope: scope === document ? 'document' : (scope as Element).tagName,
               likeInScope: scope.querySelectorAll('[aria-label="Like"]').length,
               unlikeInScope: scope.querySelectorAll('[aria-label="Unlike"]').length,
             };
           }).catch(() => null);
           const after = afterR ? afterR.state : 'eval_failed';
+          const likeD = afterR && pick ? Number(pick.likeInScope) - Number(afterR.likeInScope) : null;
+          const unlikeD = afterR && pick ? Number(afterR.unlikeInScope) - Number(pick.unlikeInScope) : null;
+          const sameScope = !!(afterR && pick && afterR.scope === pick.scope);
+          // 🔴 2026-09-22 定案（人工取证后，撤销上一版的「只观测不判定」）：
+          //   `gone` 的原生含义只是「我打的 data-bscan-plike 标记元素没了」。
+          //   IG 点赞成功后 React 会**换掉那颗 svg 节点** ⇒ 标记随节点一起消失，
+          //   与「点击无效 / 弹窗被关」**同形** —— 所以单看 `gone` 分不出成败。
+          //   上线后取回 6/6 样本，`scopeDelta` **全部**是 `like-1 / unlike+1` 的
+          //   **干净 1:1 互换**，且前后同作用域。这是「红心确实点亮」的直接证据
+          //   （aria-label 由 Like 翻成 Unlike；点击失败绝不会产生这种对称互换）。
+          //   ⇒ 旧判定把**成功记成 miss**。后果两条：
+          //     ① 账 E 低估（额度按成功数计 ⇒ 显示还剩额度、实际已点）
+          //     ② 目标不写 `commentEngagerLikedAt` ⇒ 每轮重新开主页 = 白烧导航预算
+          //   新判据（三选一）：标记存活且翻 `unlike`；或 标记 gone 但**同作用域**下
+          //   like-1 且 unlike+1（= React 换节点，赞已落地）。
+          const confirmed = after === 'unliked'
+            || (after === 'gone' && sameScope && likeD === -1 && unlikeD === 1);
           lastRapportLikeProbe = Object.assign({}, lastRapportLikeProbe || {}, {
             afterClick: after,
             likeInScopeAfter: afterR ? afterR.likeInScope : null,
@@ -1377,17 +1399,32 @@ const rapportLikePosts = async (handle: string, n: number, countRapport = true):
             scopeDelta: afterR
               ? `${Number(pick?.likeInScope)}→${afterR.likeInScope} / ${Number(pick?.unlikeInScope)}→${afterR.unlikeInScope}`
               : null,
+            sameScope,
+            confirmed,
           });
-          if (after === 'unliked') {
+          if (confirmed) {
             liked++;
             if (countRapport) recordRapport();
             recordInteraction(handle, 'like', { rapport: true, reason: 'follow_back_ladder' }).catch(() => {});
+            // 走差分判定成功的情形单独留痕 ⇒ 日后可回归核对「差分判据是否仍然成立」，
+            // 不必再靠人工翻 IG 找地面真值。
+            if (after !== 'unliked') {
+              logBehavior('rapport_like_click_confirmed', {
+                handle,
+                clickedIdx: i,
+                after,
+                scopeDelta: (lastRapportLikeProbe as any).scopeDelta,
+              });
+            }
           } else {
             logBehavior('rapport_like_click_no_effect', {
               handle,
               clickedIdx: i,
               after,
               scopeDelta: (lastRapportLikeProbe as any).scopeDelta,
+              sameScope,
+              likeD,
+              unlikeD,
               probe: pick,
             });
           }
