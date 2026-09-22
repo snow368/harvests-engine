@@ -2673,17 +2673,25 @@ let lastCommentLikeProbe: Record<string, unknown> = {};
 //   于是假成功、静默）。改为**按作者定位**：先把「评论行」界定成「最近的、恰好只有 1 个
 //   `<time>` 的祖先」（与 extractPostComments 的 nestedOf 同一套结构判据，已实测可用），
 //   再要求该行的**首个作者链接**等于目标 handle ⇒ 只认真正属于 TA 的那一行。
+// 🔴 2026-09-22 二修：`reason: 'already'` 曾经是**死分支** —— 遍历源只有
+//   `svg[aria-label="Like"]`，而已赞的那条评论**压根没有 Like 图标** ⇒ 永远选不中它的行
+//   ⇒ 「早就赞过」被记成 `miss`（与 09-21 修的 `rapportLikePost` 同一 bug 家族）。
+//   今改为遍历 Like ∪ Unlike：行内无 Like 图标、有 Unlike ⇒ 判 `already`（**不点击、
+//   不消耗额度**，但状态能推进，也不再污染 `commentLikeResult` 统计）。
+//   误伤边界：Unlike 也会命中**帖子本身**的赞按钮，但它向上找不到「恰好 1 个 <time>」的行，
+//   即使命中也只会得到 `already`（不会产生点击）。
 const likeHandleCommentHere = async (handle: string): Promise<'liked' | 'already' | 'miss'> => {
   if (!page) return 'miss';
   try {
     const picked: any = await page.evaluate((h) => {
       const out: any = { pickedAuthor: '', pickedText: '', likeEls: 0, rowsWithAuthor: 0, reason: 'no_target_row' };
       const tgt = String(h || '').toLowerCase();
-      const likeEls = Array.from(document.querySelectorAll('svg[aria-label="Like"]'));
-      out.likeEls = likeEls.length;
+      const icons = Array.from(document.querySelectorAll('svg[aria-label="Like"], svg[aria-label="Unlike"]'));
+      out.likeEls = document.querySelectorAll('svg[aria-label="Like"]').length;
+      out.unlikeEls = document.querySelectorAll('svg[aria-label="Unlike"]').length;
       let best: Element | null = null;
       let bestDepth = 99;
-      for (const el of likeEls) {
+      for (const el of icons) {
         let n: Element | null = el.parentElement;
         let depth = 0;
         let row: Element | null = null;
