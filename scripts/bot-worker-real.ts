@@ -1271,10 +1271,21 @@ const rapportLikePosts = async (handle: string, n: number, countRapport = true):
         const likeSvgCount = await page.locator('[aria-label="Like"]').count().catch(() => 0);
         const unlikeCount = await page.locator('[aria-label="Unlike"]').count().catch(() => 0);
         if (likeSvgCount > 0) {
+          // 🔴 2026-09-22：与 `likeHandleCommentHere` 同一个坑 —— 点击失败被 `.catch` 吞掉后
+          //   **无条件计数**。CDP 模式视口 = 外部 Chrome 真实窗口（`start-bots.bat` 没给
+          //   `--window-size`，RDP 会话变化会挤小）⇒ 弹窗里的 Like 可能被裁出视口/被遮挡
+          //   ⇒ 点空也照样 `liked++` = 「账 E 记了一笔、对方却没收赞」。改为点击后复核。
+          await likeBtn.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
           await likeBtn.click({ timeout: 6000 }).catch(() => {});
-          liked++;
-          if (countRapport) recordRapport();
-          recordInteraction(handle, 'like', { rapport: true, reason: 'follow_back_ladder' }).catch(() => {});
+          await page.waitForTimeout(jitter(1200, 2400));
+          const unlikeAfter = await page.locator('[aria-label="Unlike"]').count().catch(() => 0);
+          if (unlikeAfter > 0) {
+            liked++;
+            if (countRapport) recordRapport();
+            recordInteraction(handle, 'like', { rapport: true, reason: 'follow_back_ladder' }).catch(() => {});
+          } else {
+            logBehavior('rapport_like_click_no_effect', { handle, clickedIdx: i, likeBefore: likeSvgCount, unlikeAfter });
+          }
         } else if (unlikeCount > 0) {
           // 🔴 2026-09-21 定案：probe 8/8 次全是 `likeSvg 0 / unlikeSvg ≥1 / article 1 / dialog 1`
           //   ⇒ 帖子**早就赞过**（弹窗正常打开了），不是选择器失配、也不是没开弹窗。
@@ -2718,7 +2729,7 @@ const likeHandleCommentHere = async (handle: string): Promise<'liked' | 'already
   if (!page) return 'miss';
   try {
     const picked: any = await page.evaluate((h) => {
-      const out: any = { pickedAuthor: '', pickedText: '', likeEls: 0, rowsWithAuthor: 0, reason: 'no_target_row' };
+      const out: any = { pickedAuthor: '', pickedText: '', likeEls: 0, rowsWithAuthor: 0, vw: window.innerWidth, vh: window.innerHeight, reason: 'no_target_row' };
       const tgt = String(h || '').toLowerCase();
       const icons = Array.from(document.querySelectorAll('svg[aria-label="Like"], svg[aria-label="Unlike"]'));
       out.likeEls = document.querySelectorAll('svg[aria-label="Like"]').length;
@@ -2760,9 +2771,40 @@ const likeHandleCommentHere = async (handle: string): Promise<'liked' | 'already
     if (!picked || picked.reason !== 'like') return 'miss';
     const btn = page.locator('svg[data-bscan-clike="1"]').first();
     if ((await btn.count()) === 0) return 'miss';
+    // 🔴 2026-09-22：点击失败原来被 `.catch(() => {})` 吞掉后**无条件 `return 'liked'`**
+    //   ⇒ 视口被挤小 / 元素被遮挡时「没点上」也会写成 liked = **假阳性**（状态记完成、
+    //   永不重试，而对方其实没收到赞）。改为**点击后复核**：重读该行图标，只有真变成
+    //   `Unlike`（已赞态）才算 liked；否则按 miss 走 1h 退避重试（自愈：下次会判 already）。
+    //   `scrollIntoViewIfNeeded` 显式前置 —— 元素被裁到视口外时先滚进来再点。
+    await btn.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
     await btn.click({ timeout: 6000 }).catch(() => {});
-    await page.waitForTimeout(jitter(1200, 2200));
-    return 'liked';
+    await page.waitForTimeout(jitter(1500, 2800));
+    const after = await page
+      .evaluate((h) => {
+        const tgt = String(h || '').toLowerCase();
+        const icons = Array.from(document.querySelectorAll('svg[aria-label="Like"], svg[aria-label="Unlike"]'));
+        for (const el of icons) {
+          let n: Element | null = el.parentElement;
+          let depth = 0;
+          let row: Element | null = null;
+          while (n && n !== document.body && depth < 10) {
+            depth = depth + 1;
+            if (n.querySelectorAll('time').length === 1) { row = n; break; }
+            n = n.parentElement;
+          }
+          if (!row) continue;
+          const a = row.querySelector('a[href^="/"]');
+          const href = ((a && a.getAttribute('href')) || '').replace(/[?#].*$/, '').replace(/^\/+|\/+$/g, '');
+          if (!/^[A-Za-z0-9._]{2,30}$/.test(href) || href.toLowerCase() !== tgt) continue;
+          const al = (el.getAttribute('aria-label') || '').toLowerCase();
+          return al === 'unlike' ? 'unliked' : 'still_like';
+        }
+        return 'row_gone';
+      }, handle)
+      .catch(() => 'eval_failed');
+    lastCommentLikeProbe = Object.assign({}, lastCommentLikeProbe || {}, { afterClick: after });
+    if (after === 'unliked') return 'liked';
+    return 'miss';
   } catch { return 'miss'; }
 };
 
@@ -3757,6 +3799,23 @@ const ensureBrowser = async () => {
       }
       await page.bringToFront().catch(() => {});
       if (page) await installEvalShim(page);
+      // 🔴 2026-09-22（用户口径：「因为窗口大小可能会变化的，所以要把实际落点找到」）：
+      //   **CDP 模式下 launch 参数 `viewport` 完全不生效** —— 视口 = 外部 Chrome 的真实
+      //   窗口尺寸。而 `start-bots.bat` 起 Chrome 时**没给 `--window-size`** ⇒ RDP 会话
+      //   断开/分辨率变化会把窗口挤小 ⇒ IG 走窄屏布局、评论行被裁出视口 ⇒ **点击落空**
+      //   （旧码还会照样报 liked，见 `likeHandleCommentHere` 的复核）。
+      //   兜底：连上后读实际尺寸，**只在异常小时**用 Emulation 强制固定视口，让布局确定、
+      //   元素可被滚动到。正常窗口（≥900×600）零干预 ⇒ 不改变现有行为。
+      if (BOT_LAUNCH_MODE !== 'persistent' && page) {
+        try {
+          const vpNow = await page.evaluate(() => ({ w: window.innerWidth, h: window.innerHeight })).catch(() => null);
+          (runtimeDiag as any).viewport = vpNow ? `${vpNow.w}x${vpNow.h}` : 'unknown';
+          if (!vpNow || vpNow.w < 900 || vpNow.h < 600) {
+            await page.setViewportSize({ width: 1280, height: 900 }).catch(() => {});
+            logFatal(`[bot-real] viewport too small (${vpNow ? `${vpNow.w}x${vpNow.h}` : 'unknown'}) on CDP → forced 1280x900（RDP 窗口变化会挤小视口，导致点赞落点被裁出视口）`);
+          }
+        } catch {}
+      }
       console.log(`[bot-real] connected via CDP: ${BOT_CDP_URL}`);
       // 时间戳（不是布尔值）：前台要能看出「连接是 3 秒前刷新的」还是「2 小时前刷新的」。
       runtimeDiag.browserConnectedAt = Date.now();
