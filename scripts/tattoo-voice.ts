@@ -265,6 +265,17 @@ const TATTOO_SIGNALS = [
   'blackwork', 'whip shading', 'linework', 'fineline', 'fine line',
 ];
 
+// 🔴 2026-09-22：账号身份判定（回关审核 / 互动者回赞）需要「是否纹身相关」这个**独立**判据，
+//   不能再复用 `detectSubject(...).subject === 'tattoo'`。原因是一条真实误杀：
+//   IG 最常见的综合店分类写法是 **"Tattoo & Piercing Shop"**，而 `detectSubject` 的
+//   穿孔优先规则（CORE_PIERCING 含 `piercing`）会把它直接判成 `piercing`
+//   ⇒ 用 `subject!=='tattoo'` 一票否决 ⇒ **用户明确要回关的那批纹身+穿孔综合店全被拒之门外**。
+//   本函数只回答「文本里有没有纹身身份词」，命中即算过闸，不参与穿孔优先那套语义。
+export const hasTattooSignal = (text: string): string[] => {
+  const t = String(text || '').toLowerCase();
+  return TATTOO_SIGNALS.filter((k) => t.includes(k));
+};
+
 const escRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 /** 词边界匹配：`stud` 不再命中 `studio`，`rook` 不再命中 `Brooklyn`。 */
 const tokenHit = (text: string, tokens: string[]): string[] =>

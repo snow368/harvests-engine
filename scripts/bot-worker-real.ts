@@ -7,7 +7,7 @@ import os from 'node:os';
 import { createWorker } from 'tesseract.js';
 import { generateComment, clearRecentHistory, detectTattooStyle, extractTechniqueHintsFromVision, commentShapeFlags } from './comment-generator';
 import { analyzePostImage, isVisionEnabled, buildVisionDescription } from './vision-analyze';
-import { detectPostType, detectSubject, isPiercingHandle, detectPostIntent, reconcileIntentWithVision, intentEngagement } from './tattoo-voice';
+import { detectPostType, detectSubject, isPiercingHandle, detectPostIntent, reconcileIntentWithVision, intentEngagement, hasTattooSignal } from './tattoo-voice';
 // 关注回收（follow churn）：清理长期未回关的号，压低 following:followers 比例。
 // 默认关闭，由 BOT_UNFOLLOW_ENABLED 打开；详见 scripts/unfollow-maintenance.ts
 import { runUnfollowMaintenance, countFollowing } from './unfollow-maintenance';
@@ -1717,10 +1717,35 @@ const reciprocalFollowBack = async (handle: string): Promise<boolean> => {
         const bio = (facts && String(facts.bio || '')) || '';
         const subjectText = `${bio} ${facts?.categoryLabel || ''} ${facts?.category || ''} ${facts?.title || ''}`.trim();
         const subject = subjectText ? detectSubject(subjectText, [], handle).subject : 'unknown';
-        if (subject !== 'tattoo') {
-          logBehavior('reciprocal_follow_skipped_not_tattoo', { handle, subject, srcLen: subjectText.length, src: subjectText.slice(0, 120) });
+        // 🔴 2026-09-22 用户口径（原话）：「有新的关注我们的就审核看下是纹身店的、纹身师的就
+        //   回关过去，其他的等人工审核」。⇒ 判据由 `subject==='tattoo'` 换成**「文本里有纹身身份词」**：
+        //   ① 修掉一条真实误杀 —— IG 最常见的综合店分类是 **"Tattoo & Piercing Shop"**，含 `piercing`
+        //      ⇒ `detectSubject` 的穿孔优先规则把它判成 `piercing` ⇒ 旧判据一票否决 ⇒ **正是用户
+        //      要回关的那批人**被挡在门外（这是「bio 修好后回关仍为 0」的第二层原因）；
+        //   ② 「其他」不再只是静默拒绝，而是**落一条人工审核队列**（旧版直接 return，人根本看不到
+        //      谁在等审）。判定不出的（`unknown`）也一并转人工，宁少回关不乱回关。
+        const tattooHits = hasTattooSignal(subjectText);
+        if (tattooHits.length === 0) {
+          st.followBackReviewPending = true;
+          st.followBackReviewSubject = subject;
+          st.followBackReviewReason = subjectText ? 'no_tattoo_signal' : 'profile_text_empty';
+          st.followBackReviewSrc = subjectText.slice(0, 240);
+          st.followBackReviewAt = Date.now();
+          likeState.follows!.byHandle![handle] = st;
+          saveLikeState(likeState);
+          logBehavior('reciprocal_follow_skipped_not_tattoo', {
+            handle, subject, srcLen: subjectText.length, src: subjectText.slice(0, 160), queued: 'manual_review',
+          });
+          logBehavior('follow_back_pending_review', {
+            handle, subject, srcLen: subjectText.length, src: subjectText.slice(0, 160),
+            reason: st.followBackReviewReason,
+          });
+          recordInteraction(handle, 'follow_back_review', {
+            subject, reason: st.followBackReviewReason, src: subjectText.slice(0, 240),
+          }).catch(() => {});
           return false;
         }
+        logBehavior('follow_back_audit_pass', { handle, subject, tattooHits: tattooHits.slice(0, 3), srcLen: subjectText.length });
       } catch { return false; }
     }
     const followSelectors = ['header button', 'header div[role="button"]', 'main button', 'main div[role="button"]', 'button', 'div[role="button"]'];
@@ -1780,16 +1805,185 @@ const FOLLOWERS_PROBE_TICK = Math.max(1, Number(process.env.BOT_FOLLOWERS_PROBE_
 let followersProbeTick = 0;
 
 // 2026-09-20: IG is an SPA. `domcontentloaded` fires before the profile shell renders, so any
-//   caller that reads the DOM immediately after goto() sees an empty page. Measured today:
-//   own_followers.probe returned hasFollowersAnchor=false while the anchor does exist a moment
-//   later (profile_facts read a real follower count on 37/200 samples with the same selector).
-//   Wait for the shell, then for the element the caller actually needs. Bounded; never throws.
-const gotoOwnProfile = async (me: string, expect = 'a[href*="/followers/"], a[href*="/p/"]') => {
+//   caller that reads the DOM immediately after goto() sees an empty page.
+// 🔴 2026-09-22 订正（上一版这段注释里的因果是错的，已实测撤回）：当时把
+//   `own_followers.probe.hasFollowersAnchor=false` 归因为「SPA 还没渲染完」，**不成立**——
+//   线上 109/109 全 false，且 probe 直接证明页面上**一个** `a[href*="/followers/"]` 都没有
+//   （页面上 `27 followers` 是纯文本节点，根本不是链接）。所以「等锚点」不仅无效，还是
+//   **用「等一个永远不出现的元素」当同步点**：白等 15s 之后照样往下走，且可能在**别的页面**
+//   上读数（09-22 01:17 那条 `own_followers` 的 href 就停在帖子页 `/p/Ddiz0Ouo9fH/`，
+//   headerText 空、followers 记成 0，直接污染涨粉仪表）。
+//   现在：① 每次导航后**校验 URL 真的是本人主页**，不是就硬 reload 一次（reload 不走 SPA
+//   客户端路由，能治 `ERR_ABORTED` 被吞导致的「原地不动」）；② 同步点换成**真实存在**的
+//   `header` 文本自证（stats 就写在里面）。Bounded; never throws.
+const gotoOwnProfile = async (me: string) => {
   if (!page) return;
-  await page.goto(`${IG_BASE}/${me}/`, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
-  await page.waitForSelector('main', { state: 'visible', timeout: 20000 }).catch(() => {});
-  await page.waitForSelector(expect, { timeout: 15000 }).catch(() => {});
+  let wantPath: RegExp | null = null;
+  try { wantPath = new RegExp(`^/${me}/?$`, 'i'); } catch { wantPath = null; }
+  for (let attempt = 0; attempt < 2; attempt++) {
+    await page.goto(`${IG_BASE}/${me}/`, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
+    await page.waitForSelector('main', { state: 'visible', timeout: 20000 }).catch(() => {});
+    let path = '';
+    try { path = new URL(page.url()).pathname; } catch {}
+    if (!wantPath || wantPath.test(path)) break;
+    logBehavior('own_profile_off_target', { want: me, got: path.slice(0, 80), attempt });
+    await page.reload({ waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
+    await page.waitForTimeout(jitter(1200, 2200));
+  }
+  await page
+    .waitForFunction(
+      () => {
+        const h = document.querySelector('header');
+        const t = h ? String((h as HTMLElement).innerText || '') : '';
+        return /\b\d[\d.,]*[KkMm]?\s+(followers?|posts?)\b/i.test(t) || t.length > 120;
+      },
+      undefined,
+      { timeout: 12000 },
+    )
+    .catch(() => {});
   await page.waitForTimeout(jitter(800, 1600));
+};
+
+// 🔴 2026-09-22：打开「自己的 Followers 列表」是回关链路的**唯一输入端**，而它线上 20/20 全失败
+//   （`own_followers_sweep_no_dialog`，via 恒 `route`）。已确证两条事实：
+//     ① `a[href*="/followers/"]` 在 IG 现行主页上**根本不存在**（probe `followerHrefs: []`），
+//        header 里的 `27 followers` 是**纯文本** ⇒ 「点锚点」这条路从根上不通；
+//     ② 深链 `goto /{me}/followers/` **不弹窗**（URL 停在 /followers/ 但无 `div[role=dialog]`）。
+//   所以改成**多策略 + 每步自证 + 失败留诊断**：谁成功就用谁；全失败时把「那个 stat 元素到底是
+//   什么标签 / 页面有多少链接 / main 顶部文本」打出来，下一轮不必再盲试。
+//   ⚠️ 调用方在 `ok:false` 时**必须不枚举** —— 列表没开还去扫 = 把主页杂链接当新粉
+//      （09-21 00:50 一秒写 15 条幻影 `incoming_follow_back` 就是这么来的），而回关是外部动作。
+const openFollowersList = async (
+  me: string,
+): Promise<{ ok: boolean; via: string; candidates: string[]; diag: any }> => {
+  const out = { ok: false, via: 'none', candidates: [] as string[], diag: {} as any };
+  if (!page) return out;
+
+  // 容器判定：① dialog 打开 = 弹窗版；② URL 落在 /followers/ 且 main 里已有一批 profile 链接
+  //   = IG 的**整页版**（同样可用，只是没有 dialog 角色 —— 旧护栏把它误判为「没开」）。
+  //   ⚠️ 绝不做「什么容器都没有就全页扫 a[href^="/"]」那种兜底，那正是幻影粉的来源。
+  const readContainer = async () => {
+    const raw = await page!
+      .evaluate(() => {
+        const dlg = document.querySelectorAll('div[role="dialog"]');
+        const scope: any = dlg.length ? dlg[dlg.length - 1] : document.querySelector('main') || document.body;
+        const hrefs: string[] = [];
+        const as = scope ? scope.querySelectorAll('a[href^="/"]') : [];
+        for (let i = 0; i < as.length && hrefs.length < 120; i++) {
+          hrefs.push(String(as[i].getAttribute('href') || '').replace(/[?#].*$/, '').replace(/^\/+|\/+$/g, ''));
+        }
+        return { dialogCount: dlg.length, hrefs, url: location.href };
+      })
+      .catch(() => null);
+    if (!raw) return { kind: 'read_failed', candidates: [] as string[], linkCount: 0 };
+    const uniq = Array.from(new Set(raw.hrefs));
+    let isListUrl = false;
+    try { isListUrl = /\/followers\/?$/i.test(new URL(raw.url).pathname); } catch {}
+    const kind = raw.dialogCount > 0 ? 'dialog' : isListUrl && uniq.length >= 10 ? 'page' : 'not_open';
+    return { kind, candidates: uniq, linkCount: uniq.length };
+  };
+
+  const settle = async (via: string) => {
+    out.via = via;
+    const c = await readContainer();
+    const dom = await page!
+      .evaluate(() => {
+        const h: any = document.querySelector('header');
+        const all = h ? h.querySelectorAll('*') : [];
+        let deepest: any = null;
+        for (let i = 0; i < all.length; i++) {
+          const t = String(all[i].textContent || '').replace(/\s+/g, ' ').trim();
+          if (t.length <= 30 && /^[\d.,]+[KkMm]?\s+followers?$/i.test(t)) deepest = all[i];
+        }
+        const main: any = document.querySelector('main');
+        return {
+          url: location.href.slice(0, 130),
+          dialogCount: document.querySelectorAll('div[role="dialog"]').length,
+          statTag: deepest ? String(deepest.tagName) : '',
+          statRole: deepest ? String(deepest.getAttribute('role') || '') : '',
+          statOuter: deepest ? String(deepest.outerHTML || '').replace(/\s+/g, ' ').slice(0, 200) : '',
+          mainTop: String((main && main.innerText) || '').replace(/\s+/g, ' ').slice(0, 150),
+          mainLinks: main ? main.querySelectorAll('a[href^="/"]').length : 0,
+        };
+      })
+      .catch(() => null);
+    out.diag = { kind: c.kind, linkCount: c.linkCount, ...(dom || {}) };
+    if (c.kind === 'dialog' || c.kind === 'page') {
+      out.ok = true;
+      out.candidates = c.candidates;
+    }
+    logBehavior('followers_open_attempt', { via, kind: c.kind, linkCount: c.linkCount, dom });
+    return out.ok;
+  };
+
+  // ── S1：JS 直接点「N followers」那个元素（它可能是 span/div，不是 a，所以锚点式点击没戏） ──
+  try {
+    await gotoOwnProfile(me);
+    const clicked = await page
+      .evaluate((meArg: string) => {
+        try {
+          if (!new RegExp(`^/${meArg}/?$`, 'i').test(location.pathname)) return 'not_on_profile';
+        } catch { return 'bad_path'; }
+        const h: any = document.querySelector('header');
+        const all = h ? h.querySelectorAll('*') : [];
+        let deepest: any = null;
+        for (let i = 0; i < all.length; i++) {
+          const t = String(all[i].textContent || '').replace(/\s+/g, ' ').trim();
+          if (t.length <= 30 && /^[\d.,]+[KkMm]?\s+followers?$/i.test(t)) deepest = all[i];
+        }
+        if (!deepest) return 'no_stat_el';
+        let target = deepest;
+        for (let up = 0; up < 6 && target; up++) {
+          const role = String(target.getAttribute('role') || '');
+          const tag = String(target.tagName || '');
+          if (tag === 'A' || tag === 'BUTTON' || role === 'button' || role === 'link') break;
+          target = target.parentElement;
+        }
+        if (!target || !target.click) return 'no_clickable_ancestor';
+        try { target.click(); } catch { return 'click_threw'; }
+        return 'clicked:' + String(target.tagName) + '|' + String(target.getAttribute('role') || '');
+      }, me)
+      .catch(() => 'eval_failed');
+    logBehavior('followers_open_click_stat', { me, result: String(clicked).slice(0, 80) });
+    if (String(clicked).startsWith('clicked')) {
+      await page.waitForSelector('div[role="dialog"]', { timeout: 8000 }).catch(() => {});
+      await page.waitForTimeout(jitter(1200, 2400));
+      if (await settle('click_stat')) return out;
+    }
+  } catch {}
+
+  // ── S2：Playwright 真实鼠标点 header 里的 followers 文本 ──
+  try {
+    let p2 = '';
+    try { p2 = new URL(page.url()).pathname; } catch {}
+    if (!/\/followers\/?$/i.test(p2)) await gotoOwnProfile(me);
+    const t = page.locator('header').getByText(/\bfollowers\b/i).first();
+    if ((await t.count().catch(() => 0)) > 0) {
+      await t.click({ timeout: 8000, force: true }).catch(() => {});
+      await page.waitForTimeout(jitter(1200, 2400));
+      if (await settle('click_text')) return out;
+    }
+  } catch {}
+
+  // ── S3：老路径（点 a[href*=followers]，线上已证实不存在，留作兜底） ──
+  try {
+    const a = page.locator('a[href*="/followers/"]').first();
+    if ((await a.count().catch(() => 0)) > 0) {
+      await a.click({ timeout: 8000 }).catch(() => {});
+      await page.waitForTimeout(jitter(1200, 2400));
+      if (await settle('click_anchor')) return out;
+    }
+  } catch {}
+
+  // ── S4：深链兜底（已知不弹窗；但整页版仍可能可用，靠 settle 的 kind 判定） ──
+  try {
+    await page.goto(`${IG_BASE}/${me}/followers/`, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
+    await page.waitForSelector('div[role="dialog"]', { timeout: 6000 }).catch(() => {});
+    await page.waitForTimeout(jitter(2500, 4500));
+    if (await settle('route')) return out;
+  } catch {}
+
+  return out;
 };
 const checkIncomingFollowBacks = async () => {
   try {
@@ -1829,6 +2023,33 @@ const checkIncomingFollowBacks = async () => {
           const h = String((aEls[i] as any)?.getAttribute('href') || '');
           if (/followers|following/i.test(h)) followerHrefs.push(h.slice(0, 40));
         }
+        // 2026-09-22：`followerHrefs` 恒为空 ⇒ `27 followers` **不是 <a>** ⇒「点锚点」这条路
+        //   从根上不通，得知道该点谁。这里把那个元素的**真实标签 / role / 外层 HTML** 采回来，
+        //   外加 header 内所有 <a> 的 href（确认 IG 是否把 stats 挪进了别的结构）。
+        //   全部用 for 循环，不在 evaluate 里写具名函数（见 EVAL_SHIM_SRC 的教训）。
+        const headerLinks: string[] = [];
+        const hA = headerEl ? headerEl.querySelectorAll('a[href]') : [];
+        for (let i = 0; i < hA.length && headerLinks.length < 8; i++) {
+          headerLinks.push(String((hA[i] as any)?.getAttribute('href') || '').slice(0, 40));
+        }
+        let statTag = '';
+        let statRole = '';
+        let statHref = '';
+        let statOuter = '';
+        if (headerEl) {
+          const allEls = headerEl.querySelectorAll('*');
+          let deepest: any = null;
+          for (let i = 0; i < allEls.length; i++) {
+            const t = String((allEls[i] as any)?.textContent || '').replace(/\s+/g, ' ').trim();
+            if (t.length <= 30 && /^[\d.,]+[KkMm]?\s+followers?$/i.test(t)) deepest = allEls[i];
+          }
+          if (deepest) {
+            statTag = String(deepest.tagName || '');
+            statRole = String(deepest.getAttribute?.('role') || '');
+            statHref = String(deepest.getAttribute?.('href') || '').slice(0, 60);
+            statOuter = String(deepest.outerHTML || '').replace(/\s+/g, ' ').slice(0, 220);
+          }
+        }
         let embedJoint = '';
         const jEls = document.querySelectorAll('script[type="application/json"]');
         for (let i = 0; i < jEls.length && embedJoint.length < 2000000; i++) embedJoint += String((jEls[i] as any)?.textContent || '');
@@ -1846,6 +2067,11 @@ const checkIncomingFollowBacks = async () => {
           headerText,
           liTexts,
           followerHrefs,
+          headerLinks,
+          statTag,
+          statRole,
+          statHref,
+          statOuter,
           embedded,
         };
       }).catch(() => null);
@@ -1858,25 +2084,23 @@ const checkIncomingFollowBacks = async () => {
         probe,
       });
     } catch {}
-    if (!doSweep) return; // 仅轻探针：读完粉丝数就收工，不开 Followers 弹窗
-    const followersLink = page.locator('a[href*="/followers/"]').first();
-    // 入口：优先点锚点；线上实测该锚点不存在 ⇒ 退回直接开 /followers/ 路由（IG web 支持深链开弹窗）。
-    const hadAnchor = (await followersLink.count()) > 0;
-    if (hadAnchor) await followersLink.click({ timeout: 8000 }).catch(() => {});
-    else await page.goto(`${IG_BASE}/${me}/followers/`, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
-    await page.waitForTimeout(jitter(2000, 4000));
-    // 🔴 必须确认弹窗真的开了才枚举：没开还去枚举 = 把主页上的杂链接当成「新粉」
-    //   ⇒ 误判 + 乱回关（外部动作，代价最高）。没开就记一条并收工。
-    const dialogOpen = (await page.locator('div[role="dialog"]').count().catch(() => 0)) > 0;
-    if (!dialogOpen) {
-      logBehavior('own_followers_sweep_no_dialog', { handle: me, via: hadAnchor ? 'anchor' : 'route', href: page.url().slice(0, 120) });
+    if (!doSweep) return; // 仅轻探针：读完粉丝数就收工，不开 Followers 列表
+    // 🔴 入口统一走 openFollowersList（S1 JS 点 stat 元素 → S2 真实鼠标点文本 → S3 老锚点 → S4 深链）。
+    //   每次尝试都打 `followers_open_attempt`（含容器类型 / 链接数 / stat 元素真实标签）。
+    const opened = await openFollowersList(me);
+    logBehavior('own_followers_sweep', {
+      handle: me, via: opened.via, ok: opened.ok,
+      candidateCount: opened.candidates.length, diag: opened.diag,
+    });
+    // 🔴 列表没真打开就**必须收工**：没开还去枚举 = 把主页杂链接当成「新粉」⇒ 误判 + 乱回关。
+    if (!opened.ok) {
+      logBehavior('own_followers_sweep_no_dialog', {
+        handle: me, via: opened.via, href: page.url().slice(0, 120), diag: opened.diag,
+      });
       return;
     }
-    const handles = await page.locator('a[href^="/"]').evaluateAll((els: any[]) =>
-      els.map((e) => (e.getAttribute('href') || '').replace(/[?#].*$/, '').replace(/^\/+|\/+$/g, ''))
-        .filter((h: string) => /^[A-Za-z0-9._]{2,30}$/.test(h) && !['p', 'reel', 'explore', 'accounts', 'direct', 'tv', 'stories', 'saved', 'reels', 'popular'].includes(h))
-    ).catch(() => []);
-    const sample = (handles || []).filter(isRealHandle).slice(0, 40);
+    // 候选只来自**已确认的容器**（弹窗 / 整页列表），不再全页扫 a[href^="/"]。
+    const sample = opened.candidates.filter(isRealHandle).slice(0, 40);
     const selfIds = new Set([BOT_ID, ...(ACCOUNT_IDS || [])].map((x) => String(x).toLowerCase()));
     const newFans: string[] = []; // 🔁 收集本轮新粉，关弹窗后统一礼貌回关（避免逐个导航打断列表枚举）
     for (const h of sample) {
