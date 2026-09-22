@@ -728,6 +728,22 @@ let running = true;
 let browser: Browser | null = null;
 let context: BrowserContext | null = null;
 let page: Page | null = null;
+// 🔴 2026-09-22（线上实证）：页面被**关闭**之后，`page` 变量仍是非 null 的「已关闭对象」
+//   ⇒ 全文所有 `if (!page) return ...` 判空守卫**全部失效** ⇒ pollLoop 无限静默失败
+//   （本次实测：08:46:19Z 抛 `Target page, context or browser has been closed`，
+//    该轮 4 个目标全 `total:-1`，随后 `gotoOwnProfile` 3 次卡在 `/tattoo.jitsu/`）。
+//   修法：挂 `close` 监听把 `page` 置空 —— 这样**既有的**「page 为空 ⇒
+//   pollLoop 里 `await ensureBrowser()` 重建」路径自动生效，不必改 40 处判空点。
+const attachPageCloseGuard = (p: Page) => {
+  try {
+    p.on('close', () => {
+      if (page === p) {
+        page = null as any;
+        console.log('[bot-real] page closed by remote → cleared `page`, next cycle will rebuild');
+      }
+    });
+  } catch {}
+};
 // Cloud behavior log buffer — flushed during heartbeat
 const behaviorBuffer: Record<string, any>[] = [];
 const FLUSH_AT = 20; // flush every 20 events
@@ -1311,6 +1327,11 @@ const rapportLikePosts = async (handle: string, n: number, countRapport = true):
             dlg: document.querySelectorAll('[role="dialog"]').length,
             likeAny: document.querySelectorAll('[aria-label="Like"]').length,
             unlikeAny: document.querySelectorAll('[aria-label="Unlike"]').length,
+            // 🔴 2026-09-22：作用域**内**的计数（与点击后的回读同口径）⇒ 才能做
+            //   「点击前 like 3 / 点击后 like 2 且 unlike +1」这种**同作用域差分**判定，
+            //   不靠页面级计数（会被背景网格污染）。纯观测，不影响判定。
+            likeInScope: scope.querySelectorAll('[aria-label="Like"]').length,
+            unlikeInScope: scope.querySelectorAll('[aria-label="Unlike"]').length,
           };
         }).catch(() => ({ reason: 'eval_failed' }));
         lastRapportLikeProbe = { handle, idx: i, ...(pick || {}) };
@@ -1326,18 +1347,49 @@ const rapportLikePosts = async (handle: string, n: number, countRapport = true):
           await likeBtn.click({ timeout: 6000 }).catch(() => {});
           await page.waitForTimeout(jitter(1200, 2400));
           // 复核**被点元素自身**（不是页面级 count）
-          const after = await page.evaluate(() => {
-            const e = document.querySelector('[data-bscan-plike="1"]');
-            if (!e) return 'gone';
-            return ((e.getAttribute('aria-label') || '').toLowerCase() === 'unlike') ? 'unliked' : 'still_like';
-          }).catch(() => 'eval_failed');
-          lastRapportLikeProbe = Object.assign({}, lastRapportLikeProbe || {}, { afterClick: after });
+          // 🔴 2026-09-22 观测加严（**不改判定**，先取证再定论）：`gone` 只说明
+          //   「我打的那个标记元素没了」—— 可能是 IG 点赞后 React 换掉了 svg 节点
+          //   （= 点了但复核跟丢），也可能是弹窗被关/页面导航。两种原因**同形**，
+          //   光看 `gone` 分不出来。所以同时回读**同一作用域内**的 Like/Unlike 计数，
+          //   与点击前的 `pick.likeInScope / pick.unlikeInScope` 做差分：
+          //   `like -1 且 unlike +1` ⇒ 强烈指向「真的赞上了」。
+          const afterR: any = await page.evaluate(() => {
+            const mark = document.querySelector('[data-bscan-plike="1"]');
+            const scope = (document.querySelector('[role="dialog"] article')
+              || document.querySelector('article')
+              || document.querySelector('[role="dialog"]')
+              || document) as ParentNode;
+            const st = !mark
+              ? 'gone'
+              : (((mark.getAttribute('aria-label') || '').toLowerCase() === 'unlike') ? 'unliked' : 'still_like');
+            return {
+              state: st,
+              likeInScope: scope.querySelectorAll('[aria-label="Like"]').length,
+              unlikeInScope: scope.querySelectorAll('[aria-label="Unlike"]').length,
+            };
+          }).catch(() => null);
+          const after = afterR ? afterR.state : 'eval_failed';
+          lastRapportLikeProbe = Object.assign({}, lastRapportLikeProbe || {}, {
+            afterClick: after,
+            likeInScopeAfter: afterR ? afterR.likeInScope : null,
+            unlikeInScopeAfter: afterR ? afterR.unlikeInScope : null,
+            // 差分是「点击是否真落地」的直接证据（同作用域、同口径）
+            scopeDelta: afterR
+              ? `${Number(pick?.likeInScope)}→${afterR.likeInScope} / ${Number(pick?.unlikeInScope)}→${afterR.unlikeInScope}`
+              : null,
+          });
           if (after === 'unliked') {
             liked++;
             if (countRapport) recordRapport();
             recordInteraction(handle, 'like', { rapport: true, reason: 'follow_back_ladder' }).catch(() => {});
           } else {
-            logBehavior('rapport_like_click_no_effect', { handle, clickedIdx: i, after, probe: pick });
+            logBehavior('rapport_like_click_no_effect', {
+              handle,
+              clickedIdx: i,
+              after,
+              scopeDelta: (lastRapportLikeProbe as any).scopeDelta,
+              probe: pick,
+            });
           }
         } else if (unlikeCount > 0) {
           // 🔴 2026-09-21 定案：probe 8/8 次全是 `likeSvg 0 / unlikeSvg ≥1 / article 1 / dialog 1`
@@ -3833,6 +3885,7 @@ const ensureBrowser = async () => {
         for (const p of ((context as any).pages?.() || [])) {
           if (p !== page) { try { await p.close(); } catch {} }
         }
+        if (page) attachPageCloseGuard(page);
         await page.bringToFront().catch(() => {});
         if (page) await installEvalShim(page);
         console.log('[bot-real] launched persistent browser (stealth mode)');
@@ -3892,6 +3945,7 @@ const ensureBrowser = async () => {
         } catch {}
         await page.goto(IG_BASE, { waitUntil: 'domcontentloaded', timeout: 45000 });
       }
+      if (page) attachPageCloseGuard(page);
       await page.bringToFront().catch(() => {});
       if (page) await installEvalShim(page);
       // 🔴 2026-09-22（用户口径：「因为窗口大小可能会变化的，所以要把实际落点找到」）：
@@ -6495,7 +6549,12 @@ const pollLoop = async () => {
         // 🔴 2026-09-17：page 为 null 时**先尝试重建浏览器**再决定跳过。
         // 旧写法直接 `if (!page || ...) continue`，而 pollLoop 全程没有 ensureBrowser 调用点
         // ⇒ 一旦 page 被置空（见上面任务失败分支），这里就无限跳过：心跳在、任务永不动。
-        if (!page) {
+        // 🔴 2026-09-22 加严：**只判 null 不够**。「页面被远端关掉」时 `page` 仍是那个
+        //   已关闭的对象（非 null）⇒ 判空守卫全部失效 ⇒ 与上面同一种「心跳在、任务永不动」。
+        //   实测：08:46:19Z 抛 `Target page, context or browser has been closed`，
+        //   随后该轮 4 个目标 `total:-1`、`gotoOwnProfile` 3 次卡在 `/tattoo.jitsu/`。
+        //   所以这里同时判 `isClosed()`（另有 `attachPageCloseGuard` 把它置空，双保险）。
+        if (!page || (page as any).isClosed?.()) {
           try {
             await ensureBrowser();
           } catch (e: any) {
