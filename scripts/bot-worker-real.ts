@@ -1750,11 +1750,74 @@ const reciprocalFollowBack = async (handle: string): Promise<boolean> => {
     }
     const followSelectors = ['header button', 'header div[role="button"]', 'main button', 'main div[role="button"]', 'button', 'div[role="button"]'];
     let followBtn: any = null;
+    let followVia = '';
     for (const sel of followSelectors) {
       const cand = page.locator(sel).filter({ hasText: /^\s*Follow(\s+Back)?\s*$/i }).first();
-      if ((await cand.count()) > 0) { followBtn = cand; break; }
+      if ((await cand.count()) > 0) { followBtn = cand; followVia = 'hasText:' + sel; break; }
     }
-    if (!followBtn) { logBehavior('reciprocal_follow_btn_not_found', { handle }); return false; }
+    // 🔴 2026-09-22：上面 6 条 textContent 精确匹配在 IG 现行版式上 **3/3 全失败**
+    //   （melaniekehoe / devinktattoos / tattoosbyaslowpoke 均落 `reciprocal_follow_btn_not_found`，
+    //   而同一轮里 `captureProfileFacts` 明明读到了 bio ⇒ 页面没问题、是「按钮匹配不上」）。
+    //   最可能的原因：IG 往按钮文本里插了零宽字符 —— JS 的 `\s` **不匹配** U+200B/U+FEFF，
+    //   于是 `^\s*Follow\s*$` 这种整串匹配必然失败。
+    //   ⇒ 新增一条 JS 扫描策略：把 textContent / aria-label 里的空白+零宽字符归一后再比，
+    //   仍要求**整串**等于 Follow / Follow Back，且元素可见（≥8px）；命中后打 data 标记，
+    //   再交给 Playwright 真点（不用 JS 直接 click()，保证发出的是真实鼠标事件）。
+    if (!followBtn) {
+      try {
+        const found: any = await page.evaluate(`(() => {
+          try {
+            const RX = /^[\\s\\u200b\\u200c\\u200d\\ufeff]*Follow(\\s+Back)?[\\s\\u200b\\u200c\\u200d\\ufeff]*$/i;
+            const norm = (s) => String(s || '').replace(/[\\s\\u200b\\u200c\\u200d\\ufeff]+/g, ' ').trim();
+            const els = document.querySelectorAll('button, div[role="button"], a[role="button"]');
+            let i = 0;
+            while (i < els.length) {
+              const e = els[i];
+              const t = norm(e.textContent);
+              const al = norm(e.getAttribute('aria-label'));
+              if (RX.test(t) || RX.test(al)) {
+                const r = e.getBoundingClientRect();
+                if (r.width >= 8 && r.height >= 8) {
+                  e.setAttribute('data-bot-follow-target', '1');
+                  return { ok: true, tag: e.tagName, role: e.getAttribute('role') || '', text: t.slice(0, 30), aria: al.slice(0, 30) };
+                }
+              }
+              i = i + 1;
+            }
+            return { ok: false, scanned: els.length, hasHeader: !!document.querySelector('header'), hasMain: !!document.querySelector('main') };
+          } catch (err) { return { ok: false, err: String(err) }; }
+        })()`).catch(() => null);
+        if (found && found.ok) {
+          followBtn = page.locator('[data-bot-follow-target="1"]').first();
+          followVia = 'scan:' + found.tag;
+          logBehavior('follow_btn_scan_hit', { handle, tag: found.tag, role: found.role, text: found.text, aria: found.aria });
+        } else {
+          logBehavior('follow_btn_scan_miss', { handle, scan: found });
+        }
+      } catch {}
+    }
+    if (!followBtn) {
+      // 🔴 兜底自证：把所有可点元素的真实文本/aria 全 dump（上限 25 条）。下一次失败就能直接
+      //   看出 Follow 按钮用的是哪个标签、文本被什么污染了 —— 不用再靠猜。
+      const btnDump = await page.evaluate(`(() => {
+        try {
+          const norm = (s) => String(s || '').replace(/[\\s\\u200b\\u200c\\u200d\\ufeff]+/g, ' ').trim();
+          const out = [];
+          const els = document.querySelectorAll('button, div[role="button"], a[role="button"]');
+          let i = 0;
+          while (i < els.length && out.length < 25) {
+            const e = els[i];
+            const t = norm(e.textContent);
+            const al = norm(e.getAttribute('aria-label'));
+            if (t || al) out.push({ tag: e.tagName, role: e.getAttribute('role') || '', text: t.slice(0, 40), aria: al.slice(0, 40), inHeader: !!e.closest('header'), inMain: !!e.closest('main') });
+            i = i + 1;
+          }
+          return { url: location.href.slice(0, 140), count: els.length, hasHeader: !!document.querySelector('header'), hasMain: !!document.querySelector('main'), items: out };
+        } catch (err) { return { err: String(err) }; }
+      })()`).catch(() => null);
+      logBehavior('reciprocal_follow_btn_not_found', { handle, via: 'all_failed', btnDump });
+      return false;
+    }
     await followBtn.click({ timeout: 6000 });
     await page.waitForTimeout(jitter(1200, 2400));
     // 🛑 限制信号检测（回关也可能触发 "Try again later"）
@@ -1766,7 +1829,7 @@ const reciprocalFollowBack = async (handle: string): Promise<boolean> => {
     st.followedAt = Date.now();
     likeState.follows!.byHandle![handle] = st;
     saveLikeState(likeState);
-    logBehavior('reciprocal_follow_done', { handle, dayCount: likeState.follows!.byDay![dayKey], dayCap: cap });
+    logBehavior('reciprocal_follow_done', { handle, dayCount: likeState.follows!.byDay![dayKey], dayCap: cap, via: followVia });
     recordInteraction(handle, 'follow', { reciprocated: true, followedAt: Date.now() }).catch(() => {});
     return true;
   } catch { return false; }
