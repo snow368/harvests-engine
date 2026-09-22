@@ -2282,6 +2282,33 @@ const checkCommentEngagers = async () => {
         out.push({ handle: href, text });
       }
       const body = document.body ? (document.body.innerText || '') : '';
+      // 🔴 2026-09-22：旧 probe 只带 `raw.slice(0,4)` 当样本 —— 而通知页最前面几个 `a[href^="/"]`
+      //   全是**左侧导航**（`/`、`/reels/`、`/explore/`、`/direct/inbox/`）⇒ 每轮样本 = 导航垃圾，
+      //   真实通知类型**从未被看到过**（我据此误判过「通知页只有 liked 类」）。补两样硬证据：
+      //   ① textStats = 通知文案分类计数（页面到底有没有 replied 类，一次可判）
+      //   ② notifTexts = 通知行原文样本（含 handle + 文案，170 字符）
+      const bodyFlat = body.replace(/[\u00A0\u200B\u2060]/g, ' ');
+      const kw = [
+        'liked your comment', 'liked your reply',
+        'replied to your comment', 'replied to your reply',
+        'responded to your comment', 'commented:', 'started following you', 'mentioned you',
+      ];
+      const textStats: Record<string, number> = {};
+      for (const k of kw) {
+        const m = bodyFlat.match(new RegExp(k, 'gi'));
+        if (m) textStats[k] = m.length;
+      }
+      const notifTexts: string[] = [];
+      const seenT = new Set<string>();
+      for (const r of out) {
+        if (r.text.length < 12) continue;
+        if (!/comment|repl|following|mention|liked/i.test(r.text)) continue;
+        const one = `${r.handle}|${r.text.slice(0, 170)}`;
+        if (seenT.has(one)) continue;
+        seenT.add(one);
+        if (notifTexts.length >= 12) break;
+        notifTexts.push(one);
+      }
       return {
         rows: out,
         probe: {
@@ -2293,6 +2320,8 @@ const checkCommentEngagers = async () => {
           aHrefs: hrefSamples,
           loginWall: !!document.querySelector('input[name="username"]') || /\/accounts\/login/.test(location.pathname),
           hasEngagerWord: /liked your comment|replied to your comment/i.test(body),
+          textStats,
+          notifTexts,
         } as Record<string, unknown>,
       };
     }).catch(() => ({
@@ -2308,12 +2337,25 @@ const checkCommentEngagers = async () => {
     // 🔴 2026-09-19：空结果也必须打点。不打点就无法区分「真没人互动」和「通知页正则失配」——
     // 这两种情况的修法完全相反（等 vs 改正则）。此前这里只有一句裸 `return`，
     // 所以 comment_engager_* 全为 0 行时，我们查不出原因。
+    const hitLiked = raw.filter((r) => /liked your (comment|reply)/i.test(r.text));
+    const hitReplied = raw.filter((r) => /replied to your (comment|reply)/i.test(r.text));
+    const setLiked = new Set(hitLiked.map((r) => r.handle));
+    const setReplied = new Set(hitReplied.map((r) => r.handle));
     logBehavior('comment_engager_scan', {
       navOk,
       scanned: raw.length,
       engagers: engagers.length,
-      // 命中样本：一次就能看出正则是不是把「跨条容器文本」也算成了互动者（假阳性）
-      samples: raw.slice(0, 4).map((r) => `${r.handle}|${r.text.slice(0, 90)}`),
+      // 🔴 2026-09-22：`samples: raw.slice(0,4)` 永远是左侧导航 ⇒ 真实通知类型看不见。
+      //   改为「分类计数 + 命中优先取样」，一轮就能判定通知页有无 replied 类通知。
+      hitKinds: { liked: hitLiked.length, replied: hitReplied.length },
+      engagerKinds: {
+        liked: engagers.filter((h) => setLiked.has(h)).length,
+        replied: engagers.filter((h) => setReplied.has(h)).length,
+      },
+      samples: [
+        ...hitReplied.slice(0, 4).map((r) => `R|${r.handle}|${r.text.slice(0, 150)}`),
+        ...hitLiked.slice(0, 4).map((r) => `L|${r.handle}|${r.text.slice(0, 150)}`),
+      ],
       tracked: Object.keys(likeState.follows?.byHandle || {}).length,
       probe: {
         ...(scannedPage.probe as Record<string, unknown>),
