@@ -1254,10 +1254,13 @@ const recordRapport = () => {
 const rapportLikePosts = async (handle: string, n: number, countRapport = true): Promise<number> => {
   if (!page) return 0;
   try {
+    lastRapportLikeProbe = { handle, total: -1 }; // 先清空，防「上次调用的残留」被当成本次证据
     await openProfile(handle);
     await page.waitForTimeout(jitter(1500, 3000));
     const posts = page.locator('a[href*="/p/"]');
     const total = await posts.count();
+    // total=0 = 主页没加载出帖子（最常见病因）；写进 probe，下一轮判读不用猜。
+    lastRapportLikeProbe = { handle, total };
     let liked = 0;
     // 2026-09-21：已赞（弹窗里只有 Unlike）算「目的已达成」，与 liked 一并计入返回值，
     //   让调用方写状态、停止重试。**不**记 rapport 预算，因为没真的消耗一次点赞额度。
@@ -1266,25 +1269,62 @@ const rapportLikePosts = async (handle: string, n: number, countRapport = true):
       try {
         await posts.nth(i).click({ timeout: 8000 });
         await page.waitForTimeout(jitter(1500, 3000));
-        // 选择器放宽到 `[aria-label="Like"]`（不再只认 svg 子标签，IG 换形状也能命中）
-        const likeBtn = page.locator('[aria-label="Like"]').first();
-        const likeSvgCount = await page.locator('[aria-label="Like"]').count().catch(() => 0);
-        const unlikeCount = await page.locator('[aria-label="Unlike"]').count().catch(() => 0);
+        // 🔴 2026-09-22 三修（用户口径：「要核下这几个点能不能准确 click 到并执行」）：
+        //   §1 **定位不再用页面级 `[aria-label="Like"]`**。旧码 `page.locator('[aria-label="Like"]').first()`
+        //      取的是**全页 DOM 顺序第一个** Like —— 而帖子弹窗打开时**背景 profile 网格仍在 DOM 里**
+        //      ⇒ `.first()` 可能命中背景元素，点了等于赞错东西（或什么都没赞，却记 liked）。
+        //   §2 **复核不再用页面级 count**。旧码 `unlikeAfter = page.locator('[aria-label="Unlike"]').count() > 0`
+        //      只要页面**任何位置**有一个已赞元素就恒真 ⇒ 复核形同虚设，回到假阳性
+        //      （我上一版刚加的复核等于没加）。
+        //   §3 `already` 判定同样受页面级 count 污染 ⇒ 背景有已赞帖时会把「其实没赞过」判成
+        //      already ⇒ 状态记完成、永不重试 = **漏赞**。
+        //   改法：evaluate 里**限定作用域**（优先「弹窗内的 article」= 刚打开的帖子弹窗，
+        //   退到 article → dialog → document）**打标记**，再让 Playwright 点那个**唯一标记元素**，
+        //   复核**该元素自身**的 aria-label 是否翻成 `Unlike`。定位-点击-复核三者锚在同一个元素上。
+        const pick: any = await page.evaluate(() => {
+          // 清上轮残留标记（幂等）：跨帖残留会让 `.first()` 点到**上一帖**的图标。
+          document.querySelectorAll('[data-bscan-plike]').forEach((e) => e.removeAttribute('data-bscan-plike'));
+          const scope = (document.querySelector('[role="dialog"] article')
+            || document.querySelector('article')
+            || document.querySelector('[role="dialog"]')
+            || document) as ParentNode;
+          const like = scope.querySelector('[aria-label="Like"]');
+          const unlike = scope.querySelector('[aria-label="Unlike"]');
+          if (like) like.setAttribute('data-bscan-plike', '1');
+          return {
+            reason: like ? 'like' : (unlike ? 'already' : 'none'),
+            scope: scope === document ? 'document' : (scope as Element).tagName,
+            art: document.querySelectorAll('article').length,
+            dlg: document.querySelectorAll('[role="dialog"]').length,
+            likeAny: document.querySelectorAll('[aria-label="Like"]').length,
+            unlikeAny: document.querySelectorAll('[aria-label="Unlike"]').length,
+          };
+        }).catch(() => ({ reason: 'eval_failed' }));
+        lastRapportLikeProbe = { handle, idx: i, ...(pick || {}) };
+        const likeSvgCount = pick && pick.reason === 'like' ? 1 : 0;
+        const unlikeCount = pick && pick.reason === 'already' ? 1 : 0;
         if (likeSvgCount > 0) {
           // 🔴 2026-09-22：与 `likeHandleCommentHere` 同一个坑 —— 点击失败被 `.catch` 吞掉后
           //   **无条件计数**。CDP 模式视口 = 外部 Chrome 真实窗口（`start-bots.bat` 没给
           //   `--window-size`，RDP 会话变化会挤小）⇒ 弹窗里的 Like 可能被裁出视口/被遮挡
           //   ⇒ 点空也照样 `liked++` = 「账 E 记了一笔、对方却没收赞」。改为点击后复核。
+          const likeBtn = page.locator('[data-bscan-plike="1"]').first();
           await likeBtn.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
           await likeBtn.click({ timeout: 6000 }).catch(() => {});
           await page.waitForTimeout(jitter(1200, 2400));
-          const unlikeAfter = await page.locator('[aria-label="Unlike"]').count().catch(() => 0);
-          if (unlikeAfter > 0) {
+          // 复核**被点元素自身**（不是页面级 count）
+          const after = await page.evaluate(() => {
+            const e = document.querySelector('[data-bscan-plike="1"]');
+            if (!e) return 'gone';
+            return ((e.getAttribute('aria-label') || '').toLowerCase() === 'unlike') ? 'unliked' : 'still_like';
+          }).catch(() => 'eval_failed');
+          lastRapportLikeProbe = Object.assign({}, lastRapportLikeProbe || {}, { afterClick: after });
+          if (after === 'unliked') {
             liked++;
             if (countRapport) recordRapport();
             recordInteraction(handle, 'like', { rapport: true, reason: 'follow_back_ladder' }).catch(() => {});
           } else {
-            logBehavior('rapport_like_click_no_effect', { handle, clickedIdx: i, likeBefore: likeSvgCount, unlikeAfter });
+            logBehavior('rapport_like_click_no_effect', { handle, clickedIdx: i, after, probe: pick });
           }
         } else if (unlikeCount > 0) {
           // 🔴 2026-09-21 定案：probe 8/8 次全是 `likeSvg 0 / unlikeSvg ≥1 / article 1 / dialog 1`
@@ -2564,23 +2604,28 @@ const checkCommentEngagers = async () => {
         if (got > 0) {
           st.commentEngagerLikedAt = Date.now();
           saveLikeState(likeState);
-          logBehavior('comment_engager_like_back', { handle: h, liked: got, dayCount: engagerLikeToday(), dayCap: ENGAGER_LIKE_DAILY_MAX, ledger: 'E' });
+          logBehavior('comment_engager_like_back', { handle: h, liked: got, probe: lastRapportLikeProbe, dayCount: engagerLikeToday(), dayCap: ENGAGER_LIKE_DAILY_MAX, ledger: 'E' });
           await sleep(jitter(3000, 6000));
         } else if (ENGAGER_LIKE_DAILY_MAX > 0 && engagerLikeToday() >= ENGAGER_LIKE_DAILY_MAX) {
           // 账 E 用尽：只放弃本轮回赞，**不**标记完成（欠账可补），也不退出循环。
           logBehavior('comment_engager_like_quota_out', { handle: h, dayCount: engagerLikeToday(), dayCap: ENGAGER_LIKE_DAILY_MAX, ledger: 'E' });
+        } else {
+          // 🔴 2026-09-22：回赞失败且**不是**额度原因时，旧码在这条路径上**完全不留痕**
+          //   ⇒ 「回赞跑了但一次都没成」在线上不可见（正是用户问「有没有在做」时我答不上来的原因）。
+          //   成因：主页没加载出帖子 / 弹窗没开 / Like 被裁出视口 / 点击无效果 —— 全部由
+          //   probe（作用域+页面元素计数+after）区分。有了它才能「核实点没点到」。
+          logBehavior('comment_engager_like_miss', { handle: h, probe: lastRapportLikeProbe, dayCount: engagerLikeToday(), ledger: 'E' });
         }
       }
-      // ② 回关 = **回赞的从属动作**（2026-09-22 用户口径：「回赞，不是回关啊」）
-      //   只有在「本通道已成功回赞过 TA」之后才回关；回赞没做成 ⇒ 不回关。
-      //   这保证额度/失败时优先保回赞——正是用户要的方向（原实现恰好相反）。
-      if (!BOT_FOLLOW_BACK_ENABLED || st.followedAt || !st.commentEngagerLikedAt) continue;
-      const followed = await reciprocalFollowBack(h);
-      if (followed) {
-        logBehavior('comment_engager_follow', { handle: h });
-        recordInteraction(h, 'follow', { reason: 'comment_engager', subject: st.commentEngagerSubject || 'tattoo' }).catch(() => {});
-      }
-      await sleep(jitter(3000, 6000));
+      // ② 回关：**已按用户口径整段移除**（2026-09-22）。
+      //   用户原话：「怎么开了这个口子，关注都暂停了，只是被别人关注的才回关下」
+      //   + 更早的「回赞，不是回关啊，bot worker 在回关」。
+      //   本通道（评论互动者）原来会**无条件回关**（只要求已成功回赞过 TA + 未关注过），
+      //   等于**变相主动关注**：只要有人赞/评过我们的评论，就反过来去关注 TA，
+      //   **完全不看对方有没有关注我们** ⇒ 与 `BOT_FOLLOW_ENABLED=false`（主动关注永久关）
+      //   直接冲突。这就是用户反复指出的「bot 在回关」的那个口子。
+      //   ⇒ 回关的**唯一入口**收敛为 followers 列表通道（`incoming_follow_back`）：
+      //     先确证「对方关注了我们」，才回关。互动者若真关注了我们，自会走那条路。
     }
     // 5) Pass C（2026-09-22 用户口径：「给我们在别人作品下面发评论回评论的这个点赞」）
     //   replied 类通知 = 有人**回复了我们的评论** ⇒ 动作是「给那条回复点赞」。
@@ -2731,6 +2776,10 @@ const likeHandleCommentHere = async (handle: string): Promise<'liked' | 'already
     const picked: any = await page.evaluate((h) => {
       const out: any = { pickedAuthor: '', pickedText: '', likeEls: 0, rowsWithAuthor: 0, vw: window.innerWidth, vh: window.innerHeight, reason: 'no_target_row' };
       const tgt = String(h || '').toLowerCase();
+      // 清上轮残留标记（幂等）：Pass C 每轮都会重新 `goto`，正常不留残；但 `goto` 超时
+      // 被吞时页面会停在上一帖 ⇒ 残留标记会让 `.first()` 点到**上一个目标**
+      // （最坏 = 把对方的赞取消掉）。清一次成本 0。
+      document.querySelectorAll('[data-bscan-clike]').forEach((e) => e.removeAttribute('data-bscan-clike'));
       const icons = Array.from(document.querySelectorAll('svg[aria-label="Like"], svg[aria-label="Unlike"]'));
       out.likeEls = document.querySelectorAll('svg[aria-label="Like"]').length;
       out.unlikeEls = document.querySelectorAll('svg[aria-label="Unlike"]').length;
