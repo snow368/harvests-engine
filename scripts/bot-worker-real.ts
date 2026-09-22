@@ -1829,6 +1829,36 @@ const reciprocalFollowBack = async (handle: string): Promise<boolean> => {
         }
       } catch {}
     }
+    // 🔴 2026-09-22：`reciprocal_follow_btn_not_found` 实测 6 条里有 3 条**其实已经在关注**了
+    //   （btnDump 里那个元素的文本是 `FollowingDown chevron icon`）⇒ 不是「按钮匹配不到」，
+    //   是本来就没有 Follow 按钮。记成 already 并落 followedAt，别每轮再重复访问主页。
+    //   判据限定在 header 内（头像区），并要求整串以 Following / Requested 开头，
+    //   避免把页面上任何含 "Following" 的文案误判。
+    if (!followBtn) {
+      try {
+        const already: any = await page.evaluate(`(() => {
+          try {
+            const norm = (s) => String(s || '').replace(/[\\s\\u200b\\u200c\\u200d\\ufeff]+/g, ' ').trim();
+            const RX = /^(Following|Requested)($| |Down|chevron)/i;
+            const els = document.querySelectorAll('header button, header div[role="button"], header a[role="button"]');
+            let i = 0;
+            while (i < els.length) {
+              const t = norm(els[i].textContent) + ' ' + norm(els[i].getAttribute('aria-label'));
+              if (RX.test(t)) return { ok: true, text: t.slice(0, 40) };
+              i = i + 1;
+            }
+            return { ok: false, headerBtns: els.length };
+          } catch (err) { return { ok: false, err: String(err).slice(0, 120) }; }
+        })()`).catch(() => null);
+        if (already && already.ok) {
+          const st2 = (likeState.follows!.byHandle![handle] || (likeState.follows!.byHandle![handle] = {})) as any;
+          st2.followedAt = Date.now();
+          saveLikeState(likeState);
+          logBehavior('reciprocal_follow_already', { handle, text: already.text });
+          return false;
+        }
+      } catch {}
+    }
     if (!followBtn) {
       // 🔴 兜底自证：把所有可点元素的真实文本/aria 全 dump（上限 25 条）。下一次失败就能直接
       //   看出 Follow 按钮用的是哪个标签、文本被什么污染了 —— 不用再靠猜。
@@ -2515,6 +2545,9 @@ const checkCommentEngagers = async () => {
     //   不加 20~28h 延迟：对方回复我们的评论本身就是直接对话，当轮点赞最自然。
     //   日上限走独立账 D（不占账 B —— 账 B 已被 ①回扫 吃满，共用就恒 0）。
     for (const rp of repliedEngagers) {
+      // 通知页会把**我们自己的老 handle**（raiha8833）也解析成一条 —— 实测它在
+      // `comment_engager_reply_miss` 里出现过。明确排除自号，别去赞自己。
+      if (isOwnAccountHandle(rp.handle)) continue;
       const st = (likeState.follows!.byHandle![rp.handle] || (likeState.follows!.byHandle![rp.handle] = {})) as any;
       if (st.replyLikedAt) continue;
       // 失败退避：找不到那条回复（被删/被折叠）时 1h 内不重试，别回到「每轮重试」的老坑
@@ -2530,17 +2563,21 @@ const checkCommentEngagers = async () => {
       try {
         await page.goto(`${IG_BASE}/p/${rp.postCode}/`, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
         await page.waitForTimeout(jitter(2000, 3500));
+        // 🔴 2026-09-22：回复默认**折叠**（`View 1 reply` / `View all 1 reply` / `查看全部1条回复`）。
+        //   不先展开，那条回复根本不在 DOM 里 ⇒ likeHandleCommentHere 必然 miss。
+        const ex = await expandCollapsedThreads(2);
+        if (ex.clicked) await page.waitForTimeout(jitter(800, 1600));
         const res = await likeHandleCommentHere(rp.handle);
         if (res === 'miss') {
           st.replyLikeMissAt = Date.now();
           saveLikeState(likeState);
-          logBehavior('comment_engager_reply_miss', { handle: rp.handle, postCode: rp.postCode });
+          logBehavior('comment_engager_reply_miss', { handle: rp.handle, postCode: rp.postCode, expandClicked: ex.clicked, expandSeen: ex.seen, pick: lastCommentLikeProbe });
         } else {
           st.replyLikedAt = Date.now();
           st.replyLikedResult = res;
           saveLikeState(likeState);
           if (res === 'liked') recordReplyLike();
-          logBehavior('comment_engager_reply_like', { handle: rp.handle, postCode: rp.postCode, result: res, dayCount: replyLikeToday(), dayCap: REPLY_LIKE_DAILY_MAX });
+          logBehavior('comment_engager_reply_like', { handle: rp.handle, postCode: rp.postCode, result: res, expandClicked: ex.clicked, expandSeen: ex.seen, pick: lastCommentLikeProbe, dayCount: replyLikeToday(), dayCap: REPLY_LIKE_DAILY_MAX });
         }
       } catch {}
       await sleep(jitter(3000, 6000));
@@ -2578,30 +2615,107 @@ const POST_BACKSCAN_TICK = Math.max(1, Number(process.env.BOT_POST_BACKSCAN_TICK
 // 🔴 2026-09-21：原来只认 `svg[aria-label="Like"]` —— 评论**已赞**时按钮是 `Unlike`
 //   ⇒ 永远走 `return false` ⇒ 调用方不记状态 ⇒ 每轮对同一条回复重试（与 `rapportLikePosts`
 //   同一个 bug 家族；实测 `likedComment:false` 里有相当比例属于这类）。
+// ── 展开折叠的「回复 / 更多评论」────────────────────────────────────────────
+// 🔴 2026-09-22：IG 会把评论下的回复折叠成**一条链接**，文案随版本/语言变：
+//   `View 1 reply` / `View all 1 reply` / `View all 2 replies` / `查看全部1条回复`。
+//   折叠状态下那条回复**根本不在 DOM 里** ⇒ 后面怎么找 Like 按钮都必然 miss。
+//   旧正则只认 `view all N comments` / `view N repl` / `view all replies` / `view replies`，
+//   而 **`View all 1 reply`（数字夹在 all 与 reply 中间）四条一条都不匹配**。旁证：同一批
+//   `post_backscan_scanned` 探针 `hasViewAll: false` 60/60，而同批 `likeAriaEn>0` 53/60
+//   证明界面是英文（不是语言问题），所以是正则漏形态，不是 locale 问题。这里补齐
+//   「数字可有可无」并加中文/西语兜底；命中要求**自身文本 ≤ 40 字符**（排除把整块评论区
+//   当成按钮的容器误点），可见（≥8px）后打 data 标记再交给 Playwright 真点。
+const expandCollapsedThreads = async (maxRounds = 2): Promise<{ clicked: number; seen: number }> => {
+  let clicked = 0;
+  let seen = 0;
+  if (!page) return { clicked, seen };
+  try {
+    for (let round = 0; round < maxRounds; round++) {
+      const found: any = await page.evaluate(`(() => {
+        try {
+          const RX = /view\\s+(all\\s+)?\\d*\\s*repl(y|ies)|view\\s+(all\\s+)?\\d+\\s+comments?|view\\s+more\\s+comments?|查看(全部)?\\s*\\d*\\s*条?(回复|评论)|ver\\s+(los|las|todas?)|mostrar\\s+(más|mas)/i;
+          const els = document.querySelectorAll('button, span[role="button"], div[role="button"], span');
+          const marked = [];
+          let i = 0;
+          while (i < els.length && marked.length < 8) {
+            const e = els[i];
+            const t = String(e.textContent || '').replace(/[\\s\\u200b\\u200c\\u200d\\ufeff]+/g, ' ').trim();
+            if (t.length > 0 && t.length <= 40 && RX.test(t)) {
+              const r = e.getBoundingClientRect();
+              if (r.width >= 8 && r.height >= 8) { e.setAttribute('data-bot-expand', '1'); marked.push(t.slice(0, 40)); }
+            }
+            i = i + 1;
+          }
+          return { ok: marked.length > 0, count: marked.length, texts: marked };
+        } catch (err) { return { ok: false, count: 0, err: String(err).slice(0, 120) }; }
+      })()`).catch(() => null);
+      if (!found || !found.count) break;
+      seen = seen + found.count;
+      for (let i = 0; i < found.count; i++) {
+        const el = page.locator('[data-bot-expand="1"]').first();
+        if ((await el.count().catch(() => 0)) === 0) break;
+        const ok = await el.click({ timeout: 3000 }).then(() => true).catch(() => false);
+        if (ok) clicked++;
+        await page.evaluate(`(() => { const e = document.querySelector('[data-bot-expand="1"]'); if (e) e.removeAttribute('data-bot-expand'); })()`).catch(() => {});
+        await page.waitForTimeout(jitter(600, 1300));
+      }
+    }
+  } catch {}
+  return { clicked, seen };
+};
+
+// 最近一次「点赞某人评论」的定位自证：下一轮可直接核对点的是不是 TA 那一行。
+let lastCommentLikeProbe: Record<string, unknown> = {};
+// 🔴 2026-09-22：旧实现在「回复」场景会**点错按钮**。它从 `svg[aria-label="Like"]` 往上找
+//   第一个「含本 handle 链接」的祖先 —— 而 IG 把回复**嵌在父评论容器内部**：父评论（也就是
+//   我们自己那条评论）的 Like 图标在 DOM 顺序上更靠前，向上找总能碰到那个「同时包含回复者
+//   链接」的共同祖先 ⇒ 命中的是**我们自己评论的赞**，而不是目标回复（结果照样返回 liked，
+//   于是假成功、静默）。改为**按作者定位**：先把「评论行」界定成「最近的、恰好只有 1 个
+//   `<time>` 的祖先」（与 extractPostComments 的 nestedOf 同一套结构判据，已实测可用），
+//   再要求该行的**首个作者链接**等于目标 handle ⇒ 只认真正属于 TA 的那一行。
 const likeHandleCommentHere = async (handle: string): Promise<'liked' | 'already' | 'miss'> => {
   if (!page) return 'miss';
   try {
-    const found = await page.evaluate((h) => {
-      const mark = (sel: string, already: boolean) => {
-        for (const el of Array.from(document.querySelectorAll(sel))) {
-          if (el.getAttribute('data-bscan-clike')) continue;
-          let up = el.parentElement;
-          while (up && up !== document.body) {
-            if (up.querySelector(`a[href^="/${h}/"]`) || up.querySelector(`a[href="/${h}/"]`)) {
-              el.setAttribute('data-bscan-clike', already ? '2' : '1');
-              return true;
-            }
-            up = up.parentElement;
-          }
+    const picked: any = await page.evaluate((h) => {
+      const out: any = { pickedAuthor: '', pickedText: '', likeEls: 0, rowsWithAuthor: 0, reason: 'no_target_row' };
+      const tgt = String(h || '').toLowerCase();
+      const likeEls = Array.from(document.querySelectorAll('svg[aria-label="Like"]'));
+      out.likeEls = likeEls.length;
+      let best: Element | null = null;
+      let bestDepth = 99;
+      for (const el of likeEls) {
+        let n: Element | null = el.parentElement;
+        let depth = 0;
+        let row: Element | null = null;
+        while (n && n !== document.body && depth < 10) {
+          depth = depth + 1;
+          if (n.querySelectorAll('time').length === 1) { row = n; break; }
+          n = n.parentElement;
         }
-        return false;
-      };
-      const likeFound = mark('svg[aria-label="Like"]', false);
-      const unlikeFound = mark('svg[aria-label="Unlike"]', true);
-      return { likeFound, unlikeFound };
-    }, handle).catch(() => ({ likeFound: false, unlikeFound: false }));
-    if (found.unlikeFound && !found.likeFound) return 'already'; // 已赞 ⇒ 达成，别当失败
-    if (!found.likeFound) return 'miss';
+        if (!row) continue;
+        const a = row.querySelector('a[href^="/"]');
+        const href = ((a && a.getAttribute('href')) || '').replace(/[?#].*$/, '').replace(/^\/+|\/+$/g, '');
+        const au = /^[A-Za-z0-9._]{2,30}$/.test(href) ? href.toLowerCase() : '';
+        if (au !== tgt) continue;
+        out.rowsWithAuthor = out.rowsWithAuthor + 1;
+        if (depth < bestDepth) {
+          bestDepth = depth;
+          best = row;
+          out.pickedAuthor = au;
+          out.pickedText = String((row as HTMLElement).innerText || '').replace(/[\s\u200b\u200c\u200d\ufeff]+/g, ' ').trim().slice(0, 90);
+        }
+      }
+      if (best) {
+        const hit = best.querySelector('svg[aria-label="Like"]');
+        if (hit) { hit.setAttribute('data-bscan-clike', '1'); out.reason = 'like'; }
+        else if (best.querySelector('svg[aria-label="Unlike"]')) out.reason = 'already';
+        else out.reason = 'row_no_icon';
+      }
+      return out;
+    }, handle).catch(() => ({ reason: 'eval_failed' }) as any);
+    lastCommentLikeProbe = picked || {};
+    if (picked && picked.reason === 'already') return 'already'; // 已赞 ⇒ 达成，别当失败
+    if (!picked || picked.reason !== 'like') return 'miss';
     const btn = page.locator('svg[data-bscan-clike="1"]').first();
     if ((await btn.count()) === 0) return 'miss';
     await btn.click({ timeout: 6000 }).catch(() => {});
@@ -2853,19 +2967,9 @@ const backScanCommentedPosts = async (): Promise<void> => {
       await page.waitForTimeout(jitter(1800, 3200));
       postsVisited++;
 
-      // 展开折叠评论 + 全部 "View replies"，否则回复根本不在 DOM 里
-      try {
-        for (let round = 0; round < 2; round++) {
-          const expanders = page.locator('button, div[role="button"], span[role="button"]')
-            .filter({ hasText: /view all \d+ comments|view \d+ repl|view all replies|view replies/i });
-          const cnt = await expanders.count().catch(() => 0);
-          if (!cnt) break;
-          for (let i = 0; i < Math.min(cnt, 6); i++) {
-            await expanders.nth(i).click({ timeout: 3000 }).catch(() => {});
-            await page.waitForTimeout(jitter(700, 1400));
-          }
-        }
-      } catch {}
+      // 展开折叠评论 + 全部 "View replies"（含旧正则漏掉的 `View all 1 reply` 形态），
+      // 否则那条回复根本不在 DOM 里 ⇒ 点赞必然 miss。
+      const ex = await expandCollapsedThreads(2);
 
       // 等评论区真正渲染出来再抽（IG 是 SPA，domcontentloaded 后评论仍是异步来的；
       // 首轮 6/6 全 0 的另一种可能就是这个）。等不到也不报错，交给探针记录。
@@ -2912,6 +3016,8 @@ const backScanCommentedPosts = async (): Promise<void> => {
         postKey: item.key,
         postCode,
         codeResolved,
+        expandClicked: ex.clicked,
+        expandSeen: ex.seen,
         navOk,
         totalComments: comments.length,
         via: extracted.via,
@@ -2945,6 +3051,7 @@ const backScanCommentedPosts = async (): Promise<void> => {
             replier,
             likedComment,
             commentLikeResult: clr,
+            pick: lastCommentLikeProbe,
             likedPost,
             likeBackDayCount: likeBackToday(),
             likeBackDayCap: LIKE_BACK_DAILY_MAX,
