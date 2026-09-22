@@ -1442,13 +1442,25 @@ const likeBackEngager = async (handle: string): Promise<number> => {
   return got;
 };
 
+// 🔴 本号**历史 handle 别名**（2026-09-22 用户确认「raiha8833 是旧名，现在换新名了」）。
+//   为什么必须硬编码、不能只靠 env `BOT_ACCOUNT_IDS`：
+//   - IG 通知页里的 `X liked/replied to your comment` **会带我们的旧 handle**
+//     （实测 `comment_engager_reply_miss` 出现过 raiha8833、`rejudge` 把它判成 tattoo
+//      并**排进了回赞队列**），而线上 env 只有新名 ⇒ 那道门形同虚设；
+//   - 「这个号曾用名 X」是**不可变的历史事实**，不是运维配置 ⇒ 放代码里一次覆盖
+//     所有 ecosystem 配置（含 `ecosystem.matrix.config.cjs`），避免 env 与代码分叉。
+//   ⚠ 以后新增**另一个账号**仍走 env `BOT_ACCOUNT_IDS`（那是可变配置，别加到这儿）。
+const OWN_ACCOUNT_ALIASES = ['peachtattoosupplyraiha', 'raiha8833'];
+
 // 自己的账号绝不自我互动（2026-09-14 用户拍板）：回关队列/取粉来源里偶尔会把
 // 自己的账号混进来，必须显式拦掉，否则会跑去给自己账号的帖子写评论（一眼自嗨）。
 // 覆盖 handle 本体与帖子owner/co-author 两个层面。
 const isOwnAccountHandle = (raw: string): boolean => {
   const h = String(raw || '').trim().toLowerCase().replace(/^@/, '').split('/').filter(Boolean).pop() || '';
   if (!h) return false;
-  const selfIds = new Set([BOT_ID, ...(ACCOUNT_IDS || [])].map((x) => String(x).trim().toLowerCase()));
+  const selfIds = new Set(
+    [BOT_ID, ...OWN_ACCOUNT_ALIASES, ...(ACCOUNT_IDS || [])].map((x) => String(x).trim().toLowerCase()),
+  );
   return selfIds.has(h);
 };
 
