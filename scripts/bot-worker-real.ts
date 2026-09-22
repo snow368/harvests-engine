@@ -1250,6 +1250,19 @@ const recordRapport = () => {
   (likeState as any).rapportByDay[k] = ((likeState as any).rapportByDay[k] || 0) + 1;
 };
 
+// 🔴 2026-09-22 事故固化：这个探针变量**必须显式声明**。
+//   上一版（`62dba3d`）只写了 7 处赋值/读取、**漏了 `let`** ⇒ 本文件顶部有 `import`，
+//   tsx 按 **ESM** 加载 ⇒ **严格模式** ⇒ 第 1257 行赋值即抛
+//   `ReferenceError: lastRapportLikeProbe is not defined`，被本函数末尾
+//   `catch { return 0; }` 吞掉 ⇒ **回赞/赞帖全部静默返回 0**（不是没点中，是函数第一步就崩了）。
+//   更连锁的一步：Pass B 的 `comment_engager_like_miss` 打点也要读这个变量
+//   ⇒ 同一次 ReferenceError 逃出 Pass B 循环 → 被 `checkCommentEngagers` 外层
+//   `catch {}` 吃掉 ⇒ **Pass C（给回复点赞）整段也一起停**。
+//   线上实证：07:22Z 上线后 `comment_engager_like_back` / `_miss` / `_reply_like` 全 0。
+//   ⇒ 教训：ESM 下「忘声明」不是警告，是**当场抛错**；且被 `catch {}` 吞掉后与「0 成果」同形。
+let lastRapportLikeProbe: Record<string, unknown> = {};
+let lastRapportLikeErrMsg = '';
+
 // 给某号近期帖子点 n 篇赞（建立"同行在关注你"的好感信号）。返回实际点赞数。
 const rapportLikePosts = async (handle: string, n: number, countRapport = true): Promise<number> => {
   if (!page) return 0;
@@ -1360,7 +1373,18 @@ const rapportLikePosts = async (handle: string, n: number, countRapport = true):
     }
     if (already > 0) logBehavior('rapport_like_summary', { handle, postsFound: total, liked, already });
     return liked + already;
-  } catch { return 0; }
+  } catch (e: any) {
+    // 🔴 2026-09-22：原来这里是裸 `catch { return 0; }` ⇒ **结果恒 0** 与「代码崩了」完全同形，
+    //   本轮就是靠这个把一次 ReferenceError 藏了 1 小时（回赞 0 条却查不出原因）。
+    //   正常运行期这里只接「协议/出网抖动」；一旦是**代码级错误**（未声明变量、类型错），
+    //   必须留痕。按错误串去重，避免系统性错误每轮刷屏。
+    const msg = String(e?.message || e).slice(0, 160);
+    if (msg !== lastRapportLikeErrMsg) {
+      lastRapportLikeErrMsg = msg;
+      logBehavior('rapport_like_error', { handle, error: msg });
+    }
+    return 0;
+  }
 };
 
 // ── 回赞（like-back）：2026-09-15 用户拍板「不主动关注，改靠互动吸引对方关注」──
@@ -2672,7 +2696,12 @@ const checkCommentEngagers = async () => {
       } catch {}
       await sleep(jitter(3000, 6000));
     }
-  } catch {}
+  } catch (e: any) {
+    // 🔴 2026-09-22 事故固化：外层原来是裸 `catch {}` ⇒ **Pass B/C 任何代码级异常都会整段
+    //   静默消失**，线上表现只是「这两个动作 0 条」，与「在跑但没命中」完全同形
+    //   （本轮就因此白排查了 1 小时）。可见性优先：宁可多一条错误打点，也不要「安静的 0」。
+    logBehavior('comment_engager_error', { msg: String(e?.message || e).slice(0, 180) });
+  }
 };
 
 // ── 2026-09-19 用户拍板：历史评论帖回扫（retroactive back-scan）──────────────
