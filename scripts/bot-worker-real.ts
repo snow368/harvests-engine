@@ -2557,6 +2557,9 @@ const checkCommentEngagers = async () => {
     });
     if (engagers.length) logBehavior('comment_engager_pass_a', { engagers: engagers.length, pending: engagerPending.length, slice: 20 });
     for (const h of engagerPending.slice(0, 20)) {
+      // 自己的号不参与互动（Pass C 早有这道门，Pass A/3.5/B 一直缺 ⇒ 白开一次主页、
+      // 甚至把「赞自己的帖」排进回赞队列）。
+      if (isOwnAccountHandle(h)) continue;
       const st = (likeState.follows!.byHandle![h] || (likeState.follows!.byHandle![h] = {})) as any;
       if (st.followedAt || st.commentEngagerProcessed) continue;
       try {
@@ -2591,6 +2594,7 @@ const checkCommentEngagers = async () => {
     //   只做一次（`commentEngagerRejudgedAt` 标记）；开主页贵 ⇒ 每轮限额。
     for (const h of Object.keys(likeState.follows?.byHandle || {})) {
       if (rejudged >= ENGAGER_REJUDGE_PER_ROUND) break;
+      if (isOwnAccountHandle(h)) continue; // 自己的号不重判、不回赞（开主页很贵，别浪费在自号上）
       const rst = likeState.follows!.byHandle![h] as any;
       if (!rst || !rst.commentEngagerProcessed) continue;
       if (rst.commentEngagerSubject !== 'unknown') continue;
@@ -2617,6 +2621,7 @@ const checkCommentEngagers = async () => {
     for (const h of Object.keys(likeState.follows?.byHandle || {})) {
       const st = likeState.follows!.byHandle![h] as any;
       if (!st || !st.commentEngagerFollowAt) continue;
+      if (isOwnAccountHandle(h)) continue; // 执行点兜底：绝不赞自己
       if (Date.now() < st.commentEngagerFollowAt) continue;
       if (st.commentEngagerSubject && st.commentEngagerSubject !== 'tattoo') continue; // 仅 tattoo 相关
       // ① 回赞对方最新一篇帖 —— **这是本通道的主动作**（用户口径：「回赞，不是回关」）
