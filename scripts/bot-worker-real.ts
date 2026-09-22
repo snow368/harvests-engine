@@ -1342,6 +1342,9 @@ const recordReplyLike = () => {
 //   ⇒ **回赞全被拒、只剩回关在跑**（正是用户看到的现象）。
 //   ⇒ 回赞改走独立账 E，不再与 ①回扫 争 B 账。
 const ENGAGER_LIKE_DAILY_MAX = Math.max(0, Number(process.env.BOT_ENGAGER_LIKE_MAX || 20));
+// 🔴 2026-09-22：旧账重判每轮上限。修复期（bio 选择器全失配）被误判成 unknown 的互动者
+//   因 `commentEngagerProcessed=true` 永久卡死，需要重判才能进 Pass B。开主页很贵 ⇒ 限额。
+const ENGAGER_REJUDGE_PER_ROUND = Math.max(0, Number(process.env.BOT_ENGAGER_REJUDGE_PER_ROUND || 5));
 const engagerLikeToday = () => Number((likeState as any).engagerLikeByDay?.[getTodayKey()] || 0);
 const recordEngagerLike = () => {
   const k = getTodayKey();
@@ -2503,6 +2506,37 @@ const checkCommentEngagers = async () => {
       } catch {}
       await sleep(jitter(2500, 5000));
     }
+    let rejudged = 0;
+    // 3.5) 旧账重判（2026-09-22）：修复期残留的 `subject:'unknown'` 死卡
+    //   `8d2eea4` 之前 bio 选择器**全部失配** ⇒ 那批互动者被判成 unknown，且当时就写了
+    //   `commentEngagerProcessed=true` ⇒ Pass A 的 pending 过滤（只收未处理者）**永远不会再碰
+    //   他们** ⇒ 下面 Pass B 的 `subject !== 'tattoo'` 把他们整片跳过（实测 16 人）。
+    //   这 16 人很可能真是纹身号（unknown = 没读到 ≠ 不相关），给**一次**重判机会。
+    //   放在 Pass B **之前** ⇒ 本轮判成 tattoo 的人同一轮就能被回赞，不必再等 20~28h。
+    //   只做一次（`commentEngagerRejudgedAt` 标记）；开主页贵 ⇒ 每轮限额。
+    for (const h of Object.keys(likeState.follows?.byHandle || {})) {
+      if (rejudged >= ENGAGER_REJUDGE_PER_ROUND) break;
+      const rst = likeState.follows!.byHandle![h] as any;
+      if (!rst || !rst.commentEngagerProcessed) continue;
+      if (rst.commentEngagerSubject !== 'unknown') continue;
+      if (rst.commentEngagerRejudgedAt) continue;
+      try {
+        await openProfile(h);
+        await page.waitForTimeout(jitter(1000, 2000));
+        const rfacts = await captureProfileFacts().catch(() => null);
+        const rtext = `${rfacts?.bio || ''} ${rfacts?.categoryLabel || ''} ${rfacts?.category || ''} ${rfacts?.title || ''}`.trim();
+        const rsubject = rtext ? detectSubject(rtext, [], h).subject : 'unknown';
+        rst.commentEngagerSubject = rsubject;
+        rst.commentEngagerRejudgedAt = Date.now();
+        // 判成 tattoo ⇒ 立刻到点，本轮 Pass B 直接消费（else 置 0 ⇒ Pass B 的
+        //   `!commentEngagerFollowAt` 会跳过，等于永久除名，不再每轮空开主页）
+        rst.commentEngagerFollowAt = rsubject === 'tattoo' ? Date.now() : 0;
+        saveLikeState(likeState);
+        logBehavior('comment_engager_rejudge', { handle: h, subject: rsubject, srcLen: rtext.length, srcHits: (rfacts?.categorySignals?.textPositiveHits || []).slice(0, 3) });
+      } catch {}
+      rejudged++;
+      await sleep(jitter(2500, 5000));
+    }
     // 4) Pass B：遍历持久化状态，次日已到点的 tattoo 互动者 → 先「回赞」建立互动；
     //    回关仅当 BOT_FOLLOW_BACK_ENABLED 开时执行（默认关，关掉不影响回赞）
     for (const h of Object.keys(likeState.follows?.byHandle || {})) {
@@ -2519,11 +2553,11 @@ const checkCommentEngagers = async () => {
         if (got > 0) {
           st.commentEngagerLikedAt = Date.now();
           saveLikeState(likeState);
-          logBehavior('comment_engager_like_back', { handle: h, liked: got, dayCount: engagerLikeToday(), dayCap: ENGAGER_LIKE_DAILY_MAX, account: 'E' });
+          logBehavior('comment_engager_like_back', { handle: h, liked: got, dayCount: engagerLikeToday(), dayCap: ENGAGER_LIKE_DAILY_MAX, ledger: 'E' });
           await sleep(jitter(3000, 6000));
         } else if (ENGAGER_LIKE_DAILY_MAX > 0 && engagerLikeToday() >= ENGAGER_LIKE_DAILY_MAX) {
           // 账 E 用尽：只放弃本轮回赞，**不**标记完成（欠账可补），也不退出循环。
-          logBehavior('comment_engager_like_quota_out', { handle: h, dayCount: engagerLikeToday(), dayCap: ENGAGER_LIKE_DAILY_MAX, account: 'E' });
+          logBehavior('comment_engager_like_quota_out', { handle: h, dayCount: engagerLikeToday(), dayCap: ENGAGER_LIKE_DAILY_MAX, ledger: 'E' });
         }
       }
       // ② 回关 = **回赞的从属动作**（2026-09-22 用户口径：「回赞，不是回关啊」）
