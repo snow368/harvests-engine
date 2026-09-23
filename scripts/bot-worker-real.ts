@@ -1317,8 +1317,26 @@ const rapportLikePosts = async (handle: string, n: number, countRapport = true):
             || document.querySelector('article')
             || document.querySelector('[role="dialog"]')
             || document) as ParentNode;
-          const like = scope.querySelector('[aria-label="Like"]');
-          const unlike = scope.querySelector('[aria-label="Unlike"]');
+          // 🔴 2026-09-23 二修（用户报障原话：「点赞出错了，人家帖子的评论都在点赞」）：
+          //   旧码 `scope.querySelector('[aria-label="Like"]')` 的作用域是 **article**，
+          //   而 IG 帖子弹窗的**评论区也在同一个 article 内**，每条评论各有一颗 Like 图标
+          //   （实测 `likeInScope` 最高到 **16**）。`querySelector` 取 DOM 顺序**第一个**
+          //   ⇒ 当帖子**本身已赞**（其按钮此刻是 Unlike）时，第一个 `[aria-label="Like"]`
+          //   落在**评论**上 ⇒ 点下去 = **给评论点赞**，而代码以为自己赞的是帖子。
+          //   实证（15:21 北京，60 条 `no_effect`）：多条 probe **同时**出现
+          //   `likeInScope>0 且 unlikeInScope>0`（1/3、3/1、5/6、4/4、2/1）
+          //   ⇒ 正是「帖子已赞 + 评论区还有未赞评论」的形态。
+          //   改法：**先过滤再取** —— 评论一律渲染在 `<ul>` 内，帖子本体的赞按钮不在任何
+          //   `<ul>` 内 ⇒ 只认「不在 ul 内」的那一颗。过滤后为空 ⇒ 判该位已赞/无按钮
+          //   （**宁可判 already 不点，也绝不点错对象**）。
+          //   ⚠️ 兜底：若哪天 IG 改用非 ul 结构渲染评论，`closest('ul')` 会恒 false
+          //   ⇒ 退化成旧行为（取第一个），不产生新伤害；诊断字段会直接暴露这一点。
+          const candsL = Array.from(scope.querySelectorAll('[aria-label="Like"]'));
+          const candsU = Array.from(scope.querySelectorAll('[aria-label="Unlike"]'));
+          const outL = candsL.filter((e) => !e.closest('ul'));
+          const outU = candsU.filter((e) => !e.closest('ul'));
+          const like = outL.length ? outL[0] : null;
+          const unlike = outU.length ? outU[0] : null;
           if (like) like.setAttribute('data-bscan-plike', '1');
           return {
             reason: like ? 'like' : (unlike ? 'already' : 'none'),
@@ -1330,8 +1348,14 @@ const rapportLikePosts = async (handle: string, n: number, countRapport = true):
             // 🔴 2026-09-22：作用域**内**的计数（与点击后的回读同口径）⇒ 才能做
             //   「点击前 like 3 / 点击后 like 2 且 unlike +1」这种**同作用域差分**判定，
             //   不靠页面级计数（会被背景网格污染）。纯观测，不影响判定。
-            likeInScope: scope.querySelectorAll('[aria-label="Like"]').length,
-            unlikeInScope: scope.querySelectorAll('[aria-label="Unlike"]').length,
+            likeInScope: candsL.length,
+            unlikeInScope: candsU.length,
+            // 🔴 2026-09-23 诊断（**只观测不判定**）：把候选按「在 ul 内 / 不在 ul 内」分开数，
+            //   下轮可据实确认「帖子本体的赞按钮 = 不在 ul 内」这条判据是否成立。
+            likeInUl: candsL.length - outL.length,
+            likeNotInUl: outL.length,
+            unlikeInUl: candsU.length - outU.length,
+            unlikeNotInUl: outU.length,
           };
         }).catch(() => ({ reason: 'eval_failed' }));
         lastRapportLikeProbe = { handle, idx: i, ...(pick || {}) };
@@ -1374,7 +1398,19 @@ const rapportLikePosts = async (handle: string, n: number, countRapport = true):
             };
           }).catch(() => null);
           const after = afterR ? afterR.state : 'eval_failed';
-          const likeD = afterR && pick ? Number(pick.likeInScope) - Number(afterR.likeInScope) : null;
+          // 🔴 2026-09-23 定案：两行差分方向必须**一致**，且统一为「点击后 − 点击前」。
+          //   成功点赞 = Like 图标 **−1**、Unlike 图标 **+1**（那颗心由 Like 翻成 Unlike）
+          //   ⇒ `likeD` 必须等于 **-1**、`unlikeD` 必须等于 **+1**。
+          //   现状是**两行方向相反**：`unlikeD` 已写成 `after - pick`（+1 ✓），
+          //   而 `likeD` 还是 `pick - after`（成功时算出 **+1**）⇒ 与判据 `likeD === -1`
+          //   **恒不相等** ⇒ `confirmed` 永远 false。
+          //   实证（2026-09-23 15:21 北京）：60 条 `rapport_like_click_no_effect` 的
+          //   `scopeDelta` 全是 `3→2 / 1→2`、`4→3 / 4→5` 这类**干净的 1:1 互换**
+          //   （= 赞确实落地），却 100% 被记成 no_effect；而 `rapport_like_click_confirmed`
+          //   恒 **0 条**（这个串只有该分支才会打）⇒ 正是符号不一致的直接指纹。
+          //   后果（与 09-22 那次同源）：`liked` 不增 ⇒ 账 E 不写 `commentEngagerLikedAt`
+          //   ⇒ 每轮重开主页、重复点同一批号 ⇒ 叠加本次「点错到评论」⇒ 越点越乱。
+          const likeD = afterR && pick ? Number(afterR.likeInScope) - Number(pick.likeInScope) : null;
           const unlikeD = afterR && pick ? Number(afterR.unlikeInScope) - Number(pick.unlikeInScope) : null;
           const sameScope = !!(afterR && pick && afterR.scope === pick.scope);
           // 🔴 2026-09-22 定案（人工取证后，撤销上一版的「只观测不判定」）：
