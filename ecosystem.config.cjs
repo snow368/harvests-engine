@@ -238,9 +238,12 @@ const apps = [
       // 旧行为：陌生目标帖(task_review) 与 已关注我们的号(follow_back_ladder) **共用**一个额度，
       //   实测 comment_skip_draft_daily_target 是全链路最高频事件且 source 全是 ladder
       //   ⇒ 真正带来新曝光的陌生目标帖被挤掉。这才是「新人量上不去」的根因。
-      // 新行为：两路独立额度，陌生人占大头（默认 30–40 vs 6–10）；代码内两段上界硬顶 50。
-      BOT_COMMENT_DRAFT_STRANGER_MIN: '30',
-      BOT_COMMENT_DRAFT_STRANGER_MAX: '40',
+      // 新行为：两路独立额度，陌生人占大头；2026-09-26 用户拍板目标「每天供审 50–100 条」
+      //   ⇒ 陌生人 30–40 → **55–85**（+ladder 6–10 = 61–95/天），代码内上界硬顶同步 50 → 100。
+      //   ⚠️ 草稿只是 DB 行数，不产生 IG 动作 ⇒ 对账号无风险；真正对外的是下面的发布上限。
+      //   ⚠️ 上限受**任务供给**约束：ig-scheduler 3/轮 × 24 = 72/天，refill 兜底 100/天。
+      BOT_COMMENT_DRAFT_STRANGER_MIN: '55',
+      BOT_COMMENT_DRAFT_STRANGER_MAX: '85',
       BOT_COMMENT_DRAFT_LADDER_MIN: '6',
       BOT_COMMENT_DRAFT_LADDER_MAX: '10',
       // ⚠️ 发布上限是**人工审核吞吐**的天花板，不是 bot 产能。当前实测只跑到 6–16/天。

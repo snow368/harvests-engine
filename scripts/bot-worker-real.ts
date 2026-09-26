@@ -154,12 +154,15 @@ const BOT_COMMENT_PUBLISH_DAILY_MAX = Math.max(0, Math.min(50, Number(process.en
 //   而 40min 窗口内 7 次 skip 的 source 全是 ladder ⇒ 真正带来新曝光的陌生目标帖被挤掉。
 //   这就是「新人评论量上不去」的根因，不是总量不够。
 // 新行为：两路各有独立日额度，陌生人占大头（默认 30–40 vs 6–10），互不挤占。
-// 注意：两段上界仍受 Math.min(50) 硬顶（总草稿 ≤50/天，按 IG 行为安全线定）。
+// 2026-09-26 用户拍板：目标改为「每天供审 50–100 条」。上界硬顶 50 → 100 —— 这只是一条
+//   **DB 行数**上限，不产生任何 IG 动作（真正对外的闸门是 BOT_COMMENT_PUBLISH_DAILY_MAX
+//   与发布间隔），所以放宽草稿额度对账号行为无风险；实际值仍由 env 给（见 ecosystem.config.cjs）。
+//   注意：草稿量受「当日任务供给」约束 —— ig-scheduler 3/轮 × 24 轮 = 72/天，refill 兜底 100/天。
 const clampCmt = (n: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, n));
-const BOT_COMMENT_DRAFT_STRANGER_MIN = clampCmt(Number(process.env.BOT_COMMENT_DRAFT_STRANGER_MIN || 30), 0, 50);
-const BOT_COMMENT_DRAFT_STRANGER_MAX = clampCmt(Number(process.env.BOT_COMMENT_DRAFT_STRANGER_MAX || 40), BOT_COMMENT_DRAFT_STRANGER_MIN, 50);
-const BOT_COMMENT_DRAFT_LADDER_MIN = clampCmt(Number(process.env.BOT_COMMENT_DRAFT_LADDER_MIN || 6), 0, 50);
-const BOT_COMMENT_DRAFT_LADDER_MAX = clampCmt(Number(process.env.BOT_COMMENT_DRAFT_LADDER_MAX || 10), BOT_COMMENT_DRAFT_LADDER_MIN, 50);
+const BOT_COMMENT_DRAFT_STRANGER_MIN = clampCmt(Number(process.env.BOT_COMMENT_DRAFT_STRANGER_MIN || 30), 0, 100);
+const BOT_COMMENT_DRAFT_STRANGER_MAX = clampCmt(Number(process.env.BOT_COMMENT_DRAFT_STRANGER_MAX || 40), BOT_COMMENT_DRAFT_STRANGER_MIN, 100);
+const BOT_COMMENT_DRAFT_LADDER_MIN = clampCmt(Number(process.env.BOT_COMMENT_DRAFT_LADDER_MIN || 6), 0, 100);
+const BOT_COMMENT_DRAFT_LADDER_MAX = clampCmt(Number(process.env.BOT_COMMENT_DRAFT_LADDER_MAX || 10), BOT_COMMENT_DRAFT_LADDER_MIN, 100);
 const BOT_COMMENT_PUBLISH_INTERVAL_MIN_SEC = Math.max(60, Number(process.env.BOT_COMMENT_PUBLISH_INTERVAL_MIN_SEC || 8 * 60));
 const BOT_COMMENT_PUBLISH_INTERVAL_MAX_SEC = Math.max(
   BOT_COMMENT_PUBLISH_INTERVAL_MIN_SEC,
