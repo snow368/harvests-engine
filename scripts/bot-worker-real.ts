@@ -141,11 +141,15 @@ const BOT_COMMENT_ENABLED = String(process.env.BOT_COMMENT_ENABLED || 'false').t
 const BOT_DEBUG = String(process.env.BOT_DEBUG || 'false').toLowerCase() === 'true';
 const dbg = (...args: any[]) => { if (BOT_DEBUG) console.error(...args); };
 const BOT_COMMENT_CHANCE = Math.max(0, Math.min(1, Number(process.env.BOT_COMMENT_CHANCE || 0.2)));
-const BOT_COMMENT_DRAFT_DAILY_MIN = Math.max(0, Math.min(50, Number(process.env.BOT_COMMENT_DRAFT_DAILY_MIN || 15)));
+// ⚠️ 这两个只喂状态面板（meta.dailyPlan.commentDraftMin/Max），**不是闸门**（真闸门见下方 STRANGER_*）。
+//    2026-09-26：其自身的 Math.min 硬顶 50 → 100 —— 否则把 env 提到 55/85 时面板会被夹成 50/50，
+//    与真实闸门不一致（踩过：只改了 STRANGER 那层，面板仍显示 50/50）。
+const BOT_COMMENT_DRAFT_DAILY_MIN = Math.max(0, Math.min(100, Number(process.env.BOT_COMMENT_DRAFT_DAILY_MIN || 15)));
 const BOT_COMMENT_DRAFT_DAILY_MAX = Math.max(
   BOT_COMMENT_DRAFT_DAILY_MIN,
-  Math.min(50, Number(process.env.BOT_COMMENT_DRAFT_DAILY_MAX || process.env.BOT_COMMENT_DAILY_MAX || 25)),
+  Math.min(100, Number(process.env.BOT_COMMENT_DRAFT_DAILY_MAX || process.env.BOT_COMMENT_DAILY_MAX || 25)),
 );
+// 发布侧硬顶保持 50：这是**对外**动作，与草稿（DB 行）不同，不放宽。
 const BOT_COMMENT_PUBLISH_DAILY_MAX = Math.max(0, Math.min(50, Number(process.env.BOT_COMMENT_PUBLISH_DAILY_MAX || 12)));
 
 // ── 2026-09-19 用户拍板：草稿额度**按来源拆分**（「让 bot 每天评论几十个新人」）────────
