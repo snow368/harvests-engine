@@ -232,8 +232,9 @@ const apps = [
       BOT_COMMENT_ENABLED: 'true',
       // （评论抽签率 BOT_COMMENT_CHANCE 见下方「互动优先策略」区块）
       // ⚠️ 以下 MIN/MAX 自 2026-09-19 起只作**总量参考**（状态面板用）；真正生效的是下面的分额键。
-      BOT_COMMENT_DRAFT_DAILY_MIN: '25',
-      BOT_COMMENT_DRAFT_DAILY_MAX: '40',
+      //   2026-09-26 与分额同步提到 55–85，否则面板显示 25/40 会与真实闸门不一致。
+      BOT_COMMENT_DRAFT_DAILY_MIN: '55',
+      BOT_COMMENT_DRAFT_DAILY_MAX: '85',
       // ── 草稿额度按来源分账（2026-09-19 用户拍板「让 bot 每天评论几十个新人」）──
       // 旧行为：陌生目标帖(task_review) 与 已关注我们的号(follow_back_ladder) **共用**一个额度，
       //   实测 comment_skip_draft_daily_target 是全链路最高频事件且 source 全是 ladder
