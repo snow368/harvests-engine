@@ -227,7 +227,7 @@ const apps = [
       BOT_DAILY_LIKE_OVERRIDE: '0',
       BOT_LIKE_COOLDOWN_MIN_HOURS: '24',
       BOT_LIKE_COOLDOWN_MAX_HOURS: '72',
-      // 评论：80 条数据中生成 25-40 条待审草稿；人工审核后每天最多发布 20 条。
+      // 评论：每天供审 55-85 条草稿（陌生 55-85 + ladder 6-10）；人工审核后每天最多发布 30 条。
       // （2026-09-17 从 VPS 回收：VPS 实测一直是 25/40/20，仓库默认 15/25/12 会把评论量砍掉约 40%）
       BOT_COMMENT_ENABLED: 'true',
       // （评论抽签率 BOT_COMMENT_CHANCE 见下方「互动优先策略」区块）
@@ -315,7 +315,8 @@ const apps = [
       BOT_DM_DAILY_MAX: '15',
       // 评论抽签率：每次访问目标号生成草稿的概率。
       //   0.4 → 1（2026-09-15 定）：不关注任何人之后，评论是唯一的涨粉主力动作，抽签率拉满；
-      //   真正的日闸门是 BOT_COMMENT_DRAFT_DAILY_MIN/MAX（当前 25-40，见上方评论区块），不是这里。
+      //   真正的日闸门是 **按来源分账**的 BOT_COMMENT_DRAFT_STRANGER_MIN/MAX（当前 55-85，
+      //   见上方评论区块）；BOT_COMMENT_DRAFT_DAILY_MIN/MAX 自 2026-09-19 起只喂状态面板。
       //   ⚠️ VPS 实测长期就是 1，曾因本模板写 0.7 被误改小（改小 = 直接少 30% 评论）。
       BOT_COMMENT_CHANCE: '1',
       // 视觉分析（Qwen-VL 多模态，经阿里云 DashScope OpenAI 兼容端点）：看图产出图观测，注入评论生成。
