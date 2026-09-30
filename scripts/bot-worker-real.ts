@@ -5225,6 +5225,54 @@ const collectCommentBoxDiagnostics = async (draftId: string) => {
   } catch {}
 };
 
+// 2026-09-30（B 方案）：把长评论切成多段逐段输入。
+// 依据：Playwright 的 `timeout` 是「单次动作」上限，不是会话上限 ⇒ 拆成多次
+// pressSequentially，每次调用各自拥有独立的 30s 窗口，天然绕过默认 30s 悬崖；
+// 段间停顿用 page.waitForTimeout()（纯计时器，不接受 timeout、不受 setDefaultTimeout
+// 影响），因此停顿多久都不计入任何动作超时。分段的真正约束是任务层租约
+// （comment_drafts 认领租约 15 分钟、automation_tasks 派发租约 45 分钟），见
+// harvests-cloud-api/src/index.ts 的 DRAFT_PUBLISH_LEASE_MINUTES。
+// 不可变式：segments.join('') 必须逐字等于原文 —— 本函数只做 slice，不删改任何字符。
+const splitForTyping = (text: string, targetLen = 70, maxSegments = 12): string[] => {
+  if (!text) return [];
+  // 软切点：优先落在标点/空格之后，避免停顿断在词中间。
+  const soft = new Set('.!?。！？…;；,，、 \n\t'.split(''));
+  // 组合字符连接符：切开会让 emoji 变样（👨‍👩‍👧 被拆成两个独立 emoji）。
+  const joiners = new Set(['\u200d', '\ufe0f', '\ufe0e', '\u20e3', '\u200b']);
+  const lowRatio = Math.max(1, Math.round(targetLen * 0.85));  // 软切下限 ≈ 60 字
+  const hardLen = Math.max(2, Math.round(targetLen * 1.4));    // 硬切上限 ≈ 98 字
+  // 切点安全：不得把代理对（emoji 的 UTF-16 两端）或组合序列切开。
+  const safeCut = (i: number) => {
+    if (i <= 0 || i >= text.length) return false;
+    const prev = text.charCodeAt(i - 1);
+    const cur = text.charCodeAt(i);
+    if (prev >= 0xd800 && prev <= 0xdbff) return false;
+    if (cur >= 0xdc00 && cur <= 0xdfff) return false;
+    if (joiners.has(text[i - 1]) || joiners.has(text[i])) return false;
+    return true;
+  };
+  const segments: string[] = [];
+  let start = 0;
+  for (let i = 1; i < text.length; i++) {
+    const len = i - start;
+    const softHit = len >= lowRatio && soft.has(text[i - 1]);
+    if ((softHit || len >= hardLen) && safeCut(i)) {
+      segments.push(text.slice(start, i));
+      start = i;
+    }
+  }
+  if (start < text.length) segments.push(text.slice(start));
+  // 段数超上限时按序合并（纯切片拼接 ⇒ join 不变量不受影响）。
+  // 关键是别退回「一次打完」—— 那样就丢掉了分段的意义。
+  if (maxSegments > 0 && segments.length > maxSegments) {
+    const step = Math.ceil(segments.length / maxSegments);
+    const merged: string[] = [];
+    for (let i = 0; i < segments.length; i += step) merged.push(segments.slice(i, i + step).join(''));
+    return merged;
+  }
+  return segments;
+};
+
 const tryPostCommentOnOpenModal = async (
   text: string,
   approval: { draftId: string; approvedAt: string; approvedBy: string }
@@ -5257,28 +5305,82 @@ const tryPostCommentOnOpenModal = async (
   // previously deleted characters without restoring them, so type exactly and
   // verify the DOM value before Instagram receives the submit action.
   await textarea.fill('');
-  // 2026-09-30：长评论发不出去的根因 = 打字耗时撞上 Playwright 默认 30s 动作上限。
-  // scaleDelay 有 150ms 硬下限 ⇒ jitter(55,140) 实际恒为每键 150ms；脚本从未调用
-  // setDefaultTimeout() ⇒ 180 字 ≈ 27s + 每键 CDP 往返，正压在 30s 悬崖上。
-  // 修法：总时长按字数封顶 ≤18s（≤120 字仍 150ms，行为不变）；超时回退瞬时 fill，
-  // 文本完整性交给紧随其后的 DOM 校验（不一致会 throw，不会发错）。
-  const typeBudgetMs = Math.max(6_000, Math.min(18_000, text.length * 150));
-  const perCharDelay = Math.max(45, Math.min(150, Math.floor(typeBudgetMs / Math.max(1, text.length))));
-  try {
-    await textarea.pressSequentially(text, {
-      delay: perCharDelay,
-      timeout: typeBudgetMs + 45_000,
-    });
-  } catch (typeErr: any) {
-    logBehavior('comment_publish_type_timeout', {
-      draftId: approval.draftId,
-      chars: text.length,
-      budgetMs: typeBudgetMs,
-      delay: perCharDelay,
-      err: String(typeErr?.message || typeErr).slice(0, 160),
-    });
-    // 瞬时填充：文本完整性由紧随其后的 DOM 校验保证，不一致会 throw 而不是发出去。
-    await textarea.fill(text).catch(() => {});
+  // 2026-09-30：长评论发不出去的根因 = 打字耗时撞上 Playwright 默认 30s 动作上限
+  // （scaleDelay 有 150ms 硬下限 ⇒ jitter(55,140) 实际恒为每键 150ms；脚本从未调用
+  // setDefaultTimeout() ⇒ 180 字 ≈ 27s + 每键 CDP 往返，正压在 30s 悬崖上）。
+  // ---- 三级链条 ----
+  // B 主路径：分段打字 + 段间停顿。每段是独立动作 ⇒ 各自 30s 窗口，且能恢复
+  //   150ms/键的「像人」节奏（不再需要靠加速省时间）。
+  // A 备选：分段不可用或中途失败 ⇒ 退回「一次打完 + 放宽 timeout」。
+  // D 兜底：A 也失败 ⇒ 瞬时 fill；文本完整性由紧随其后的 DOM 校验保证（不一致即 throw）。
+  const singleBudgetMs = Math.max(6_000, Math.min(18_000, text.length * 150));
+  const perCharDelay = Math.max(45, Math.min(150, Math.floor(singleBudgetMs / Math.max(1, text.length))));
+  const SEGMENT_TIMEOUT_MS = 20_000;  // 每段自己的动作窗口
+  const SEGMENT_BUDGET_MS = 150_000;  // 分段总预算（含停顿），远小于 15 分钟草稿租约
+  const MAX_SEGMENTS = 12;            // 超限由 splitForTyping 按序合并，而不是放弃分段
+  const segments = splitForTyping(text, 70, MAX_SEGMENTS);
+  let typed = false;
+  if (segments.length > 1) {
+    try {
+      let spent = 0;
+      for (let i = 0; i < segments.length; i++) {
+        // 长文本会让评论框展开/重排，段间必须重新确认落点还在。
+        if (!(await textarea.isVisible().catch(() => false))) {
+          throw new Error('comment_box_lost_midtyping');
+        }
+        const segDelay = Math.max(60, Math.min(150, Math.floor((SEGMENT_TIMEOUT_MS * 0.7) / Math.max(1, segments[i].length))));
+        await textarea.pressSequentially(segments[i], { delay: segDelay, timeout: SEGMENT_TIMEOUT_MS });
+        spent += segments[i].length * segDelay;
+        if (i < segments.length - 1) {
+          // 多数段间短停，每第 3 次来一个长停（像人在想下一句）。
+          const pause = i % 3 === 2 ? jitter(4_500, 7_500) : jitter(1_400, 3_200);
+          spent += pause;
+          if (spent > SEGMENT_BUDGET_MS) {
+            // 预算用尽：剩余部分合并成一次打完（仍带放宽 timeout），不再插停顿。
+            const rest = segments.slice(i + 1).join('');
+            if (rest) await textarea.pressSequentially(rest, { delay: perCharDelay, timeout: 60_000 });
+            break;
+          }
+          await page.waitForTimeout(pause);
+        }
+      }
+      typed = true;
+      logBehavior('comment_publish_segmented', {
+        draftId: approval.draftId, chars: text.length, segments: segments.length,
+      });
+    } catch (segErr: any) {
+      logBehavior('comment_publish_segmented_failed', {
+        draftId: approval.draftId, chars: text.length, segments: segments.length,
+        err: String(segErr?.message || segErr).slice(0, 160),
+      });
+      // 半截文本必须先清掉：否则 A 会把整条文本接在半截之后，DOM 校验必挂。
+      await textarea.fill('').catch(() => {});
+    }
+  }
+  if (!typed) {
+    try {
+      await textarea.pressSequentially(text, {
+        delay: perCharDelay,
+        timeout: singleBudgetMs + 45_000,
+      });
+      typed = true;
+      if (segments.length > 1) {
+        logBehavior('comment_publish_type_single_fallback', {
+          draftId: approval.draftId, chars: text.length, segments: segments.length,
+        });
+      }
+    } catch (typeErr: any) {
+      logBehavior('comment_publish_type_timeout', {
+        draftId: approval.draftId,
+        chars: text.length,
+        budgetMs: singleBudgetMs,
+        delay: perCharDelay,
+        segments: segments.length,
+        err: String(typeErr?.message || typeErr).slice(0, 160),
+      });
+      // 瞬时填充：文本完整性由紧随其后的 DOM 校验保证，不一致会 throw 而不是发出去。
+      await textarea.fill(text).catch(() => {});
+    }
   }
 
   const readEnteredText = async () => textarea.evaluate((element: any) =>
