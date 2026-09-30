@@ -5240,19 +5240,46 @@ const tryPostCommentOnOpenModal = async (
     'form textarea',
     'div[contenteditable="true"][role="textbox"][aria-label*="comment" i]',
   ].join(', ')).first();
+  // 2026-09-30：原为 10s / 4s。线上 `locator.click: Timeout 4000ms exceeded` 65 条，
+  // 失败即 release，白烧一次 publish_attempts（满 3 次转 rejected 终态）。
   try {
-    await textarea.waitFor({ state: 'visible', timeout: 10_000 });
+    await textarea.waitFor({ state: 'visible', timeout: 20_000 });
   } catch {
+    // 2026-09-30：这个诊断函数早就写好了，却从未被调用（线上 comment_box_debug 恒 0）
+    // ⇒ 找不到评论框时只有事件名，分不清「页面慢 / 帖子不可访问 / 被登出」。
+    await collectCommentBoxDiagnostics(approval.draftId);
     return false;
   }
-  await textarea.click({ timeout: 4000 });
+  await textarea.click({ timeout: 15_000 });
   await page.waitForTimeout(jitter(400, 1000));
 
   // The approved draft is immutable at publish time. Simulated typo correction
   // previously deleted characters without restoring them, so type exactly and
   // verify the DOM value before Instagram receives the submit action.
   await textarea.fill('');
-  await textarea.pressSequentially(text, { delay: jitter(55, 140) });
+  // 2026-09-30：长评论发不出去的根因 = 打字耗时撞上 Playwright 默认 30s 动作上限。
+  // scaleDelay 有 150ms 硬下限 ⇒ jitter(55,140) 实际恒为每键 150ms；脚本从未调用
+  // setDefaultTimeout() ⇒ 180 字 ≈ 27s + 每键 CDP 往返，正压在 30s 悬崖上。
+  // 修法：总时长按字数封顶 ≤18s（≤120 字仍 150ms，行为不变）；超时回退瞬时 fill，
+  // 文本完整性交给紧随其后的 DOM 校验（不一致会 throw，不会发错）。
+  const typeBudgetMs = Math.max(6_000, Math.min(18_000, text.length * 150));
+  const perCharDelay = Math.max(45, Math.min(150, Math.floor(typeBudgetMs / Math.max(1, text.length))));
+  try {
+    await textarea.pressSequentially(text, {
+      delay: perCharDelay,
+      timeout: typeBudgetMs + 45_000,
+    });
+  } catch (typeErr: any) {
+    logBehavior('comment_publish_type_timeout', {
+      draftId: approval.draftId,
+      chars: text.length,
+      budgetMs: typeBudgetMs,
+      delay: perCharDelay,
+      err: String(typeErr?.message || typeErr).slice(0, 160),
+    });
+    // 瞬时填充：文本完整性由紧随其后的 DOM 校验保证，不一致会 throw 而不是发出去。
+    await textarea.fill(text).catch(() => {});
+  }
 
   const readEnteredText = async () => textarea.evaluate((element: any) =>
     typeof element.value === 'string' ? element.value : (element.innerText || element.textContent || '')
@@ -5281,12 +5308,24 @@ const tryPostCommentOnOpenModal = async (
   await page.waitForTimeout(jitter(500, 1500));
   const form = textarea.locator('xpath=ancestor::form[1]');
   const postButton = form.locator('button[type="submit"], button').filter({ hasText: /^Post$/i }).first();
+  // 2026-09-30：原为 5s。这一下超时 = 文字已打进去却没提交，草稿照样被 release。
   if ((await postButton.count()) > 0 && await postButton.isEnabled().catch(() => false)) {
-    await postButton.click({ timeout: 5000 });
+    await postButton.click({ timeout: 15_000 });
   } else {
     await textarea.press('Enter');
   }
   await page.waitForTimeout(jitter(1500, 3000));
+  // 2026-09-30：提交后复核（只读探针，不改 return 值 —— 改成 false 会触发重发/重复评论）。
+  try {
+    const left = canonicalizeEnteredText(await readEnteredText());
+    if (left.length > 0) {
+      logBehavior('comment_publish_submit_not_cleared', {
+        draftId: approval.draftId,
+        chars: text.length,
+        leftInBox: left.slice(0, 80),
+      });
+    }
+  } catch {}
   return true;
 };
 
