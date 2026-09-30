@@ -5262,6 +5262,11 @@ const splitForTyping = (text: string, targetLen = 70, maxSegments = 12): string[
     }
   }
   if (start < text.length) segments.push(text.slice(start));
+  // 尾段过短（<20 字）并入前一段：否则会出现「长停 6s 后只打 5 字」这种不自然节奏。
+  if (segments.length > 1 && segments[segments.length - 1].length < 20) {
+    const tail = segments.pop() || '';
+    segments[segments.length - 1] += tail;
+  }
   // 段数超上限时按序合并（纯切片拼接 ⇒ join 不变量不受影响）。
   // 关键是别退回「一次打完」—— 那样就丢掉了分段的意义。
   if (maxSegments > 0 && segments.length > maxSegments) {
